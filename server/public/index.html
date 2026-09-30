@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F4F6F9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1219" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>元启智能账单系统</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%231E2F52'/%3E%3Ctext x='32' y='44' font-size='34' font-weight='700' text-anchor='middle' fill='%23fff' font-family='PingFang SC, Microsoft YaHei, sans-serif'%3E元%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ 登录 / 注册 ============ -->
+  <section id="view-auth" class="auth" hidden>
+    <div class="auth-wrap">
+      <div class="brand">
+        <span class="brand-mark">元</span>
+        <div>
+          <div class="brand-name">元启智能账单系统</div>
+          <div class="brand-tag">AI 团队记账 · 项目账本</div>
+        </div>
+      </div>
+
+      <div class="card auth-card">
+        <div class="seg auth-seg" data-mode="login">
+          <span class="thumb"></span>
+          <button type="button" data-mode="login" class="on">登录</button>
+          <button type="button" data-mode="register">注册</button>
+        </div>
+
+        <form id="form-login" class="auth-form" novalidate>
+          <label class="field">
+            <span>用户名或手机号</span>
+            <input id="login-account" class="ctl" autocomplete="username" placeholder="例如 小王 或 138…" required>
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <div class="pw-wrap">
+              <input id="login-password" class="ctl" type="password" autocomplete="current-password" required>
+              <button type="button" class="pw-eye" data-eye="login-password" aria-label="显示密码"></button>
+            </div>
+          </label>
+          <p class="form-error" id="login-error" hidden></p>
+          <button class="btn primary big" type="submit"><span>登录</span></button>
+        </form>
+
+        <form id="form-register" class="auth-form" novalidate hidden>
+          <label class="field">
+            <span>用户名</span>
+            <input id="reg-username" class="ctl" maxlength="20" autocomplete="nickname" placeholder="团队里大家怎么称呼你" required>
+          </label>
+          <label class="field">
+            <span>手机号</span>
+            <input id="reg-phone" class="ctl" type="tel" inputmode="tel" autocomplete="tel" placeholder="用于登录" required>
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <div class="pw-wrap">
+              <input id="reg-password" class="ctl" type="password" minlength="6" autocomplete="new-password" placeholder="至少 6 位" required>
+              <button type="button" class="pw-eye" data-eye="reg-password" aria-label="显示密码"></button>
+            </div>
+          </label>
+          <p class="form-error" id="reg-error" hidden></p>
+          <button class="btn primary big" type="submit"><span>创建账号并进入</span></button>
+        </form>
+      </div>
+      <p class="auth-foot">注册即加入团队，所有项目与流水对团队成员共享。</p>
+    </div>
+  </section>
+
+  <!-- ============ 主界面 ============ -->
+  <div id="shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#/">
+        <span class="brand-mark">元</span>
+        <div>
+          <div class="brand-name">元启智能账单系统</div>
+          <div class="brand-tag">AI 团队记账 · 项目账本</div>
+        </div>
+      </a>
+      <nav class="side-nav">
+        <a href="#/" data-nav="home"><i class="ico ico-home"></i>总览</a>
+        <a href="#/reports" data-nav="reports"><i class="ico ico-chart"></i>报表</a>
+        <a href="#/me" data-nav="me"><i class="ico ico-user"></i>我的</a>
+      </nav>
+      <div class="side-section">
+        <span>项目</span>
+        <button id="side-new-project" class="icon-btn" title="新建项目" aria-label="新建项目"><i class="ico ico-plus"></i></button>
+      </div>
+      <div id="side-projects" class="side-projects"></div>
+      <button id="side-add" class="btn primary big">记一笔 <kbd>N</kbd></button>
+      <div id="side-user" class="side-user"></div>
+    </aside>
+
+    <main id="main">
+      <section id="view-home" class="view" hidden></section>
+      <section id="view-project" class="view" hidden></section>
+      <section id="view-reports" class="view" hidden></section>
+      <section id="view-me" class="view" hidden></section>
+    </main>
+
+    <nav class="tabbar">
+      <a href="#/" data-nav="home"><i class="ico ico-home"></i><span>总览</span></a>
+      <a href="#/reports" data-nav="reports"><i class="ico ico-chart"></i><span>报表</span></a>
+      <button id="tab-add" class="fab" aria-label="记一笔"><i class="ico ico-plus"></i></button>
+      <a href="#/me" data-nav="me"><i class="ico ico-user"></i><span>我的</span></a>
+    </nav>
+  </div>
+
+  <!-- ============ 记一笔 ============ -->
+  <div id="sheet-entry" class="sheet" aria-hidden="true">
+    <div class="backdrop" data-close></div>
+    <form class="panel entry-panel" id="form-entry" novalidate>
+      <div class="grab"></div>
+      <div class="sheet-head">
+        <h3 id="entry-sheet-title">记一笔</h3>
+        <button type="button" class="icon-btn" data-close aria-label="关闭"><i class="ico ico-x"></i></button>
+      </div>
+
+      <div class="seg type-seg" id="type-seg" data-type="expense">
+        <span class="thumb"></span>
+        <button type="button" data-type="expense" class="on">支出</button>
+        <button type="button" data-type="income">收入</button>
+      </div>
+
+      <div class="amount-row">
+        <span class="sym" id="amount-sym">¥</span>
+        <input id="amount" inputmode="decimal" placeholder="0.00" autocomplete="off" spellcheck="false" aria-label="金额">
+      </div>
+      <div class="chips cur-chips" id="cur-chips" role="radiogroup" aria-label="币种">
+        <button type="button" class="chip on" data-cur="CNY"><b>¥</b>人民币</button>
+        <button type="button" class="chip" data-cur="USDT"><b>₮</b>USDT</button>
+        <button type="button" class="chip" data-cur="USD"><b>$</b>美元</button>
+      </div>
+
+      <div class="field" id="rate-field" hidden>
+        <span>汇率 <em id="rate-hint" class="muted">记账时的汇率，之后改全局汇率不影响这笔</em></span>
+        <div class="time-row rate-row"><b id="rate-prefix">1 USDT =</b><input id="entry-rate" class="ctl" inputmode="decimal" placeholder="7.2"><b>CNY</b></div>
+      </div>
+      <div class="field">
+        <span>项目</span>
+        <div class="chips" id="proj-chips"></div>
+      </div>
+      <div class="field">
+        <span id="handler-label">谁付的</span>
+        <div class="chips" id="handler-chips"></div>
+      </div>
+      <div class="field">
+        <span>备注</span>
+        <input id="note" class="ctl" maxlength="200" placeholder="例如：服务器续费、客户回款…" autocomplete="off">
+      </div>
+      <div class="field time-field">
+        <span>时间 <em id="time-hint" class="muted">自动记录为现在，可修改</em></span>
+        <div class="time-row"><input id="entry-time" class="ctl" type="datetime-local" step="60"><button type="button" class="btn ghost" id="time-now">现在</button></div>
+      </div>
+
+      <p class="form-error" id="entry-error" hidden></p>
+      <button class="btn primary big" type="submit" id="entry-submit"><span>记录支出</span></button>
+      <button class="btn ghost danger big" type="button" id="entry-delete" hidden>删除这条记录</button>
+      <p class="hint">可输入算式如 <code>120+80</code> · 也可以在右下角对 AI 说「小王付了 300U 广告费」</p>
+    </form>
+  </div>
+
+  <!-- ============ 新建 / 编辑项目 ============ -->
+  <div id="sheet-project" class="sheet" aria-hidden="true">
+    <div class="backdrop" data-close></div>
+    <form class="panel" id="form-project" novalidate>
+      <div class="grab"></div>
+      <div class="sheet-head">
+        <h3 id="project-sheet-title">新建项目</h3>
+        <button type="button" class="icon-btn" data-close aria-label="关闭"><i class="ico ico-x"></i></button>
+      </div>
+      <label class="field">
+        <span>项目名称</span>
+        <input id="project-name" class="ctl" maxlength="40" placeholder="例如：海外投放 Q4" autocomplete="off" required>
+      </label>
+      <label class="field">
+        <span>说明（可选）</span>
+        <input id="project-note" class="ctl" maxlength="200" placeholder="一句话描述这个项目" autocomplete="off">
+      </label>
+      <p class="form-error" id="project-error" hidden></p>
+      <button class="btn primary big" type="submit" id="project-submit"><span>创建项目</span></button>
+      <button class="btn ghost big" type="button" id="project-archive" hidden>归档项目</button>
+      <div id="project-danger" hidden>
+        <p class="muted" style="font-size:12px;margin:10px 0 6px">危险操作 · 删除后数据立刻从所有统计、报表和导出里消失，无法恢复</p>
+        <div class="row2">
+          <button class="btn ghost danger" type="button" id="project-clear">清空记录</button>
+          <button class="btn ghost danger" type="button" id="project-delete">删除项目</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- ============ AI 助手：群聊 / 私聊 / 知识库 ============ -->
+  <button id="ai-fab" class="ai-fab" aria-label="打开 AI 助手" hidden><i class="ico ico-spark"></i><span class="ai-fab-label">AI 助手</span><span class="badge" id="ai-badge" hidden></span></button>
+  <section id="chat" class="chat" hidden aria-label="AI 助手">
+    <header class="chat-head">
+      <div class="chat-chan">
+        <select id="chat-channel" class="ctl select chan-select" aria-label="选择会话"></select>
+        <button type="button" class="icon-btn" id="chat-new-group" title="新建项目群" aria-label="新建项目群"><i class="ico ico-plus"></i></button>
+      </div>
+      <div class="chat-actions">
+        <button type="button" class="icon-btn" id="chat-menu-btn" title="更多" aria-label="更多"><i class="ico ico-more"></i></button>
+        <button type="button" class="icon-btn" id="chat-close" title="收起" aria-label="收起"><i class="ico ico-x"></i></button>
+        <div class="chat-menu" id="chat-menu" hidden>
+          <div class="cm-title">发送方式</div>
+          <label class="cm-opt"><input type="radio" name="sendmode" value="enter"><span>Enter 发送，Shift+Enter 换行</span></label>
+          <label class="cm-opt"><input type="radio" name="sendmode" value="ctrl"><span>Ctrl / ⌘ + Enter 发送，Enter 换行（输入法友好）</span></label>
+          <div class="cm-sep"></div>
+          <button type="button" class="cm-item" id="cm-clear-screen">清屏（仅本机隐藏，服务器与知识库保留）</button>
+          <button type="button" class="cm-item" id="cm-show-all" hidden>显示被清屏的记录</button>
+          <button type="button" class="cm-item danger" id="cm-clear-dm" hidden>清空私聊记录（永久删除）</button>
+          <div class="cm-hint">自己发的消息 5 分钟内可撤回：电脑悬停消息、手机长按消息。</div>
+        </div>
+      </div>
+    </header>
+    <div class="chat-body" id="chat-body"></div>
+    <div class="chat-attach" id="chat-attach" hidden></div>
+    <div class="voice-bar" id="voice-bar" hidden><span class="voice-dot"></span><span id="voice-text">正在听…请说普通话，说完点麦克风停止</span><label class="voice-auto"><input type="checkbox" id="voice-autosend">停顿后自动发送</label></div>
+    <div class="chat-suggest" id="chat-suggest"></div>
+    <form class="chat-form" id="chat-form">
+      <button type="button" class="icon-btn chat-clip" id="chat-file" title="发送图片 / 表格 / 文件" aria-label="添加附件"><i class="ico ico-clip"></i></button>
+      <input type="file" id="chat-file-input" hidden multiple accept="image/*,.pdf,.xlsx,.xls,.csv,.txt,.md,.json,.tsv">
+      <textarea id="chat-input" rows="1" maxlength="4000" placeholder="例如：小王付了 300U 广告费" autocomplete="off"></textarea>
+      <button type="button" class="icon-btn chat-mic" id="chat-mic" title="语音输入（普通话）" aria-label="语音输入"><i class="ico ico-mic"></i><span class="mic-ring"></span></button>
+      <button type="submit" class="chat-send" id="chat-send" aria-label="发送"><i class="ico ico-send"></i></button>
+    </form>
+  </section>
+
+  <!-- ============ 供应商 / 客户 ============ -->
+  <div id="sheet-party" class="sheet" aria-hidden="true">
+    <div class="backdrop" data-close></div>
+    <div class="panel party-panel" id="party-panel"></div>
+  </div>
+
+  <!-- ============ 成员转账 ============ -->
+  <div id="sheet-transfer" class="sheet" aria-hidden="true">
+    <div class="backdrop" data-close></div>
+    <div class="panel" id="transfer-panel"></div>
+  </div>
+
+  <!-- ============ 新建项目群 ============ -->
+  <div id="sheet-group" class="sheet" aria-hidden="true">
+    <div class="backdrop" data-close></div>
+    <div class="panel">
+      <div class="grab"></div>
+      <div class="sheet-head"><h3>新建项目群</h3><button type="button" class="icon-btn" data-close aria-label="关闭"><i class="ico ico-x"></i></button></div>
+      <p class="muted" style="font-size:13px">每个项目一个群，群里的 AI 只负责这个项目的账目、统计和报表。所有成员都能看到项目群。</p>
+      <div class="chips" id="group-project-chips"></div>
+      <p class="form-error" id="group-error" hidden></p>
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

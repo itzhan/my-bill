@@ -1,0 +1,19 @@
+{
+  "name": "yuanqi-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "元启智能账单系统 · AI 团队记账",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
+    "exceljs": "^4.4.0",
+    "express": "^5.1.0"
+  }
+}

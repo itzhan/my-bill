@@ -1,0 +1,34 @@
+# 账单系统：bill-server（后端，只在容器网络内）+ bill-web（前端，对外 3300）
+# 服务器 Docker 已无可用网段，不新建网络，接入已有的 yuanqi_default
+services:
+  bill-server:
+    build: ./server
+    image: my-bill-server:latest
+    container_name: bill-server
+    restart: unless-stopped
+    env_file: [./server/.env]
+    environment:
+      - PORT=3000
+      - DATA_DIR=/data
+      - TRUST_PROXY=1
+    volumes:
+      - ${BILL_DATA_DIR:-./data}:/data
+    networks: [bill]
+
+  bill-web:
+    build:
+      context: ./web
+      args:
+        LEDGER_API_URL: http://bill-server:3000
+    image: my-bill-web:latest
+    container_name: bill-web
+    restart: unless-stopped
+    depends_on: [bill-server]
+    ports:
+      - "3300:3000"
+    networks: [bill]
+
+networks:
+  bill:
+    external: true
+    name: ${BILL_NETWORK:-yuanqi_default}
