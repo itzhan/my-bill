@@ -153,6 +153,11 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'rate'"
   db.prepare("UPDATE entries SET rate = CASE currency WHEN 'CNY' THEN 1 WHEN 'USD' THEN ? WHEN 'USDT' THEN ? END WHERE rate IS NULL").run(usd, usdt);
 }
 
+// 迁移：每笔记录可附图片（存附件 id 的 JSON 数组，文件在 attachments 表 / uploads 目录）
+if (!db.prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'images'").get()) {
+  db.exec("ALTER TABLE entries ADD COLUMN images TEXT NOT NULL DEFAULT '[]'");
+}
+
 for (const [col, ddl] of [['relay_id', 'INTEGER'], ['relay_ref', "TEXT NOT NULL DEFAULT ''"], ['ratio', 'REAL NOT NULL DEFAULT 1']]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = ?").get(col)) db.exec(`ALTER TABLE parties ADD COLUMN ${col} ${ddl}`);
 }
@@ -189,8 +194,8 @@ const q = {
   entry: db.prepare(`${ENTRY_SELECT} WHERE e.id = ?`),
   reportEntriesAll: db.prepare(`${ENTRY_SELECT} WHERE p.archived = 0 ORDER BY e.created_at DESC, e.id DESC`),
   reportEntriesEvery: db.prepare(`${ENTRY_SELECT} ORDER BY e.created_at DESC, e.id DESC`),
-  insertEntry: db.prepare(`INSERT INTO entries (project_id, type, amount, currency, rate, handler_id, created_by, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  updateEntry: db.prepare(`UPDATE entries SET project_id = ?, type = ?, amount = ?, currency = ?, rate = ?, handler_id = ?, note = ?, created_at = ? WHERE id = ?`),
+  insertEntry: db.prepare(`INSERT INTO entries (project_id, type, amount, currency, rate, handler_id, created_by, note, created_at, images) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  updateEntry: db.prepare(`UPDATE entries SET project_id = ?, type = ?, amount = ?, currency = ?, rate = ?, handler_id = ?, note = ?, created_at = ?, images = ? WHERE id = ?`),
   deleteEntry: db.prepare('DELETE FROM entries WHERE id = ?'),
 
   transfersOfProject: db.prepare(`${TRANSFER_SELECT} WHERE t.project_id = ? ORDER BY t.created_at DESC, t.id DESC`),
@@ -555,11 +560,21 @@ const ops = {
     }
     const handler = q.userById.get(handlerId);
     if (!handler) throw new HttpError(400, '经手人不存在');
-    return { project: p, type, amount, currency, rate, handlerId, handler, note, at };
+    let images = base ? base.images || '[]' : '[]';
+    if (body.images !== undefined) {
+      const ids = [...new Set((Array.isArray(body.images) ? body.images : []).map(Number))];
+      if (ids.length > ENTRY_IMAGE_MAX) throw new HttpError(400, `每笔最多 ${ENTRY_IMAGE_MAX} 张图片`);
+      for (const id of ids) {
+        const a = q.attachment.get(id);
+        if (!a || !IMAGE_MIME.test(a.mime)) throw new HttpError(400, '图片不存在或格式不支持（支持 JPG / PNG / WebP / GIF）');
+      }
+      images = JSON.stringify(ids);
+    }
+    return { project: p, type, amount, currency, rate, handlerId, handler, note, at, images };
   },
   addEntry(user, body, via = '') {
     const n = ops.normalizeEntry(user, body);
-    const r = q.insertEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, user.id, n.note, n.at);
+    const r = q.insertEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, user.id, n.note, n.at, n.images);
     const entry = q.entry.get(Number(r.lastInsertRowid));
     dataChanged(user, `${via}记了一笔${n.type === 'income' ? '收入' : '支出'} ${n.amount.toLocaleString('zh-CN')} ${n.currency} · ${n.project.name}`, `${via}记了一笔${entryLine(entry)}`);
     return entry;
@@ -670,7 +685,7 @@ const ops = {
     if (!e) throw new HttpError(404, '记录不存在');
     if (!ops.canEditEntry(user, e)) throw new HttpError(403, '只能修改自己登记的记录');
     const n = ops.normalizeEntry(user, patch, e);
-    q.updateEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, n.note, n.at, e.id);
+    q.updateEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, n.note, n.at, n.images, e.id);
     const entry = q.entry.get(e.id);
     dataChanged(user, `${via}修改了一笔${n.type === 'income' ? '收入' : '支出'} ${n.amount.toLocaleString('zh-CN')} ${n.currency} · ${n.project.name}`, `${via}修改了记录 #${e.id}：原「${entryLine(e)}」→ 现「${entryLine(entry)}」`);
     return entry;
@@ -1458,6 +1473,12 @@ async function xlsxToText(file) {
     if (rows > 400) out.push(`…（还有 ${rows - 400} 行未显示）`);
   });
   return out.join('\n');
+}
+const ENTRY_IMAGE_MAX = 9;
+// 记录上的图片：附件 id 数组 → 前端可直接显示的附件信息（已被删的跳过）
+function entryImages(e) {
+  let ids = []; try { ids = JSON.parse(e.images || '[]'); } catch {}
+  return ids.map((id) => q.attachment.get(Number(id))).filter(Boolean).map(attachmentView);
 }
 function attachmentView(a) { return { id: a.id, name: a.name, mime: a.mime, size: a.size, url: `/api/attachments/${a.id}`, image: IMAGE_MIME.test(a.mime) }; }
 // full = 当前这轮（图片 / PDF 原文喂给模型）；历史轮次只保留文字占位或已解析的表格文本
@@ -2737,7 +2758,7 @@ app.get('/api/projects/:id', auth, (req, res) => {
   const p = q.project.get(Number(req.params.id));
   if (!p) return fail(res, 404, '项目不存在');
   const rates = getRates();
-  const entries = q.projectEntries.all(p.id).map((e) => ({ ...e, base: r2(entryBase(e, rates)) }));
+  const entries = q.projectEntries.all(p.id).map((e) => ({ ...e, base: r2(entryBase(e, rates)), images: entryImages(e) }));
   const byMember = new Map();
   for (const e of entries) {
     let m = byMember.get(e.handler_id);

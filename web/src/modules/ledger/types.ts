@@ -107,6 +107,7 @@ export type Entry = {
   handler_name: string;
   creator_name: string;
   base: number;
+  images: Attachment[];
 };
 
 export type Settle = {

@@ -2,7 +2,7 @@
 
 import { Fragment, useState } from "react";
 
-import { Trash2 } from "lucide-react";
+import { ImageIcon, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -16,16 +16,18 @@ import { del } from "../api";
 import { dayKey, dayLabel, fmt, fmtTime, money } from "../format";
 import { useLedgerRefresh } from "../hooks";
 import { useLedger } from "../provider";
-import type { ProjectDetail } from "../types";
+import type { Entry, ProjectDetail } from "../types";
 
+import { EntryDetailDialog } from "./entry-detail";
 import { MemberAvatar, useConfirm } from "./shared";
 
-// 流水：按日期分组，登记人本人或项目创建者可点击修改 / 删除
+// 流水：按日期分组，点击看详情（含图片）；登记人本人或项目创建者可修改 / 删除
 export function EntriesTable({ detail }: { detail: ProjectDetail }) {
   const { me, openEntry } = useLedger();
   const refresh = useLedgerRefresh();
   const [confirm, confirmEl] = useConfirm();
   const [filter, setFilter] = useState("all");
+  const [viewing, setViewing] = useState<Entry | null>(null);
   const { project: p, entries, rates } = detail;
   const list = entries.filter((e) => filter === "all" || e.type === filter);
 
@@ -60,7 +62,7 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
     <Card>
       <CardHeader>
         <CardTitle>流水</CardTitle>
-        <CardDescription>{entries.length} 笔 · 点击自己登记的记录可修改</CardDescription>
+        <CardDescription>{entries.length} 笔 · 点击记录查看详情和图片</CardDescription>
         <CardAction>
           <ToggleGroup
             type="single"
@@ -118,12 +120,23 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                         return (
                           <TableRow
                             key={e.id}
-                            className={cn(canEdit && "cursor-pointer")}
-                            onClick={canEdit ? () => openEntry({ entry: e }) : undefined}
-                            title={canEdit ? "点击修改" : undefined}
+                            className="cursor-pointer"
+                            onClick={() => setViewing(e)}
+                            title="点击查看详情"
                           >
                             <TableCell className="max-w-72">
-                              <div className="truncate font-medium">{e.note || (isExp ? "支出" : "收入")}</div>
+                              <div className="flex items-center gap-1.5 font-medium">
+                                <span className="truncate">{e.note || (isExp ? "支出" : "收入")}</span>
+                                {e.images.length ? (
+                                  <span
+                                    className="text-muted-foreground inline-flex shrink-0 items-center gap-0.5 text-xs font-normal"
+                                    title={`${e.images.length} 张图片`}
+                                  >
+                                    <ImageIcon className="size-3.5" />
+                                    {e.images.length > 1 ? e.images.length : null}
+                                  </span>
+                                ) : null}
+                              </div>
                               <div className="text-muted-foreground text-xs sm:hidden">
                                 {e.handler_name} {isExp ? "支付" : "收款"} · {fmtTime(e.created_at)}
                               </div>
@@ -186,6 +199,15 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
           </Empty>
         )}
       </CardContent>
+      <EntryDetailDialog
+        entry={viewing}
+        canEdit={!!viewing && (viewing.created_by === me.user.id || p.created_by === me.user.id)}
+        onOpenChange={(o) => !o && setViewing(null)}
+        onEdit={(e) => {
+          setViewing(null);
+          openEntry({ entry: e });
+        }}
+      />
       {confirmEl}
     </Card>
   );

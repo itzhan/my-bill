@@ -20,6 +20,7 @@ import { CUR, CURRENCIES, fmt, parseAmount, toLocalInput } from "../format";
 import { useLedgerRefresh, useMe, useProjects } from "../hooks";
 import type { Currency, Entry, EntryType } from "../types";
 
+import { doneIds, EntryImagesInput, type ImageItem } from "./entry-images";
 import { FormError, MemberAvatar, ResponsiveDialog, useConfirm } from "./shared";
 
 const PREFS_KEY = "ledger:prefs";
@@ -71,6 +72,7 @@ export function EntryDialog({
   const [rate, setRate] = useState("");
   const [note, setNote] = useState("");
   const [time, setTime] = useState("");
+  const [images, setImages] = useState<ImageItem[]>([]);
   const [defaultTime, setDefaultTime] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -93,6 +95,7 @@ export function EntryDialog({
       setNote(editing.note || "");
       setTime(toLocalInput(new Date(editing.created_at)));
       setDefaultTime(null);
+      setImages(editing.images.map((a) => ({ key: `a${a.id}`, status: "done", attachment: a })));
       return;
     }
     if (pd && !pd.projects.some((p) => !p.archived)) {
@@ -112,6 +115,7 @@ export function EntryDialog({
     setAmount("");
     setRate(prefs.currency === "CNY" ? "" : String(rates[prefs.currency] ?? ""));
     setNote("");
+    setImages([]);
     const now = toLocalInput(new Date());
     setTime(now);
     setDefaultTime(now);
@@ -135,6 +139,8 @@ export function EntryDialog({
     e.preventDefault();
     if (!me || !project) return;
     if (!(parsed > 0)) return setError("请输入正确的金额");
+    if (images.some((x) => x.status === "uploading")) return setError("图片还在上传，请稍等");
+    if (images.some((x) => x.status === "error")) return setError("有图片上传失败，点击图片重试或移除");
     let iso: string | undefined;
     if (time && (editing || time !== defaultTime)) {
       const t = new Date(time);
@@ -150,7 +156,16 @@ export function EntryDialog({
     }
     setError(null);
     setBusy(true);
-    const body = { type, amount: parsed, currency, rate: r, handler_id: handler, note: note.trim(), time: iso };
+    const body = {
+      type,
+      amount: parsed,
+      currency,
+      rate: r,
+      handler_id: handler,
+      note: note.trim(),
+      time: iso,
+      images: doneIds(images),
+    };
     try {
       if (editing) {
         await patch(`/entries/${editing.id}`, { ...body, project_id: project });
@@ -304,6 +319,11 @@ export function EntryDialog({
               value={note}
               onChange={(e) => setNote(e.target.value)}
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label>图片（凭证 / 截图，可选）</Label>
+            <EntryImagesInput items={images} onChange={setImages} />
           </div>
 
           <div className="space-y-2">
