@@ -48,6 +48,119 @@ function ratioSource(w: PartyWallet) {
 
 const walletsKey = (partyId: number) => ["ledger", "party-wallets", partyId] as const;
 
+export type WalletDraft = {
+  name: string;
+  platform: PartyWallet["platform"];
+  base_url: string;
+  api_key: string;
+  custom: boolean;
+  custom_ratio: string;
+};
+export const EMPTY_WALLET: WalletDraft = {
+  name: "",
+  platform: "newapi",
+  base_url: "",
+  api_key: "",
+  custom: false,
+  custom_ratio: "",
+};
+
+// 校验：返回错误文案，没问题返回 null
+export function walletDraftError(v: WalletDraft, requireKey: boolean) {
+  if (!/^https?:\/\//i.test(v.base_url.trim())) return "站点地址需以 http:// 或 https:// 开头";
+  if (requireKey && !v.api_key.trim()) return "API Key 必填";
+  if (v.custom && !(Number(v.custom_ratio) > 0)) return "自定义倍率必须大于 0";
+  return null;
+}
+export const walletBody = (v: WalletDraft) => ({
+  name: v.name,
+  platform: v.platform,
+  base_url: v.base_url.trim(),
+  custom: v.custom,
+  custom_ratio: v.custom ? Number(v.custom_ratio) : null,
+  ...(v.api_key.trim() ? { api_key: v.api_key.trim() } : {}),
+});
+
+// 平台 + 站点地址 + Key + 自定义倍率（添加供应商表单和「余额」弹窗共用）
+export function WalletFields({
+  v,
+  setV,
+  keyHint,
+}: {
+  v: WalletDraft;
+  setV: (v: WalletDraft) => void;
+  keyHint?: string;
+}) {
+  return (
+    <>
+      <div className="grid gap-4 sm:grid-cols-[9rem_1fr]">
+        <div className="space-y-2">
+          <Label>平台 *</Label>
+          <Select value={v.platform} onValueChange={(x) => setV({ ...v, platform: x as PartyWallet["platform"] })}>
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PLATFORMS.map(([k, l]) => (
+                <SelectItem key={k} value={k}>
+                  {l}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-2">
+          <Label>站点地址 *</Label>
+          <Input
+            placeholder="https://api.example.com"
+            value={v.base_url}
+            onChange={(e) => setV({ ...v, base_url: e.target.value })}
+          />
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Label>API Key {keyHint ?? "*"}</Label>
+        <Input
+          type="password"
+          autoComplete="new-password"
+          placeholder="sk-..."
+          value={v.api_key}
+          onChange={(e) => setV({ ...v, api_key: e.target.value })}
+        />
+      </div>
+      <div className="bg-muted/40 space-y-3 rounded-lg border p-3">
+        <label className="flex items-center justify-between gap-3 text-sm">
+          <span>
+            <span className="font-medium">自定义倍率</span>
+            <span className="text-muted-foreground block text-xs">
+              供应商倍率始终显示 1、充值时按倍率折算额度（如充 9000、3 倍率 → 给 3000 额度）时打开：不抓倍率，实际余额 =
+              钱包额度 × 自定义倍率
+            </span>
+          </span>
+          <Switch checked={v.custom} onCheckedChange={(x) => setV({ ...v, custom: x })} />
+        </label>
+        {v.custom ? (
+          <div className="flex items-center gap-2">
+            <Label className="shrink-0">倍率</Label>
+            <Input
+              inputMode="decimal"
+              className="w-28"
+              placeholder="如 3"
+              value={v.custom_ratio}
+              onChange={(e) => setV({ ...v, custom_ratio: e.target.value })}
+            />
+            {Number(v.custom_ratio) > 0 ? (
+              <span className="text-muted-foreground text-xs">
+                钱包 3,000 → 实际余额 {amt(3000 * Number(v.custom_ratio))}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </>
+  );
+}
+
 // 新增 / 编辑：平台 + 站点地址 + Key，可选自定义倍率
 function WalletDialog({
   open,
@@ -62,15 +175,7 @@ function WalletDialog({
   wallet: PartyWallet | null;
   onSaved: () => void;
 }) {
-  const empty = {
-    name: "",
-    platform: "newapi" as PartyWallet["platform"],
-    base_url: "",
-    api_key: "",
-    custom: false,
-    custom_ratio: "",
-  };
-  const [v, setV] = useState(empty);
+  const [v, setV] = useState<WalletDraft>(EMPTY_WALLET);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -87,25 +192,16 @@ function WalletDialog({
             custom: wallet.custom,
             custom_ratio: wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
           }
-        : empty,
+        : EMPTY_WALLET,
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, wallet]);
 
   const save = async () => {
-    if (!/^https?:\/\//i.test(v.base_url.trim())) return setError("站点地址需以 http:// 或 https:// 开头");
-    if (!wallet && !v.api_key.trim()) return setError("API Key 必填");
-    if (v.custom && !(Number(v.custom_ratio) > 0)) return setError("自定义倍率必须大于 0");
+    const err = walletDraftError(v, !wallet);
+    if (err) return setError(err);
     setSaving(true);
     setError(null);
-    const body = {
-      name: v.name,
-      platform: v.platform,
-      base_url: v.base_url.trim(),
-      custom: v.custom,
-      custom_ratio: v.custom ? Number(v.custom_ratio) : null,
-      ...(v.api_key.trim() ? { api_key: v.api_key.trim() } : {}),
-    };
+    const body = walletBody(v);
     try {
       const { wallet: r } = wallet
         ? await patch<{ wallet: PartyWallet }>(`/party-wallets/${wallet.id}`, body)
@@ -137,70 +233,11 @@ function WalletDialog({
             onChange={(e) => setV({ ...v, name: e.target.value })}
           />
         </div>
-        <div className="grid gap-4 sm:grid-cols-[9rem_1fr]">
-          <div className="space-y-2">
-            <Label>平台 *</Label>
-            <Select value={v.platform} onValueChange={(x) => setV({ ...v, platform: x as PartyWallet["platform"] })}>
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {PLATFORMS.map(([k, l]) => (
-                  <SelectItem key={k} value={k}>
-                    {l}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label>站点地址 *</Label>
-            <Input
-              placeholder="https://api.example.com"
-              value={v.base_url}
-              onChange={(e) => setV({ ...v, base_url: e.target.value })}
-            />
-          </div>
-        </div>
-        <div className="space-y-2">
-          <Label>API Key {wallet ? (wallet.has_key ? `（当前 ${wallet.key_masked}，留空 = 不修改）` : "") : "*"}</Label>
-          <Input
-            type="password"
-            autoComplete="new-password"
-            placeholder="sk-..."
-            value={v.api_key}
-            onChange={(e) => setV({ ...v, api_key: e.target.value })}
-          />
-        </div>
-        <div className="bg-muted/40 space-y-3 rounded-lg border p-3">
-          <label className="flex items-center justify-between gap-3 text-sm">
-            <span>
-              <span className="font-medium">自定义倍率</span>
-              <span className="text-muted-foreground block text-xs">
-                供应商倍率始终显示 1、充值时按倍率折算额度（如充 9000、3 倍率 → 给 3000 额度）时打开：不抓倍率，实际余额
-                = 钱包额度 × 自定义倍率
-              </span>
-            </span>
-            <Switch checked={v.custom} onCheckedChange={(x) => setV({ ...v, custom: x })} />
-          </label>
-          {v.custom ? (
-            <div className="flex items-center gap-2">
-              <Label className="shrink-0">倍率</Label>
-              <Input
-                inputMode="decimal"
-                className="w-28"
-                placeholder="如 3"
-                value={v.custom_ratio}
-                onChange={(e) => setV({ ...v, custom_ratio: e.target.value })}
-              />
-              {Number(v.custom_ratio) > 0 ? (
-                <span className="text-muted-foreground text-xs">
-                  钱包 3,000 → 实际余额 {amt(3000 * Number(v.custom_ratio))}
-                </span>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
+        <WalletFields
+          v={v}
+          setV={setV}
+          keyHint={wallet ? (wallet.has_key ? `（当前 ${wallet.key_masked}，留空 = 不修改）` : "") : undefined}
+        />
         <FormError>{error}</FormError>
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)}>

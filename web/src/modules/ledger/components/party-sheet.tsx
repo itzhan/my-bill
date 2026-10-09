@@ -22,7 +22,15 @@ import { CUR, CURRENCIES, PL, curf, fmt, fmtCompact, fmtTime, parseAmount, relTi
 import { qk, useLedgerRefresh, useMe, useParty } from "../hooks";
 import type { Currency, Party, PartyKind, RelayLive } from "../types";
 
-import { PartyWallets } from "./party-wallets";
+import {
+  EMPTY_WALLET,
+  PartyWallets,
+  WalletFields,
+  amt,
+  walletBody,
+  walletDraftError,
+  type WalletDraft,
+} from "./party-wallets";
 import { FormError, useConfirm } from "./shared";
 
 export type PartySheetState =
@@ -116,12 +124,19 @@ function NewPartyForm({
   const [relayRef, setRelayRef] = useState("");
   const [ratio, setRatio] = useState("1");
   const [ext, setExt] = useState("");
+  // 供应商余额：绑定我们在供应商站点（new-api / sub2api）的 Key，添加后立即抓钱包额度和倍率
+  const [walletOn, setWalletOn] = useState(false);
+  const [wallet, setWallet] = useState<WalletDraft>(EMPTY_WALLET);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return setError("请填写名称");
+    if (kind === "supplier" && walletOn) {
+      const werr = walletDraftError(wallet, true);
+      if (werr) return setError(werr);
+    }
     const r = relayOn ? Number(ratio) : undefined;
     if (relayOn && !(Number(r) > 0)) return setError(`${kind === "customer" ? "折扣" : "倍率"}必须大于 0`);
     setBusy(true);
@@ -143,6 +158,18 @@ function NewPartyForm({
           toast.success("已绑定中转站，开始自动挂账");
         } catch (ex) {
           toast.error(`绑定中转站失败：${(ex as Error).message}`);
+        }
+      }
+      if (kind === "supplier" && walletOn) {
+        try {
+          const { wallet: w } = await post<{ wallet: { last_error: string; last_actual: number | null } }>(
+            `/parties/${d.party.id}/wallets`,
+            walletBody(wallet),
+          );
+          if (w.last_error) toast.error(`已绑定 Key，但抓取失败：${w.last_error}`);
+          else toast.success(`已抓取供应商余额：实际余额 ${amt(w.last_actual)}`);
+        } catch (ex) {
+          toast.error(`绑定 Key 失败：${(ex as Error).message}`);
         }
       }
       refresh();
@@ -205,13 +232,27 @@ function NewPartyForm({
           </div>
         </div>
       ) : null}
+      {kind === "supplier" ? (
+        <div className="space-y-4 rounded-lg border p-3">
+          <label className="flex items-center justify-between gap-3 text-sm">
+            <span>
+              <span className="font-medium">抓取供应商余额（new-api / sub2api）</span>
+              <span className="text-muted-foreground block text-xs">
+                填我们在供应商站点的 API Key，自动抓钱包额度和倍率；以后也可以在供应商详情的「余额」里添加多把 Key
+              </span>
+            </span>
+            <Switch checked={walletOn} onCheckedChange={setWalletOn} />
+          </label>
+          {walletOn ? <WalletFields v={wallet} setV={setWallet} /> : null}
+        </div>
+      ) : null}
       <div className="space-y-2">
         <Label htmlFor="pty-ext">外部系统编号（可选，接口同步时匹配用）</Label>
         <Input id="pty-ext" maxLength={100} value={ext} onChange={(e) => setExt(e.target.value)} />
       </div>
       <FormError>{error}</FormError>
       <Button type="submit" className="w-full" disabled={busy}>
-        添加{relayOn ? "并获取" : ""}
+        添加{relayOn || (kind === "supplier" && walletOn) ? "并获取" : ""}
       </Button>
     </form>
   );
