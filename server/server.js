@@ -2832,6 +2832,12 @@ app.get('/api/relay/search', auth, async (req, res, next) => {
 app.delete('/api/parties/:id', auth, (req, res) => { ops.deleteParty(req.user, req.params.id); res.json({ ok: true }); });
 app.post('/api/parties/:id/records', auth, (req, res) => { const r = ops.addPartyRecord(req.user, req.params.id, req.body || {}); res.json({ record: recordView(r.record), duplicate: r.duplicate }); });
 partyWallets = setupPartyWallets({ app, db, auth, HttpError, onChanged: (user, text) => dataChanged(user, text) });
+// 侧栏「供应商」页：所有项目下的供应商 + 往来结算 + 供应商站点余额（每把 Key）
+app.get('/api/suppliers', auth, (req, res) => {
+  const rows = db.prepare(`SELECT pa.*, p.name AS project_name, p.archived AS project_archived FROM parties pa JOIN projects p ON p.id = pa.project_id
+                           WHERE pa.kind = 'supplier' ORDER BY pa.archived, p.archived, pa.id DESC`).all();
+  res.json({ suppliers: rows.map((r) => ({ ...partyView(r), project_archived: !!r.project_archived, wallets: partyWallets.listOf(r.id) })), rates: getRates() });
+});
 app.delete('/api/party-records/:id', auth, (req, res) => { ops.deletePartyRecord(req.user, req.params.id); res.json({ ok: true }); });
 
 // ---- 对外接口（外部系统实时同步应收 / 应付），用 X-API-Key 鉴权

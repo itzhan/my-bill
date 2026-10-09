@@ -1,4 +1,13 @@
-import { LayoutDashboard, FolderKanban, ChartColumn, Bot, BookOpen, Settings, type LucideIcon } from "lucide-react";
+import {
+  LayoutDashboard,
+  FolderKanban,
+  ChartColumn,
+  Truck,
+  Bot,
+  BookOpen,
+  Settings,
+  type LucideIcon,
+} from "lucide-react";
 
 export interface NavSubItem {
   title: string;
@@ -32,6 +41,7 @@ export const sidebarItems: NavGroup[] = [
     items: [
       { title: "总览", url: "/dashboard/ledger", icon: LayoutDashboard },
       { title: "项目", url: "/dashboard/ledger/projects", icon: FolderKanban },
+      { title: "供应商", url: "/dashboard/ledger/suppliers", icon: Truck },
       { title: "报表与导出", url: "/dashboard/ledger/reports", icon: ChartColumn },
     ],
   },

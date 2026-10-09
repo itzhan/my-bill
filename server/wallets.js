@@ -283,6 +283,13 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     res.json({ ok: true });
   });
   app.post('/api/party-wallets/:id/refresh', auth, async (req, res) => res.json({ wallet: await refresh(Number(req.params.id)) }));
+  // 刷新全部（侧栏「供应商」页的「全部刷新」）
+  app.post('/api/wallets/refresh', auth, async (req, res) => {
+    const ids = db.prepare('SELECT w.id FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.archived = 0 ORDER BY w.id').all().map((r) => r.id);
+    const out = [];
+    for (const id of ids) out.push(await refresh(id));
+    res.json({ wallets: out });
+  });
   // 刷新一个项目下所有供应商的余额
   app.post('/api/projects/:id/wallets/refresh', auth, async (req, res) => {
     const ids = db.prepare('SELECT w.id FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE p.project_id = ? AND w.enabled = 1 ORDER BY w.id').all(Number(req.params.id)).map((r) => r.id);
@@ -302,6 +309,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   // 往来单位卡片用：每家供应商的余额汇总
   const sumStmt = db.prepare("SELECT count(*) AS n, sum(last_actual) AS actual, sum(last_used_actual) AS used, sum(CASE WHEN last_error != '' THEN 1 ELSE 0 END) AS errors FROM party_wallets WHERE party_id = ? AND enabled = 1");
   return {
+    listOf: (partyId) => ofParty.all(partyId).map(view),
     summaryOf(partyId) {
       const r = sumStmt.get(partyId);
       return r && r.n ? { count: r.n, actual: r.actual === null ? null : round(r.actual, 4), used: r.used === null ? null : round(r.used, 4), errors: r.errors } : null;

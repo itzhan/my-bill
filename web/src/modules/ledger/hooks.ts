@@ -82,7 +82,7 @@ export const useKnowledge = () => useQuery({ queryKey: qk.knowledge, queryFn: ()
 export function useLedgerRefresh() {
   const qc = useQueryClient();
   return useCallback(() => {
-    for (const key of ["projects", "project", "party", "report", "project-relay"]) {
+    for (const key of ["projects", "project", "party", "report", "project-relay", "suppliers"]) {
       qc.invalidateQueries({ queryKey: ["ledger", key] });
     }
   }, [qc]);
