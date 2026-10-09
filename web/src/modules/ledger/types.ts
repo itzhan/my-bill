@@ -139,7 +139,7 @@ export type Party = {
   totals: { due: number; paid: number; open: number; count: number; last_at: string | null };
   settle: Settle;
   // 供应商余额汇总（只有绑定了 new-api / sub2api Key 的供应商才有）
-  wallet?: { count: number; actual: number | null; errors: number } | null;
+  wallet?: { count: number; actual: number | null; used: number | null; errors: number } | null;
 };
 
 // 供应商余额：我们在供应商站点（new-api / sub2api）的 Key 对应的钱包额度与倍率
@@ -159,6 +159,9 @@ export type PartyWallet = {
   last_ratio: number | null;
   last_ratio_source: string;
   last_actual: number | null;
+  // 这把 Key 在供应商站点的累计消费；自定义倍率时 last_used_actual = 累计消费 × 倍率
+  last_used: number | null;
+  last_used_actual: number | null;
   last_error: string;
   last_checked_at: string | null;
 };

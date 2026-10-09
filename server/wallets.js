@@ -63,7 +63,8 @@ async function fetchSub2api(base, key, wantRatio) {
     wallet = num(d.remaining);
     kind = "wallet";
   }
-  if (!wantRatio) return { wallet, kind };
+  const used = num(d.usage?.total?.actual_cost); // 这把 Key 的累计实际扣费
+  if (!wantRatio) return { wallet, kind, used };
 
   let ratio = null;
   let source = "";
@@ -78,7 +79,7 @@ async function fetchSub2api(base, key, wantRatio) {
       source = "usage";
     } else source = b.status === 403 ? "Key 没有分组，读不到倍率" : "读不到倍率（这把 Key 还没有消费记录）";
   }
-  return { wallet, kind, ratio, source };
+  return { wallet, kind, used, ratio, source };
 }
 
 // new-api：
@@ -94,8 +95,11 @@ async function fetchNewapi(base, key, wantRatio) {
 
   let wallet = null;
   let kind = "";
+  let used = null;
+  let warning = '';
   const tok = await getJson(`${base}/api/usage/token/`, key);
   const td = tok.ok ? tok.json.data : null;
+  if (td && num(td.total_used) !== null) used = num(td.total_used) / qpu; // 这把 Key 的累计已用
   if (tok.ok && tok.json.code === false) throw new Error(`读取余额失败：${tok.json.message || "Key 无效"}`);
   if (td && !td.unlimited_quota && num(td.total_available) !== null) {
     wallet = num(td.total_available) / qpu;
@@ -109,15 +113,25 @@ async function fetchNewapi(base, key, wantRatio) {
     if (sub.json.error) throw new Error(`读取余额失败：${sub.json.error.message || "未知错误"}`);
     const hard = num(sub.json.hard_limit_usd);
     if (hard === null) throw new Error("读取余额失败：返回里没有 hard_limit_usd");
-    if (hard >= 1e8 - 1)
-      throw new Error("这把 Key 是无限额度，而供应商站点按「令牌」统计额度，读不到钱包余额。请在供应商站点给这把 Key 设一个额度上限（如钱包全部额度），或换成有额度上限的 Key");
-    let remaining = hard - (num(use.ok ? use.json.total_usage : 0) || 0) / 100;
-    if (display === "CNY") remaining /= usdRate;
-    else if (display === "TOKENS") remaining /= qpu;
-    wallet = remaining;
-    kind = "wallet";
+    // 无限额度的 Key + 站点按令牌统计：读不到钱包，但累计消费和倍率照样能拿到
+    if (hard >= 1e8 - 1) warning = "这把 Key 是无限额度，而供应商站点按「令牌」统计额度，读不到钱包余额（累计消费和倍率正常）。要看余额，请在供应商站点给这把 Key 设一个额度上限，或换成有额度上限的 Key";
+    const usage = (num(use.ok ? use.json.total_usage : 0) || 0) / 100;
+    let remaining = hard - usage;
+    let spent = usage;
+    if (display === "CNY") {
+      remaining /= usdRate;
+      spent /= usdRate;
+    } else if (display === "TOKENS") {
+      remaining /= qpu;
+      spent /= qpu;
+    }
+    if (used === null) used = spent;
+    if (!warning) {
+      wallet = remaining;
+      kind = "wallet";
+    }
   }
-  if (!wantRatio) return { wallet, kind };
+  if (!wantRatio) return { wallet, kind, used, warning };
 
   let ratio = null;
   let source = "";
@@ -147,7 +161,7 @@ async function fetchNewapi(base, key, wantRatio) {
       source = "pricing-default";
     } else source = "读不到倍率（这把 Key 还没有消费记录，且站点没公开分组倍率）";
   }
-  return { wallet, kind, ratio, source };
+  return { wallet, kind, used, ratio, source, warning };
 }
 
 async function fetchWallet(w) {
@@ -158,7 +172,9 @@ async function fetchWallet(w) {
   const wallet = r.wallet === null ? null : round(r.wallet, 4);
   // 自定义倍率：实际余额 = 钱包 × 倍率；普通模式：实际余额 = 钱包
   const actual = wallet === null ? null : w.custom ? (ratio === null ? null : round(wallet * ratio, 4)) : wallet;
-  return { wallet, kind: r.kind, ratio, source: w.custom ? "custom" : r.source || "", actual };
+  const used = r.used === null || r.used === undefined ? null : round(r.used, 4);
+  const usedActual = used === null ? null : w.custom ? (ratio === null ? null : round(used * ratio, 4)) : used;
+  return { wallet, kind: r.kind, ratio, source: w.custom ? "custom" : r.source || "", actual, used, usedActual, warning: r.warning || "" };
 }
 
 // ---------- 存储与路由 ----------
@@ -186,6 +202,10 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     );
     CREATE INDEX IF NOT EXISTS idx_party_wallets_party ON party_wallets(party_id);
   `);
+  // 迁移：累计消费（这把 Key 在供应商站点总共用了多少；自定义倍率时另存 × 倍率后的实际消费）
+  for (const col of ['last_used', 'last_used_actual']) {
+    if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} REAL`);
+  }
   const getOne = db.prepare('SELECT * FROM party_wallets WHERE id = ?');
   const ofParty = db.prepare('SELECT * FROM party_wallets WHERE party_id = ? ORDER BY id');
   const party = db.prepare("SELECT * FROM parties WHERE id = ? AND kind = 'supplier'");
@@ -222,8 +242,8 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     try {
       if (!w.api_key) throw new Error('还没有填 API Key');
       const r = await fetchWallet(w);
-      db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_error = '', last_checked_at = ? WHERE id = ?")
-        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, t, id);
+      db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
+        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, r.usedActual, r.warning, t, id);
     } catch (e) {
       db.prepare('UPDATE party_wallets SET last_error = ?, last_checked_at = ? WHERE id = ?').run(redact(e.message, w.api_key), t, id);
     }
@@ -280,11 +300,11 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   setTimeout(loop, 30_000).unref();
 
   // 往来单位卡片用：每家供应商的余额汇总
-  const sumStmt = db.prepare("SELECT count(*) AS n, sum(last_actual) AS actual, sum(CASE WHEN last_error != '' THEN 1 ELSE 0 END) AS errors FROM party_wallets WHERE party_id = ? AND enabled = 1");
+  const sumStmt = db.prepare("SELECT count(*) AS n, sum(last_actual) AS actual, sum(last_used_actual) AS used, sum(CASE WHEN last_error != '' THEN 1 ELSE 0 END) AS errors FROM party_wallets WHERE party_id = ? AND enabled = 1");
   return {
     summaryOf(partyId) {
       const r = sumStmt.get(partyId);
-      return r && r.n ? { count: r.n, actual: r.actual === null ? null : round(r.actual, 4), errors: r.errors } : null;
+      return r && r.n ? { count: r.n, actual: r.actual === null ? null : round(r.actual, 4), used: r.used === null ? null : round(r.used, 4), errors: r.errors } : null;
     },
   };
 }

@@ -116,7 +116,8 @@ function NewPartyForm({
   const { data: me } = useMe();
   const refresh = useLedgerRefresh();
   const L = PL[kind];
-  const relayOn = !!me?.ai.relay;
+  // 中转站绑定（一键获取消耗、自动挂账）只用于客户；供应商改用下面的「抓取供应商余额」
+  const relayOn = !!me?.ai.relay && kind === "customer";
   const [name, setName] = useState("");
   const [contact, setContact] = useState("");
   const [currency, setCurrency] = useState<Currency>("CNY");
@@ -213,21 +214,17 @@ function NewPartyForm({
       {relayOn ? (
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label htmlFor="pty-relay">
-              {kind === "customer" ? "中转站邮箱（一键获取消耗）" : "中转站账号名称（一键获取消耗）"}
-            </Label>
+            <Label htmlFor="pty-relay">中转站邮箱（一键获取消耗）</Label>
             <Input
               id="pty-relay"
               maxLength={120}
-              placeholder={kind === "customer" ? "客户在中转站的登录邮箱" : "中转站「账号管理」里的账号名"}
+              placeholder="客户在中转站的登录邮箱"
               value={relayRef}
               onChange={(e) => setRelayRef(e.target.value)}
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="pty-ratio">
-              {kind === "supplier" ? "倍率（应付 = 消耗 × 倍率）" : "折扣（应收 = 消耗 × 折扣）"}
-            </Label>
+            <Label htmlFor="pty-ratio">折扣（应收 = 消耗 × 折扣）</Label>
             <Input id="pty-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
           </div>
         </div>
@@ -356,7 +353,7 @@ function PartyDetailView({
 
         {v.kind === "supplier" ? <PartyWallets party={v} /> : null}
 
-        {data.relay_configured ? (
+        {data.relay_configured && v.kind === "customer" ? (
           <RelayBlock party={v} live={liveData} loading={live.isFetching} onRefresh={() => live.refetch()} />
         ) : null}
 
@@ -885,12 +882,12 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
           <Label htmlFor="pe-note">备注</Label>
           <Input id="pe-note" maxLength={200} value={note} onChange={(e) => setNote(e.target.value)} />
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="pe-ratio">
-            {v.kind === "supplier" ? "倍率（应付 = 中转站消耗 × 倍率）" : "折扣（应收 = 中转站消耗 × 折扣）"}
-          </Label>
-          <Input id="pe-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
-        </div>
+        {v.kind === "customer" ? (
+          <div className="space-y-2">
+            <Label htmlFor="pe-ratio">折扣（应收 = 中转站消耗 × 折扣）</Label>
+            <Input id="pe-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
+          </div>
+        ) : null}
         <div className="space-y-2">
           <Label htmlFor="pe-ext">外部系统编号</Label>
           <Input id="pe-ext" maxLength={100} value={ext} onChange={(e) => setExt(e.target.value)} />

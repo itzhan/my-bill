@@ -76,7 +76,8 @@ function PartyCard({ v, live, onOpen }: { v: Party; live?: RelayLive; onOpen: ()
         <LiveLine v={v} live={live} />
         {v.wallet ? (
           <div className="text-muted-foreground text-xs">
-            供应商余额 <span className="text-foreground font-medium tabular-nums">{amt(v.wallet.actual)}</span> ·{" "}
+            供应商余额 <span className="text-foreground font-medium tabular-nums">{amt(v.wallet.actual)}</span> ·
+            累计消费 <span className="text-foreground font-medium tabular-nums">{amt(v.wallet.used)}</span> ·{" "}
             {v.wallet.count} 个 Key
             {v.wallet.errors ? <span className="text-destructive"> · {v.wallet.errors} 个抓取失败</span> : null}
           </div>

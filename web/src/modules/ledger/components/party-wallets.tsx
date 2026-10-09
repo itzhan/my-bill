@@ -307,14 +307,15 @@ export function PartyWallets({ party }: { party: Party }) {
 
   const list = data ?? [];
   const total = list.filter((w) => w.enabled).reduce((a, w) => a + (w.last_actual ?? 0), 0);
+  const totalUsed = list.filter((w) => w.enabled).reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
   return (
     <div className="space-y-3 rounded-lg border p-4">
       <div className="flex items-start justify-between gap-2">
         <div>
           <b className="text-sm">余额</b>
           <p className="text-muted-foreground text-xs">
-            在供应商站点（new-api / sub2api）的 Key 对应的钱包额度与倍率，每 30 分钟自动刷新
-            {list.length ? ` · 实际余额合计 ${amt(total)}` : ""}
+            在供应商站点（new-api / sub2api）的 Key 对应的钱包额度、倍率与累计消费，每 30 分钟自动刷新
+            {list.length ? ` · 实际余额合计 ${amt(total)} · 累计消费合计 ${amt(totalUsed)}` : ""}
           </p>
         </div>
         <Button
@@ -364,7 +365,7 @@ export function PartyWallets({ party }: { party: Party }) {
                   </Button>
                 </span>
               </div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <div className="bg-muted/50 rounded-md p-2">
                   <div className="text-muted-foreground text-xs">{KIND_LABEL[w.last_wallet_kind] ?? "钱包额度"}</div>
                   <div className="font-semibold tabular-nums">{amt(w.last_wallet)}</div>
@@ -381,11 +382,22 @@ export function PartyWallets({ party }: { party: Party }) {
                   <div className="text-muted-foreground text-xs">实际余额{w.custom ? "（钱包 × 倍率）" : ""}</div>
                   <div className="text-income font-semibold tabular-nums">{amt(w.last_actual)}</div>
                 </div>
+                <div className="bg-muted/50 rounded-md p-2">
+                  <div className="text-muted-foreground text-xs">累计消费{w.custom ? "（× 倍率）" : ""}</div>
+                  <div className="text-expense font-semibold tabular-nums">{amt(w.last_used_actual)}</div>
+                  {w.custom && w.last_used != null ? (
+                    <div className="text-muted-foreground text-xs tabular-nums">站点额度 {amt(w.last_used)}</div>
+                  ) : null}
+                </div>
               </div>
               <div className="text-muted-foreground truncate font-mono text-xs" title={w.base_url}>
                 {w.base_url} · {w.key_masked} · {w.last_checked_at ? `${relTime(w.last_checked_at)}抓取` : "未抓取"}
               </div>
-              {w.last_error ? <p className="text-destructive text-xs">{w.last_error}</p> : null}
+              {w.last_error ? (
+                <p className={cn("text-xs", w.last_used != null ? "text-warning" : "text-destructive")}>
+                  {w.last_error}
+                </p>
+              ) : null}
             </div>
           ))}
         </div>

@@ -1809,6 +1809,8 @@ async function projectRelayLive(projectId) {
 async function linkPartyRelay(user, partyId, ref, opts = {}) {
   const pa0 = q.party.get(Number(partyId));
   if (!pa0) throw new HttpError(404, '往来单位不存在');
+  // 中转站绑定只用于客户；供应商改为在「余额」里绑定供应商站点（new-api / sub2api）的 Key 抓余额与倍率
+  if (pa0.kind === 'supplier') throw new HttpError(400, '供应商不再绑定中转站账号：请在供应商详情的「余额」里填供应商站点的 Key');
   // 绑定时可一并指定倍率 / 折扣与结算币种
   if (opts.ratio !== undefined || opts.currency !== undefined) ops.updateParty(user, pa0.id, { ratio: opts.ratio, currency: opts.currency }, '');
   const pa = q.party.get(pa0.id);
