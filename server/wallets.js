@@ -109,12 +109,15 @@ async function fetchNewapi(base, key, wantRatio) {
       getJson(`${base}/v1/dashboard/billing/subscription`, key),
       getJson(`${base}/v1/dashboard/billing/usage`, key),
     ]);
-    if (!sub.ok) throw new Error(`读取余额失败：${sub.status === 401 ? "Key 无效、已过期或额度用尽" : sub.error}`);
-    if (sub.json.error) throw new Error(`读取余额失败：${sub.json.error.message || "未知错误"}`);
-    const hard = num(sub.json.hard_limit_usd);
-    if (hard === null) throw new Error("读取余额失败：返回里没有 hard_limit_usd");
+    const subErr = !sub.ok
+      ? (sub.status === 401 ? "Key 无效、已过期或额度用尽" : sub.error)
+      : sub.json.error ? sub.json.error.message || "未知错误" : num(sub.json.hard_limit_usd) === null ? "返回里没有 hard_limit_usd" : "";
+    // 钱包接口失败（如 Key 所在分组已无权访问），但令牌信息读得到：照样记录累计消费和倍率
+    if (subErr && !td) throw new Error(`读取余额失败：${subErr}`);
+    if (subErr) warning = `读不到钱包余额：${subErr}（累计消费和倍率正常）`;
+    const hard = subErr ? 0 : num(sub.json.hard_limit_usd);
     // 无限额度的 Key + 站点按令牌统计：读不到钱包，但累计消费和倍率照样能拿到
-    if (hard >= 1e8 - 1) warning = "这把 Key 是无限额度，而供应商站点按「令牌」统计额度，读不到钱包余额（累计消费和倍率正常）。要看余额，请在供应商站点给这把 Key 设一个额度上限，或换成有额度上限的 Key";
+    if (!subErr && hard >= 1e8 - 1) warning = "这把 Key 是无限额度，而供应商站点按「令牌」统计额度，读不到钱包余额（累计消费和倍率正常）。要看余额，请在供应商站点给这把 Key 设一个额度上限，或换成有额度上限的 Key";
     const usage = (num(use.ok ? use.json.total_usage : 0) || 0) / 100;
     let remaining = hard - usage;
     let spent = usage;
