@@ -138,6 +138,29 @@ export type Party = {
   relay: { id: number; ref: string } | null;
   totals: { due: number; paid: number; open: number; count: number; last_at: string | null };
   settle: Settle;
+  // 供应商余额汇总（只有绑定了 new-api / sub2api Key 的供应商才有）
+  wallet?: { count: number; actual: number | null; errors: number } | null;
+};
+
+// 供应商余额：我们在供应商站点（new-api / sub2api）的 Key 对应的钱包额度与倍率
+export type PartyWallet = {
+  id: number;
+  party_id: number;
+  name: string;
+  platform: "newapi" | "sub2api";
+  base_url: string;
+  custom: boolean;
+  custom_ratio: number | null;
+  enabled: boolean;
+  has_key: boolean;
+  key_masked: string;
+  last_wallet: number | null;
+  last_wallet_kind: "" | "wallet" | "token" | "quota" | "subscription";
+  last_ratio: number | null;
+  last_ratio_source: string;
+  last_actual: number | null;
+  last_error: string;
+  last_checked_at: string | null;
 };
 export type PartiesSummary = {
   suppliers: Party[];

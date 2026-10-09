@@ -22,6 +22,7 @@ import { CUR, CURRENCIES, PL, curf, fmt, fmtCompact, fmtTime, parseAmount, relTi
 import { qk, useLedgerRefresh, useMe, useParty } from "../hooks";
 import type { Currency, Party, PartyKind, RelayLive } from "../types";
 
+import { PartyWallets } from "./party-wallets";
 import { FormError, useConfirm } from "./shared";
 
 export type PartySheetState =
@@ -311,6 +312,8 @@ function PartyDetailView({
             className={st0.open > 0 ? "text-warning" : st0.credit > 0 ? "text-income" : ""}
           />
         </div>
+
+        {v.kind === "supplier" ? <PartyWallets party={v} /> : null}
 
         {data.relay_configured ? (
           <RelayBlock party={v} live={liveData} loading={live.isFetching} onRefresh={() => live.refetch()} />

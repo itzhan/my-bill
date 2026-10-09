@@ -13,6 +13,8 @@ import { useProjectRelay } from "../hooks";
 import { useLedger } from "../provider";
 import type { Party, PartyKind, ProjectDetail, RelayLive } from "../types";
 
+import { amt } from "./party-wallets";
+
 function LiveLine({ v, live }: { v: Party; live?: RelayLive }) {
   if (!v.relay) return null;
   const dot = (cls: string) => <span className={cn("inline-block size-1.5 shrink-0 rounded-full", cls)} />;
@@ -72,6 +74,13 @@ function PartyCard({ v, live, onOpen }: { v: Party; live?: RelayLive; onOpen: ()
           {v.totals.last_at ? ` · ${v.totals.last_at}` : ""}
         </div>
         <LiveLine v={v} live={live} />
+        {v.wallet ? (
+          <div className="text-muted-foreground text-xs">
+            供应商余额 <span className="text-foreground font-medium tabular-nums">{amt(v.wallet.actual)}</span> ·{" "}
+            {v.wallet.count} 个 Key
+            {v.wallet.errors ? <span className="text-destructive"> · {v.wallet.errors} 个抓取失败</span> : null}
+          </div>
+        ) : null}
       </div>
       <div className="shrink-0 text-right">
         <div
