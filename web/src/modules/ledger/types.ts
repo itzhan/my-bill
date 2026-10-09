@@ -155,7 +155,10 @@ export type PartyWallet = {
   has_key: boolean;
   key_masked: string;
   last_wallet: number | null;
-  last_wallet_kind: "" | "wallet" | "token" | "quota" | "subscription";
+  last_wallet_kind: "" | "wallet" | "token" | "quota" | "subscription" | "login";
+  login_user: string;
+  has_login?: boolean;
+  insecure: boolean;
   last_ratio: number | null;
   last_ratio_source: string;
   last_actual: number | null;

@@ -26,6 +26,7 @@ const PLATFORMS: [PartyWallet["platform"], string][] = [
   ["sub2api", "sub2api"],
 ];
 const KIND_LABEL: Record<string, string> = {
+  login: "钱包余额",
   wallet: "钱包余额",
   token: "Key 剩余额度",
   quota: "Key 限额剩余",
@@ -33,7 +34,18 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 // 额度数字：两位小数、千分位，不带币种（供应商站点的额度单位，一般是 $）
-export const amt = (v: number | null | undefined) =>
+// 供应商站点的额度单位（一般是 $）。满 1 万用「w」（万），满 1 千用「k」，不足 1 千显示两位小数
+export const amt = (v: number | null | undefined) => {
+  if (v == null) return "-";
+  const n = Number(v);
+  const a = Math.abs(n);
+  const s = n < 0 ? "-" : "";
+  if (a >= 1e4) return `${s}${+(a / 1e4).toFixed(2)}w`;
+  if (a >= 1e3) return `${s}${+(a / 1e3).toFixed(2)}k`;
+  return `${s}${a.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+// 完整数字（放在 title 里，鼠标悬停看精确值）
+export const amtFull = (v: number | null | undefined) =>
   v == null ? "-" : Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 function ratioSource(w: PartyWallet) {
@@ -41,6 +53,7 @@ function ratioSource(w: PartyWallet) {
   if (w.custom) return "自定义";
   if (s === "billing") return "Key 计费接口";
   if (s === "usage") return "按消费记录反推";
+  if (s.startsWith("group:")) return `${s.split(":")[1]} 分组`;
   if (s.startsWith("log")) return `最近消费日志${s.includes(":") ? `（${s.split(":")[1]} 分组）` : ""}`;
   if (s === "pricing-default") return "站点 default 分组（估计）";
   return s;
@@ -55,6 +68,9 @@ export type WalletDraft = {
   api_key: string;
   custom: boolean;
   custom_ratio: string;
+  login_user: string;
+  login_pass: string;
+  insecure: boolean;
 };
 export const EMPTY_WALLET: WalletDraft = {
   name: "",
@@ -63,6 +79,9 @@ export const EMPTY_WALLET: WalletDraft = {
   api_key: "",
   custom: false,
   custom_ratio: "",
+  login_user: "",
+  login_pass: "",
+  insecure: false,
 };
 
 // 校验：返回错误文案，没问题返回 null
@@ -78,18 +97,23 @@ export const walletBody = (v: WalletDraft) => ({
   base_url: v.base_url.trim(),
   custom: v.custom,
   custom_ratio: v.custom ? Number(v.custom_ratio) : null,
+  insecure: v.insecure,
+  login_user: v.login_user.trim(),
   ...(v.api_key.trim() ? { api_key: v.api_key.trim() } : {}),
+  ...(v.login_pass.trim() ? { login_pass: v.login_pass.trim() } : {}),
 });
 
-// 平台 + 站点地址 + Key + 自定义倍率（添加供应商表单和「余额」弹窗共用）
+// 平台 + 站点地址 + Key + 自定义倍率 + 账号密码（添加供应商表单和「余额」弹窗共用）
 export function WalletFields({
   v,
   setV,
   keyHint,
+  loginHint,
 }: {
   v: WalletDraft;
   setV: (v: WalletDraft) => void;
   keyHint?: string;
+  loginHint?: string;
 }) {
   return (
     <>
@@ -157,6 +181,40 @@ export function WalletFields({
           </div>
         ) : null}
       </div>
+      {v.platform === "newapi" ? (
+        <div className="bg-muted/40 space-y-3 rounded-lg border p-3">
+          <div>
+            <span className="text-sm font-medium">账号密码（可选，new-api）</span>
+            <span className="text-muted-foreground block text-xs">
+              无限额度的 Key
+              读不到钱包余额。填这个供应商站点的登录账号密码，就能按「用户视角」读到真实钱包余额和账户总消费。
+              {loginHint ? `当前 ${loginHint}。` : ""}
+            </span>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Input
+              placeholder="账号 / 邮箱"
+              autoComplete="off"
+              value={v.login_user}
+              onChange={(e) => setV({ ...v, login_user: e.target.value })}
+            />
+            <Input
+              type="password"
+              autoComplete="new-password"
+              placeholder={loginHint ? "密码（留空 = 不修改）" : "密码"}
+              value={v.login_pass}
+              onChange={(e) => setV({ ...v, login_pass: e.target.value })}
+            />
+          </div>
+        </div>
+      ) : null}
+      <label className="flex items-center justify-between gap-3 text-sm">
+        <span>
+          <span className="font-medium">跳过证书校验</span>
+          <span className="text-muted-foreground block text-xs">站点 HTTPS 证书链不完整、抓取报证书错误时才打开</span>
+        </span>
+        <Switch checked={v.insecure} onCheckedChange={(x) => setV({ ...v, insecure: x })} />
+      </label>
     </>
   );
 }
@@ -191,6 +249,9 @@ function WalletDialog({
             api_key: "",
             custom: wallet.custom,
             custom_ratio: wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
+            login_user: wallet.login_user ?? "",
+            login_pass: "",
+            insecure: wallet.insecure,
           }
         : EMPTY_WALLET,
     );
@@ -237,6 +298,7 @@ function WalletDialog({
           v={v}
           setV={setV}
           keyHint={wallet ? (wallet.has_key ? `（当前 ${wallet.key_masked}，留空 = 不修改）` : "") : undefined}
+          loginHint={wallet?.has_login ? `已绑定账号 ${wallet.login_user}` : undefined}
         />
         <FormError>{error}</FormError>
         <div className="flex justify-end gap-2">
@@ -368,7 +430,9 @@ export function PartyWallets({ party }: { party: Party }) {
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <div className="bg-muted/50 rounded-md p-2">
                   <div className="text-muted-foreground text-xs">{KIND_LABEL[w.last_wallet_kind] ?? "钱包额度"}</div>
-                  <div className="font-semibold tabular-nums">{amt(w.last_wallet)}</div>
+                  <div className="font-semibold tabular-nums" title={amtFull(w.last_wallet)}>
+                    {amt(w.last_wallet)}
+                  </div>
                 </div>
                 <div className="bg-muted/50 rounded-md p-2">
                   <div className="text-muted-foreground truncate text-xs" title={ratioSource(w)}>
@@ -380,18 +444,24 @@ export function PartyWallets({ party }: { party: Party }) {
                 </div>
                 <div className="bg-muted/50 rounded-md p-2">
                   <div className="text-muted-foreground text-xs">实际余额{w.custom ? "（钱包 × 倍率）" : ""}</div>
-                  <div className="text-income font-semibold tabular-nums">{amt(w.last_actual)}</div>
+                  <div className="text-income font-semibold tabular-nums" title={amtFull(w.last_actual)}>
+                    {amt(w.last_actual)}
+                  </div>
                 </div>
                 <div className="bg-muted/50 rounded-md p-2">
                   <div className="text-muted-foreground text-xs">累计消费{w.custom ? "（× 倍率）" : ""}</div>
-                  <div className="text-expense font-semibold tabular-nums">{amt(w.last_used_actual)}</div>
+                  <div className="text-expense font-semibold tabular-nums" title={amtFull(w.last_used_actual)}>
+                    {amt(w.last_used_actual)}
+                  </div>
                   {w.custom && w.last_used != null ? (
                     <div className="text-muted-foreground text-xs tabular-nums">站点额度 {amt(w.last_used)}</div>
                   ) : null}
                 </div>
               </div>
               <div className="text-muted-foreground truncate font-mono text-xs" title={w.base_url}>
-                {w.base_url} · {w.key_masked} · {w.last_checked_at ? `${relTime(w.last_checked_at)}抓取` : "未抓取"}
+                {w.base_url} · {w.key_masked}
+                {w.has_login ? ` · 登录 ${w.login_user}` : ""}
+                {w.insecure ? " · 跳过证书" : ""} · {w.last_checked_at ? `${relTime(w.last_checked_at)}抓取` : "未抓取"}
               </div>
               {w.last_error ? (
                 <p className={cn("text-xs", w.last_used != null ? "text-warning" : "text-destructive")}>

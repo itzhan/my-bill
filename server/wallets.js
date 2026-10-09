@@ -18,12 +18,30 @@ const round = (n, d = 6) => (n === null ? null : Math.round(n * 10 ** d) / 10 **
 const baseOf = (u) => String(u || "").trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
 const redact = (text, key) => (key && key.length >= 8 ? String(text).split(key).join("<api-key>") : String(text)).slice(0, 200);
 
-async function getJson(url, key) {
+// insecure = true 时跳过 TLS 证书校验（有的供应商站点证书链不完整），只对这次请求生效
+let insecureAgent = null;
+function dispatcherFor(insecure) {
+  if (!insecure) return undefined;
+  if (!insecureAgent) {
+    const { Agent } = require("undici");
+    insecureAgent = new Agent({ connect: { rejectUnauthorized: false } });
+  }
+  return insecureAgent;
+}
+
+async function httpJson(url, { key, method = "GET", body, insecure } = {}) {
   const headers = { Accept: "application/json" };
   if (key) headers.Authorization = `Bearer ${key}`;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
   let res;
   try {
-    res = await fetch(url, { headers, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    res = await fetch(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      dispatcher: dispatcherFor(insecure),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
   } catch (e) {
     const aborted = e?.name === "TimeoutError" || e?.name === "AbortError";
     return { ok: false, status: 0, error: aborted ? "请求超时" : redact(e?.cause?.message || e?.message || e, key) };
@@ -43,9 +61,33 @@ async function getJson(url, key) {
   return { ok: true, status: res.status, json };
 }
 
+// new-api 用账号密码登录，读账户钱包余额与总消费（用户视角，无限额度 Key 也能看到）。creds = [[user, pass], ...] 逐个试
+async function newapiLogin(base, creds, qpu, insecure) {
+  const fails = [];
+  for (const [user, pass] of creds) {
+    if (!user || !pass) continue;
+    const r = await httpJson(`${base}/api/user/login`, { method: "POST", body: { username: user, password: pass }, insecure });
+    if (r.error) {
+      fails.push(`${user}：${r.error}`);
+      continue;
+    }
+    if (!r.json.success) {
+      fails.push(`${user}：${r.json.message || "登录失败"}`);
+      continue;
+    }
+    const u = r.json.data?.user;
+    if (!u) {
+      fails.push(`${user}：需要二次验证（2FA），无法用密码登录`);
+      continue;
+    }
+    return { ok: true, user, pass, wallet: round(num(u.quota) / qpu, 4), used: round(num(u.used_quota) / qpu, 4), group: u.group || "" };
+  }
+  return { ok: false, error: fails[0] || "没有可用的账号密码", fails };
+}
+
 // sub2api：/v1/usage 拿钱包（balance），/v1/sub2api/billing 拿倍率；老版本没有 billing 接口时用 实际扣费 / 标准费用 反推
-async function fetchSub2api(base, key, wantRatio) {
-  const u = await getJson(`${base}/v1/usage`, key);
+async function fetchSub2api(base, key, wantRatio, insecure) {
+  const u = await httpJson(`${base}/v1/usage`, { key, insecure });
   if (!u.ok) throw new Error(`读取余额失败：${u.status === 401 ? "Key 无效或已禁用" : u.error}`);
   const d = u.json;
   let wallet = null;
@@ -68,7 +110,7 @@ async function fetchSub2api(base, key, wantRatio) {
 
   let ratio = null;
   let source = "";
-  const b = await getJson(`${base}/v1/sub2api/billing`, key);
+  const b = await httpJson(`${base}/v1/sub2api/billing`, { key, insecure });
   if (b.ok && num(b.json.resolved_rate_multiplier) !== null) {
     ratio = num(b.json.resolved_rate_multiplier);
     source = "billing";
@@ -86,28 +128,39 @@ async function fetchSub2api(base, key, wantRatio) {
 // - 余额：令牌有额度上限 → 令牌剩余额度（/api/usage/token）；令牌无限额度 → 用户钱包（/v1/dashboard/billing/subscription − usage，
 //   站点开着「按令牌统计」时这里拿不到钱包，只能提示）
 // - 倍率：最近一条消费日志里的分组倍率（/api/log/token），没有消费记录时退回 /api/pricing 的 default 分组倍率
-async function fetchNewapi(base, key, wantRatio) {
-  const st = await getJson(`${base}/api/status`);
+async function fetchNewapi(base, key, wantRatio, login, insecure) {
+  const st = await httpJson(`${base}/api/status`, { insecure });
   const s = st.ok ? st.json.data || {} : {};
   const qpu = num(s.quota_per_unit) || 500000;
   const display = s.quota_display_type || (s.display_in_currency === false ? "TOKENS" : "USD");
   const usdRate = num(s.usd_exchange_rate) || 1;
 
+  // 填了账号密码：登录读账户钱包余额与总消费（用户视角），无限额度 Key 也能看到
+  let loginRes = null;
+  if (login && login.length) {
+    loginRes = await newapiLogin(base, login, qpu, insecure);
+  }
+
   let wallet = null;
   let kind = "";
   let used = null;
   let warning = '';
-  const tok = await getJson(`${base}/api/usage/token/`, key);
+  const tok = await httpJson(`${base}/api/usage/token/`, { key, insecure });
   const td = tok.ok ? tok.json.data : null;
   if (td && num(td.total_used) !== null) used = num(td.total_used) / qpu; // 这把 Key 的累计已用
-  if (tok.ok && tok.json.code === false) throw new Error(`读取余额失败：${tok.json.message || "Key 无效"}`);
-  if (td && !td.unlimited_quota && num(td.total_available) !== null) {
+  if (tok.ok && tok.json.code === false && !loginRes?.ok) throw new Error(`读取余额失败：${tok.json.message || "Key 无效"}`);
+  if (loginRes?.ok) {
+    // 账户维度：钱包余额和总消费都是用户在控制台看到的数字
+    wallet = loginRes.wallet;
+    used = loginRes.used;
+    kind = "login";
+  } else if (td && !td.unlimited_quota && num(td.total_available) !== null) {
     wallet = num(td.total_available) / qpu;
     kind = "token";
   } else {
     const [sub, use] = await Promise.all([
-      getJson(`${base}/v1/dashboard/billing/subscription`, key),
-      getJson(`${base}/v1/dashboard/billing/usage`, key),
+      httpJson(`${base}/v1/dashboard/billing/subscription`, { key, insecure }),
+      httpJson(`${base}/v1/dashboard/billing/usage`, { key, insecure }),
     ]);
     const subErr = !sub.ok
       ? (sub.status === 401 ? "Key 无效、已过期或额度用尽" : sub.error)
@@ -134,11 +187,24 @@ async function fetchNewapi(base, key, wantRatio) {
       kind = "wallet";
     }
   }
-  if (!wantRatio) return { wallet, kind, used, warning };
+  // 登录成功：钱包和消费以账户为准，清掉 Key 维度读不到钱包的提示；登录失败则记一句
+  if (loginRes?.ok) warning = "";
+  else if (loginRes) warning = `账号密码登录失败：${loginRes.error}${warning ? `；${warning}` : ""}`;
+  const loginUsed = loginRes?.ok ? { user: loginRes.user, pass: loginRes.pass } : null;
+  if (!wantRatio) return { wallet, kind, used, warning, loginUsed };
 
   let ratio = null;
   let source = "";
-  const logs = await getJson(`${base}/api/log/token`, key);
+  // 登录拿到分组时，优先用该分组的倍率
+  if (loginRes?.ok && loginRes.group) {
+    const p = await httpJson(`${base}/api/pricing`, { key, insecure });
+    const gr = p.ok ? p.json.group_ratio : null;
+    if (gr && num(gr[loginRes.group]) !== null) {
+      ratio = num(gr[loginRes.group]);
+      source = `group:${loginRes.group}`;
+    }
+  }
+  const logs = ratio !== null ? { ok: false } : await httpJson(`${base}/api/log/token`, { key, insecure });
   const list = logs.ok && Array.isArray(logs.json.data) ? logs.json.data : Array.isArray(logs.json?.data?.items) ? logs.json.data.items : [];
   for (const l of [...list].sort((a, b) => (b.created_at || 0) - (a.created_at || 0))) {
     let o = l.other;
@@ -157,27 +223,33 @@ async function fetchNewapi(base, key, wantRatio) {
     break;
   }
   if (ratio === null) {
-    const p = await getJson(`${base}/api/pricing`);
+    const p = await httpJson(`${base}/api/pricing`, { insecure });
     const gr = p.ok ? p.json.group_ratio : null;
     if (gr && num(gr.default) !== null) {
       ratio = num(gr.default);
       source = "pricing-default";
     } else source = "读不到倍率（这把 Key 还没有消费记录，且站点没公开分组倍率）";
   }
-  return { wallet, kind, used, ratio, source, warning };
+  return { wallet, kind, used, ratio, source, warning, loginUsed };
 }
 
 async function fetchWallet(w) {
   const base = baseOf(w.base_url);
   const wantRatio = !w.custom;
-  const r = w.platform === "sub2api" ? await fetchSub2api(base, w.api_key, wantRatio) : await fetchNewapi(base, w.api_key, wantRatio);
+  const insecure = !!w.insecure;
+  // 账号密码：优先用这把 Key 自己填的；没填时把传进来的候选组合都试一遍（批量导入用）
+  const login = w.login_user && w.login_pass ? [[w.login_user, w.login_pass]] : Array.isArray(w.login_candidates) ? w.login_candidates : [];
+  const r =
+    w.platform === "sub2api"
+      ? await fetchSub2api(base, w.api_key, wantRatio, insecure)
+      : await fetchNewapi(base, w.api_key, wantRatio, login, insecure);
   const ratio = w.custom ? num(w.custom_ratio) : r.ratio ?? null;
   const wallet = r.wallet === null ? null : round(r.wallet, 4);
   // 自定义倍率：实际余额 = 钱包 × 倍率；普通模式：实际余额 = 钱包
   const actual = wallet === null ? null : w.custom ? (ratio === null ? null : round(wallet * ratio, 4)) : wallet;
   const used = r.used === null || r.used === undefined ? null : round(r.used, 4);
   const usedActual = used === null ? null : w.custom ? (ratio === null ? null : round(used * ratio, 4)) : used;
-  return { wallet, kind: r.kind, ratio, source: w.custom ? "custom" : r.source || "", actual, used, usedActual, warning: r.warning || "" };
+  return { wallet, kind: r.kind, ratio, source: w.custom ? "custom" : r.source || "", actual, used, usedActual, warning: r.warning || "", loginUsed: r.loginUsed || null };
 }
 
 // ---------- 存储与路由 ----------
@@ -209,14 +281,26 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   for (const col of ['last_used', 'last_used_actual']) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} REAL`);
   }
+  // 迁移：new-api 账号密码登录（读账户钱包与总消费，用户视角）、跳过证书校验
+  for (const [col, ddl] of [['login_user', "TEXT NOT NULL DEFAULT ''"], ['login_pass', "TEXT NOT NULL DEFAULT ''"], ['insecure', 'INTEGER NOT NULL DEFAULT 0']]) {
+    if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} ${ddl}`);
+  }
   const getOne = db.prepare('SELECT * FROM party_wallets WHERE id = ?');
   const ofParty = db.prepare('SELECT * FROM party_wallets WHERE party_id = ? ORDER BY id');
   const party = db.prepare("SELECT * FROM parties WHERE id = ? AND kind = 'supplier'");
 
-  // Key 不回传，只给脱敏后的前后几位
+  // Key / 密码不回传，只给脱敏信息
   const view = (w) => {
-    const { api_key, ...rest } = w;
-    return { ...rest, custom: !!w.custom, enabled: !!w.enabled, has_key: !!api_key, key_masked: api_key ? `${api_key.slice(0, 5)}…${api_key.slice(-4)}` : '' };
+    const { api_key, login_pass, ...rest } = w;
+    return {
+      ...rest,
+      custom: !!w.custom,
+      enabled: !!w.enabled,
+      insecure: !!w.insecure,
+      has_key: !!api_key,
+      key_masked: api_key ? `${api_key.slice(0, 5)}…${api_key.slice(-4)}` : '',
+      has_login: !!(w.login_user && login_pass),
+    };
   };
 
   function input(b, partial) {
@@ -233,6 +317,11 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     if (!partial || 'custom' in b) out.custom = b.custom ? 1 : 0;
     if (!partial || 'custom_ratio' in b) out.custom_ratio = num(b.custom_ratio);
     if (!partial || 'enabled' in b) out.enabled = b.enabled === false ? 0 : 1;
+    if (!partial || 'insecure' in b) out.insecure = b.insecure ? 1 : 0;
+    if (!partial || 'login_user' in b) out.login_user = str(b.login_user, 120);
+    // 清空登录：login_user 传空串时一并清掉密码；否则密码留空 = 保持原值
+    if ('login_user' in b && !str(b.login_user, 120)) out.login_pass = '';
+    else if (str(b.login_pass, 200)) out.login_pass = str(b.login_pass, 200);
     if (str(b.api_key, 500)) out.api_key = str(b.api_key, 500); // 留空 = 保持原值
     return out;
   }
@@ -247,6 +336,10 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
       const r = await fetchWallet(w);
       db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
         .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, r.usedActual, r.warning, t, id);
+      // 批量试出来的账号密码存下来，以后自动刷新直接用
+      if (r.loginUsed && (r.loginUsed.user !== w.login_user || r.loginUsed.pass !== w.login_pass)) {
+        db.prepare('UPDATE party_wallets SET login_user = ?, login_pass = ? WHERE id = ?').run(r.loginUsed.user, r.loginUsed.pass, id);
+      }
     } catch (e) {
       db.prepare('UPDATE party_wallets SET last_error = ?, last_checked_at = ? WHERE id = ?').run(redact(e.message, w.api_key), t, id);
     }
@@ -261,8 +354,9 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     if (!v.api_key) throw new HttpError(400, 'API Key 必填');
     checkCustom(v);
     const t = nowIso();
-    const r = db.prepare('INSERT INTO party_wallets (party_id, name, platform, base_url, api_key, custom, custom_ratio, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(pa.id, v.name, v.platform, v.base_url, v.api_key, v.custom, v.custom_ratio, v.enabled, t, t);
+    const cols = { party_id: pa.id, ...v, created_at: t, updated_at: t };
+    const keys = Object.keys(cols);
+    const r = db.prepare(`INSERT INTO party_wallets (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`).run(...keys.map((k) => cols[k]));
     const w = await refresh(Number(r.lastInsertRowid)); // 加完立即抓一次
     onChanged(req.user, `给供应商「${pa.name}」添加了余额监控「${w.name}」`);
     res.json({ wallet: w });
