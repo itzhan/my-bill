@@ -14,6 +14,7 @@ import { useLedger } from "../provider";
 import type { Party, PartyKind, ProjectDetail, RelayLive } from "../types";
 
 import { amt } from "./party-wallets";
+import { Pager, usePaged } from "./shared";
 
 function LiveLine({ v, live }: { v: Party; live?: RelayLive }) {
   if (!v.relay) return null;
@@ -112,6 +113,11 @@ function PartyColumn({
   const { openParty, openPartyNew } = useLedger();
   const L = PL[kind];
   const t = detail.parties.totals[kind];
+  // 排序：供应商按累计消费多的在前；客户按应收多的在前
+  const sorted = [...list].sort((a, b) =>
+    kind === "supplier" ? (b.wallet?.used ?? 0) - (a.wallet?.used ?? 0) : b.settle.due - a.settle.due,
+  );
+  const { rows, pager } = usePaged(sorted, list.length);
   return (
     <Card>
       <CardHeader>
@@ -140,7 +146,12 @@ function PartyColumn({
       </CardHeader>
       <CardContent className="space-y-2">
         {list.length ? (
-          list.map((v) => <PartyCard key={v.id} v={v} live={live?.[v.id]} onOpen={() => openParty(v.id)} />)
+          <>
+            {rows.map((v) => (
+              <PartyCard key={v.id} v={v} live={live?.[v.id]} onOpen={() => openParty(v.id)} />
+            ))}
+            <Pager {...pager} className="pt-2" />
+          </>
         ) : (
           <p className="text-muted-foreground text-sm">
             还没有{L.name}。

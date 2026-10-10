@@ -15,10 +15,12 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
@@ -231,6 +233,67 @@ export function PageHeader({
         {description ? <div className="text-muted-foreground text-sm">{description}</div> : null}
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+    </div>
+  );
+}
+
+// ---- 分页（客户端）----
+export const PAGE_SIZES = [10, 20, 50, 100];
+export const DEFAULT_PAGE_SIZE = 20;
+
+// 对 items 做客户端分页：resetKey 变化（如筛选 / 排序改变）时回到第 1 页
+export function usePaged<T>(items: T[], resetKey: unknown = null, defaultSize = DEFAULT_PAGE_SIZE) {
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState(defaultSize);
+  const keyRef = useRef<unknown>(resetKey);
+  if (keyRef.current !== resetKey) {
+    keyRef.current = resetKey;
+    if (page !== 1) setPage(1);
+  }
+  const total = items.length;
+  const pages = Math.max(1, Math.ceil(total / size));
+  const cur = Math.min(page, pages);
+  const rows = items.slice((cur - 1) * size, cur * size);
+  return { rows, pager: { page: cur, pages, size, total, setPage, setSize } };
+}
+
+type PagerProps = {
+  page: number;
+  pages: number;
+  size: number;
+  total: number;
+  setPage: (p: number) => void;
+  setSize: (s: number) => void;
+  className?: string;
+};
+export function Pager({ page, pages, size, total, setPage, setSize, className }: PagerProps) {
+  if (total <= PAGE_SIZES[0]!) return null;
+  return (
+    <div className={cn("flex flex-wrap items-center justify-between gap-3", className)}>
+      <span className="text-muted-foreground text-sm">共 {total} 条</span>
+      <div className="flex items-center gap-2">
+        <Select value={String(size)} onValueChange={(v) => setSize(Number(v))}>
+          <SelectTrigger size="sm" className="w-[88px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {PAGE_SIZES.map((s) => (
+              <SelectItem key={s} value={String(s)}>
+                {s} / 页
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+          上一页
+        </Button>
+        <span className="text-sm tabular-nums">
+          {page} / {pages}
+        </span>
+        <Button variant="outline" size="sm" disabled={page >= pages} onClick={() => setPage(page + 1)}>
+          下一页
+        </Button>
+      </div>
     </div>
   );
 }

@@ -26,7 +26,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { cn } from "@/lib/utils";
 import { get, post } from "@/modules/ledger/api";
 import { amt } from "@/modules/ledger/components/party-wallets";
-import { PageHeader } from "@/modules/ledger/components/shared";
+import { PageHeader, Pager, usePaged } from "@/modules/ledger/components/shared";
 import { curf, money, relTime } from "@/modules/ledger/format";
 import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
@@ -50,17 +50,23 @@ export default function SuppliersPage() {
   const [showArchived, setShowArchived] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
+  // 每个供应商的累计消费（各 Key 的实际消费之和），用于排序
+  const usedOf = (s: SupplierRow) =>
+    s.wallets.filter((w) => w.enabled).reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
   const rows = useMemo(() => {
     const kw = q.trim().toLowerCase();
-    return (data ?? []).filter(
-      (s) =>
-        (showArchived || (!s.archived && !s.project_archived)) &&
-        (!kw ||
-          s.name.toLowerCase().includes(kw) ||
-          (s.project_name ?? "").toLowerCase().includes(kw) ||
-          s.wallets.some((w) => w.name.toLowerCase().includes(kw) || w.base_url.toLowerCase().includes(kw))),
-    );
+    return (data ?? [])
+      .filter(
+        (s) =>
+          (showArchived || (!s.archived && !s.project_archived)) &&
+          (!kw ||
+            s.name.toLowerCase().includes(kw) ||
+            (s.project_name ?? "").toLowerCase().includes(kw) ||
+            s.wallets.some((w) => w.name.toLowerCase().includes(kw) || w.base_url.toLowerCase().includes(kw))),
+      )
+      .sort((a, b) => usedOf(b) - usedOf(a)); // 累计消费多的在前
   }, [data, q, showArchived]);
+  const { rows: pageRows, pager } = usePaged(rows, `${q}|${showArchived}`);
 
   const active = (data ?? []).filter((s) => !s.archived && !s.project_archived);
   const wallets = active.flatMap((s) => s.wallets).filter((w) => w.enabled);
@@ -206,7 +212,7 @@ export default function SuppliersPage() {
                 </TableHeader>
                 <TableBody>
                   {rows.length ? (
-                    rows.map((s) => {
+                    pageRows.map((s) => {
                       const ws = s.wallets;
                       const on = ws.filter((w) => w.enabled);
                       const rc = s.recharge;
@@ -310,6 +316,7 @@ export default function SuppliersPage() {
               </Table>
             </div>
           )}
+          {data ? <Pager {...pager} className="mt-4" /> : null}
         </CardContent>
       </Card>
     </div>
