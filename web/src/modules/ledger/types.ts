@@ -151,6 +151,8 @@ export type Party = {
     settled: number;
     settled_base: number;
     from_entries: number;
+    paid_out?: number;
+    refunded?: number;
     entry_count: number;
     unsettled: number;
   } | null;
@@ -185,6 +187,55 @@ export type PartyWallet = {
   last_error: string;
   last_checked_at: string | null;
 };
+// 供应商详情：资金往来（双向）+ 每把 Key 在站点的分组 / 每组消耗 / 每日消耗
+export type FundEntry = {
+  id: number;
+  time: string;
+  type: EntryType;
+  amount: number;
+  currency: Currency;
+  rate: number | null;
+  cny: number;
+  in_cur: number;
+  project_id: number;
+  project_name: string;
+  note: string;
+  handler: string;
+};
+export type WalletGroup = { name: string; ratio: number | null; desc: string; model_count: number; types: string[] };
+export type ConsumePoint = { date: string; usd: number; count: number };
+export type ConsumeGroup = { group: string; usd: number; count: number; tokens: number };
+export type ConsumeModel = { model: string; usd: number; count: number; tokens: number };
+export type WalletDetail = {
+  id: number;
+  name: string;
+  platform: "newapi" | "sub2api";
+  base_url: string;
+  custom: boolean;
+  ratio: number | null;
+  last_wallet: number | null;
+  last_used: number | null;
+  last_used_actual: number | null;
+  last_actual: number | null;
+  has_token: boolean;
+  ok: boolean;
+  error?: string;
+  groups?: WalletGroup[];
+  byGroup?: ConsumeGroup[];
+  byModel?: ConsumeModel[];
+  daily?: ConsumePoint[];
+  groupDaily?: Record<string, ConsumePoint[]>;
+  period_days?: number | null;
+  period_used?: number | null;
+  note?: string;
+};
+export type SupplierDetail = {
+  party: Party;
+  funds: { currency: Currency; out: number; income: number; net: number; entries: FundEntry[] };
+  wallets: WalletDetail[];
+  rates: Rates;
+};
+
 export type PartiesSummary = {
   suppliers: Party[];
   customers: Party[];

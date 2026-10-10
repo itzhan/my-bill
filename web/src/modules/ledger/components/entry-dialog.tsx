@@ -90,7 +90,7 @@ export function EntryDialog({
     queryKey: ["ledger", "project-suppliers", project],
     queryFn: () =>
       get<{ suppliers: Party[] }>(`/projects/${project}/parties`).then((d) => d.suppliers.filter((s) => !s.archived)),
-    enabled: open && isExpense && !!project,
+    enabled: open && !!project,
   });
 
   // 每次打开时按「新建 / 编辑」初始化表单
@@ -179,7 +179,7 @@ export function EntryDialog({
       note: note.trim(),
       time: iso,
       images: doneIds(images),
-      party_id: isExp ? supplier : null,
+      party_id: supplier,
     };
     try {
       if (editing) {
@@ -342,29 +342,31 @@ export function EntryDialog({
             />
           </div>
 
-          {isExp ? (
-            <div className="space-y-2">
-              <Label>供应商（充值 / 结算，可选）</Label>
-              <Select
-                value={supplier ? String(supplier) : NO_SUPPLIER}
-                onValueChange={(v) => setSupplier(v === NO_SUPPLIER ? null : Number(v))}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NO_SUPPLIER}>不挂供应商</SelectItem>
-                  {(suppliers ?? []).map((s) => (
-                    <SelectItem key={s.id} value={String(s.id)}>
-                      {s.name}
-                      {s.currency !== "CNY" ? `（${s.currency} 结算）` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-muted-foreground text-xs">挂上供应商后，这笔支出会计入该供应商的「已结算 / 充值」</p>
-            </div>
-          ) : null}
+          <div className="space-y-2">
+            <Label>供应商（{isExp ? "充值 / 结算" : "退款 / 换钱"}，可选）</Label>
+            <Select
+              value={supplier ? String(supplier) : NO_SUPPLIER}
+              onValueChange={(v) => setSupplier(v === NO_SUPPLIER ? null : Number(v))}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_SUPPLIER}>不挂供应商</SelectItem>
+                {(suppliers ?? []).map((s) => (
+                  <SelectItem key={s.id} value={String(s.id)}>
+                    {s.name}
+                    {s.currency !== "CNY" ? `（${s.currency} 结算）` : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-muted-foreground text-xs">
+              {isExp
+                ? "挂上供应商 = 我们转给他（充值），计入该供应商的「已结算」"
+                : "挂上供应商 = 他转给我们（退款 / 换钱），抵减该供应商的「已结算」"}
+            </p>
+          </div>
 
           <div className="space-y-2">
             <Label>图片（凭证 / 截图，可选）</Label>

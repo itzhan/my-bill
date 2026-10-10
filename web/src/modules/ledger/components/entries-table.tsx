@@ -141,9 +141,9 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                                   <Badge
                                     variant="secondary"
                                     className="shrink-0 font-normal"
-                                    title={`充值 / 结算：${e.party_name}`}
+                                    title={`${e.type === "income" ? "退款 / 换钱" : "充值 / 结算"}：${e.party_name}`}
                                   >
-                                    充值 · {e.party_name}
+                                    {e.type === "income" ? "退款" : "充值"} · {e.party_name}
                                   </Badge>
                                 ) : null}
                               </div>
