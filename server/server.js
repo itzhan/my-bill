@@ -169,6 +169,10 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'party_
 if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = 'settled_base'").get()) {
   db.exec("ALTER TABLE parties ADD COLUMN settled_base REAL NOT NULL DEFAULT 0");
 }
+// 结算方式：prepaid 预付（先充后用，看余额）/ credit 授信（先用后付，余额按 0，只看消费）
+if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = 'settle_type'").get()) {
+  db.exec("ALTER TABLE parties ADD COLUMN settle_type TEXT NOT NULL DEFAULT 'prepaid'");
+}
 
 const ENTRY_SELECT = `SELECT e.*, p.name AS project_name, p.archived AS project_archived,
                              h.username AS handler_name, c.username AS creator_name, sp.name AS party_name
@@ -800,7 +804,7 @@ function supplierSettlement(p) {
   const settled = r2(base + fromEntries);
   return { currency: cur, payable, settled, settled_base: base, from_entries: fromEntries, entry_count: entries.length, unsettled: r2(payable - settled) };
 }
-const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
+const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId) {
   const parties = q.partiesOfProject.all(projectId);
@@ -835,6 +839,7 @@ Object.assign(ops, {
     const r = q.insertParty.run(p.id, kind, name, String(body.contact || '').trim().slice(0, 100), String(body.note || '').trim().slice(0, 200), currency, String(body.external_id || '').trim().slice(0, 100), user.id, now());
     const party = q.party.get(Number(r.lastInsertRowid));
     if (body.ratio !== undefined && body.ratio !== null && body.ratio !== '') { const ratio = Number(body.ratio); if (ratio > 0 && ratio <= 100) db.prepare('UPDATE parties SET ratio = ? WHERE id = ?').run(Math.round(ratio * 10000) / 10000, party.id); }
+    if (kind === 'supplier' && body.settle_type === 'credit') db.prepare("UPDATE parties SET settle_type = 'credit' WHERE id = ?").run(party.id);
     dataChanged(user, `${via}在「${p.name}」添加了${PARTY_LABEL[kind].name}「${name}」`);
     return party;
   },
@@ -854,6 +859,9 @@ Object.assign(ops, {
       const sb = Number(patch.settled_base);
       if (!Number.isFinite(sb)) throw new HttpError(400, '期初已结算必须是数字');
       db.prepare('UPDATE parties SET settled_base = ? WHERE id = ?').run(r2(sb), pa.id);
+    }
+    if (patch.settle_type !== undefined && pa.kind === 'supplier') {
+      db.prepare('UPDATE parties SET settle_type = ? WHERE id = ?').run(patch.settle_type === 'credit' ? 'credit' : 'prepaid', pa.id);
     }
     if (pa.relay_id && (ratio !== Number(pa.ratio) || currency !== pa.currency)) resetRelayAccrual(pa.id);
     dataChanged(user, `${via}修改了${PARTY_LABEL[pa.kind].name}「${pa.name}」${name !== pa.name ? ` → 「${name}」` : ''}${patch.ratio !== undefined && ratio !== pa.ratio ? `（倍率 ${pa.ratio} → ${ratio}）` : ''}${patch.archived !== undefined ? (patch.archived ? '（归档）' : '（恢复）') : ''} · ${pa.project_name}`);

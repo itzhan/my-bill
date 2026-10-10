@@ -70,7 +70,11 @@ export default function SuppliersPage() {
 
   const active = (data ?? []).filter((s) => !s.archived && !s.project_archived);
   const wallets = active.flatMap((s) => s.wallets).filter((w) => w.enabled);
-  const totalActual = sum(wallets, (w) => w.last_actual);
+  const totalActual = active
+    .filter((s) => s.settle_type !== "credit")
+    .flatMap((s) => s.wallets)
+    .filter((w) => w.enabled)
+    .reduce((a, w) => a + (w.last_actual ?? 0), 0);
   const totalUsed = sum(wallets, (w) => w.last_used_actual);
   const rates = pd?.rates ?? { USD: 7.2, USDT: 7.2 };
   // 未结算折人民币粗略合计（USD×rates.USD、USDT×rates.USDT、CNY×1）
@@ -230,6 +234,7 @@ export default function SuppliersPage() {
                           <TableCell>
                             <div className="flex items-center gap-1.5 font-medium">
                               {s.name}
+                              {s.settle_type === "credit" ? <Badge variant="outline">授信</Badge> : null}
                               {s.archived ? <Badge variant="outline">归档</Badge> : null}
                             </div>
                             <Link
@@ -286,7 +291,13 @@ export default function SuppliersPage() {
                             ))}
                           </TableCell>
                           <TableCell className="text-income text-right font-semibold tabular-nums">
-                            {on.length ? amt(sum(on, (w) => w.last_actual)) : "-"}
+                            {s.settle_type === "credit" ? (
+                              <span className="text-muted-foreground font-normal">授信</span>
+                            ) : on.length ? (
+                              amt(sum(on, (w) => w.last_actual))
+                            ) : (
+                              "-"
+                            )}
                           </TableCell>
                           <TableCell className="text-expense text-right tabular-nums">
                             {on.length ? amt(sum(on, (w) => w.last_used_actual)) : "-"}

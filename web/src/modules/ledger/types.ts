@@ -143,6 +143,7 @@ export type Party = {
   // 供应商余额汇总（只有绑定了 new-api / sub2api Key 的供应商才有）
   wallet?: { count: number; actual: number | null; used: number | null; errors: number } | null;
   settled_base?: number;
+  settle_type?: "prepaid" | "credit";
   // 供应商结算：应付（消费折结算币种）/ 已结算（期初+充值支出）/ 未结算
   recharge?: {
     currency: Currency;

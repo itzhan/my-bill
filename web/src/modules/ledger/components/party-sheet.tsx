@@ -125,6 +125,7 @@ function NewPartyForm({
   const [relayRef, setRelayRef] = useState("");
   const [ratio, setRatio] = useState("1");
   const [ext, setExt] = useState("");
+  const [settleType, setSettleType] = useState<"prepaid" | "credit">("prepaid");
   // 供应商余额：绑定我们在供应商站点（new-api / sub2api）的 Key，添加后立即抓钱包额度和倍率
   const [walletOn, setWalletOn] = useState(false);
   const [wallet, setWallet] = useState<WalletDraft>(EMPTY_WALLET);
@@ -151,6 +152,7 @@ function NewPartyForm({
         currency,
         external_id: ext,
         ratio: r,
+        ...(kind === "supplier" ? { settle_type: settleType } : {}),
       });
       toast.success(`已添加${L.name}「${d.party.name}」`);
       if (relayRef.trim()) {
@@ -207,6 +209,20 @@ function NewPartyForm({
           <CurrencySelect value={currency} onChange={setCurrency} />
         </div>
       </div>
+      {kind === "supplier" ? (
+        <div className="space-y-2">
+          <Label>结算方式</Label>
+          <Select value={settleType} onValueChange={(v) => setSettleType(v as "prepaid" | "credit")}>
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="prepaid">预付（先充值后使用，看钱包余额）</SelectItem>
+              <SelectItem value="credit">授信（先使用后付费，余额按 0，只看消费）</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
       <div className="space-y-2">
         <Label htmlFor="pty-note">备注（可选）</Label>
         <Input id="pty-note" maxLength={200} value={note} onChange={(e) => setNote(e.target.value)} />
@@ -319,6 +335,9 @@ function PartyDetailView({
           <div className="min-w-0">
             <SheetTitle className="flex items-center gap-2">
               {v.name} <Badge variant="secondary">{L.name}</Badge>
+              {v.kind === "supplier" ? (
+                <Badge variant="outline">{v.settle_type === "credit" ? "授信" : "预付"}</Badge>
+              ) : null}
               {v.archived ? <Badge variant="outline">归档</Badge> : null}
             </SheetTitle>
             <SheetDescription>{[v.project_name, v.contact, v.note].filter(Boolean).join(" · ")}</SheetDescription>
@@ -831,6 +850,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   const [ratio, setRatio] = useState(String(v.ratio));
   const [ext, setExt] = useState(v.external_id);
   const [settledBase, setSettledBase] = useState(v.kind === "supplier" ? String(v.settled_base ?? 0) : "");
+  const [settleType, setSettleType] = useState<"prepaid" | "credit">(v.settle_type === "credit" ? "credit" : "prepaid");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => setError(null), [v.id]);
@@ -853,7 +873,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
         currency,
         external_id: ext,
         ratio: r,
-        ...(v.kind === "supplier" ? { settled_base: Number(settledBase) || 0 } : {}),
+        ...(v.kind === "supplier" ? { settled_base: Number(settledBase) || 0, settle_type: settleType } : {}),
       });
       toast.success("已保存");
       reload();
@@ -927,19 +947,33 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
           <Input id="pe-ext" maxLength={100} value={ext} onChange={(e) => setExt(e.target.value)} />
         </div>
         {v.kind === "supplier" ? (
-          <div className="space-y-2">
-            <Label htmlFor="pe-settled">期初已结算（{currency}）</Label>
-            <Input
-              id="pe-settled"
-              inputMode="decimal"
-              placeholder="0"
-              value={settledBase}
-              onChange={(e) => setSettledBase(e.target.value)}
-            />
-            <p className="text-muted-foreground text-xs">
-              用这套系统之前已经充值 / 结算过的金额，按结算币种填；之后记账选这个供应商的支出会自动累加
-            </p>
-          </div>
+          <>
+            <div className="space-y-2">
+              <Label>结算方式</Label>
+              <Select value={settleType} onValueChange={(x) => setSettleType(x as "prepaid" | "credit")}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="prepaid">预付（先充后用，看余额）</SelectItem>
+                  <SelectItem value="credit">授信（先用后付，余额按 0）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="pe-settled">期初已结算（{currency}）</Label>
+              <Input
+                id="pe-settled"
+                inputMode="decimal"
+                placeholder="0"
+                value={settledBase}
+                onChange={(e) => setSettledBase(e.target.value)}
+              />
+              <p className="text-muted-foreground text-xs">
+                用这套系统之前已经充值 / 结算过的金额，按结算币种填；之后记账选这个供应商的支出会自动累加
+              </p>
+            </div>
+          </>
         ) : null}
         <FormError>{error}</FormError>
         <div className="grid grid-cols-2 gap-2">

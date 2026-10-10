@@ -207,29 +207,11 @@ export function WalletFields({
             onChange={(e) => setV({ ...v, access_token: e.target.value })}
           />
           <Input
-            placeholder="用户 ID（选填，仅老版本登录接口需要）"
+            placeholder="用户 ID（选填，仅老版本 new-api 需要）"
             inputMode="numeric"
             value={v.token_user_id}
             onChange={(e) => setV({ ...v, token_user_id: e.target.value })}
           />
-          <details>
-            <summary className="text-muted-foreground cursor-pointer text-xs">用账号密码代替令牌（不推荐）</summary>
-            <div className="mt-2 grid gap-3 sm:grid-cols-2">
-              <Input
-                placeholder="账号 / 邮箱"
-                autoComplete="off"
-                value={v.login_user}
-                onChange={(e) => setV({ ...v, login_user: e.target.value })}
-              />
-              <Input
-                type="password"
-                autoComplete="new-password"
-                placeholder={loginHint ? "密码（留空 = 不修改）" : "密码"}
-                value={v.login_pass}
-                onChange={(e) => setV({ ...v, login_pass: e.target.value })}
-              />
-            </div>
-          </details>
         </div>
       ) : null}
       <label className="flex items-center justify-between gap-3 text-sm">
