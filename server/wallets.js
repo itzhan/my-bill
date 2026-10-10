@@ -85,6 +85,30 @@ async function newapiLogin(base, creds, qpu, insecure) {
   return { ok: false, error: fails[0] || "没有可用的账号密码", fails };
 }
 
+// new-api 用「系统访问令牌」读账户钱包与总消费（推荐：不登录、不创建会话，不会触发 409）。
+// 新版令牌自带用户身份；老版本可能还要带 New-Api-User（userId），填了就一起发。
+async function newapiSelf(base, token, userId, qpu, insecure) {
+  const headers = { Accept: "application/json", Authorization: `Bearer ${token}` };
+  if (userId) headers["New-Api-User"] = String(userId);
+  let res;
+  try {
+    res = await fetch(`${base}/api/user/self`, { headers, dispatcher: dispatcherFor(insecure), signal: AbortSignal.timeout(TIMEOUT_MS) });
+  } catch (e) {
+    return { ok: false, error: redact(e?.cause?.message || e?.message || e, token) };
+  }
+  const raw = await res.text();
+  let j = null;
+  try {
+    j = raw ? JSON.parse(raw) : null;
+  } catch {}
+  if (!j || !j.success || !j.data) {
+    const msg = j?.message || `HTTP ${res.status}`;
+    return { ok: false, error: redact(`访问令牌无效或过期：${msg}${!userId && (res.status === 401 || res.status === 403) ? "（老版本可能还需填用户 ID）" : ""}`, token) };
+  }
+  const u = j.data;
+  return { ok: true, wallet: round(num(u.quota) / qpu, 4), used: round(num(u.used_quota) / qpu, 4), group: u.group || "" };
+}
+
 // sub2api：/v1/usage 拿钱包（balance），/v1/sub2api/billing 拿倍率；老版本没有 billing 接口时用 实际扣费 / 标准费用 反推
 async function fetchSub2api(base, key, wantRatio, insecure) {
   const u = await httpJson(`${base}/v1/usage`, { key, insecure });
@@ -128,16 +152,23 @@ async function fetchSub2api(base, key, wantRatio, insecure) {
 // - 余额：令牌有额度上限 → 令牌剩余额度（/api/usage/token）；令牌无限额度 → 用户钱包（/v1/dashboard/billing/subscription − usage，
 //   站点开着「按令牌统计」时这里拿不到钱包，只能提示）
 // - 倍率：最近一条消费日志里的分组倍率（/api/log/token），没有消费记录时退回 /api/pricing 的 default 分组倍率
-async function fetchNewapi(base, key, wantRatio, login, insecure) {
+async function fetchNewapi(base, key, wantRatio, login, insecure, token) {
   const st = await httpJson(`${base}/api/status`, { insecure });
   const s = st.ok ? st.json.data || {} : {};
   const qpu = num(s.quota_per_unit) || 500000;
   const display = s.quota_display_type || (s.display_in_currency === false ? "TOKENS" : "USD");
   const usdRate = num(s.usd_exchange_rate) || 1;
 
-  // 填了账号密码：登录读账户钱包余额与总消费（用户视角），无限额度 Key 也能看到
+  // 账户视角读钱包余额与总消费（无限额度 Key 也能看到）：优先用访问令牌（不登录、不会 409），否则账号密码登录
   let loginRes = null;
-  if (login && login.length) {
+  let loginErr = "";
+  if (token && token.value) {
+    loginRes = await newapiSelf(base, token.value, token.userId, qpu, insecure);
+    if (!loginRes.ok) {
+      loginErr = loginRes.error;
+      loginRes = null;
+    }
+  } else if (login && login.length) {
     loginRes = await newapiLogin(base, login, qpu, insecure);
   }
 
@@ -189,6 +220,7 @@ async function fetchNewapi(base, key, wantRatio, login, insecure) {
   }
   // 登录成功：钱包和消费以账户为准，清掉 Key 维度读不到钱包的提示；登录失败则记一句
   if (loginRes?.ok) warning = "";
+  else if (loginErr) warning = `${loginErr}${warning ? `；${warning}` : ""}`;
   else if (loginRes) warning = `账号密码登录失败：${loginRes.error}${warning ? `；${warning}` : ""}`;
   const loginUsed = loginRes?.ok ? { user: loginRes.user, pass: loginRes.pass } : null;
   if (!wantRatio) return { wallet, kind, used, warning, loginUsed };
@@ -237,12 +269,14 @@ async function fetchWallet(w) {
   const base = baseOf(w.base_url);
   const wantRatio = !w.custom;
   const insecure = !!w.insecure;
+  // 访问令牌（推荐）：填了就用令牌读账户，不登录
+  const token = w.access_token ? { value: w.access_token, userId: w.token_user_id || "" } : null;
   // 账号密码：优先用这把 Key 自己填的；没填时把传进来的候选组合都试一遍（批量导入用）
   const login = w.login_user && w.login_pass ? [[w.login_user, w.login_pass]] : Array.isArray(w.login_candidates) ? w.login_candidates : [];
   const r =
     w.platform === "sub2api"
       ? await fetchSub2api(base, w.api_key, wantRatio, insecure)
-      : await fetchNewapi(base, w.api_key, wantRatio, login, insecure);
+      : await fetchNewapi(base, w.api_key, wantRatio, login, insecure, token);
   const ratio = w.custom ? num(w.custom_ratio) : r.ratio ?? null;
   const wallet = r.wallet === null ? null : round(r.wallet, 4);
   // 自定义倍率：实际余额 = 钱包 × 倍率；普通模式：实际余额 = 钱包
@@ -282,16 +316,16 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} REAL`);
   }
   // 迁移：new-api 账号密码登录（读账户钱包与总消费，用户视角）、跳过证书校验
-  for (const [col, ddl] of [['login_user', "TEXT NOT NULL DEFAULT ''"], ['login_pass', "TEXT NOT NULL DEFAULT ''"], ['insecure', 'INTEGER NOT NULL DEFAULT 0']]) {
+  for (const [col, ddl] of [['login_user', "TEXT NOT NULL DEFAULT ''"], ['login_pass', "TEXT NOT NULL DEFAULT ''"], ['insecure', 'INTEGER NOT NULL DEFAULT 0'], ['access_token', "TEXT NOT NULL DEFAULT ''"], ['token_user_id', "TEXT NOT NULL DEFAULT ''"]]) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} ${ddl}`);
   }
   const getOne = db.prepare('SELECT * FROM party_wallets WHERE id = ?');
   const ofParty = db.prepare('SELECT * FROM party_wallets WHERE party_id = ? ORDER BY id');
   const party = db.prepare("SELECT * FROM parties WHERE id = ? AND kind = 'supplier'");
 
-  // Key / 密码不回传，只给脱敏信息
+  // Key / 密码 / 令牌不回传，只给脱敏信息
   const view = (w) => {
-    const { api_key, login_pass, ...rest } = w;
+    const { api_key, login_pass, access_token, ...rest } = w;
     return {
       ...rest,
       custom: !!w.custom,
@@ -300,6 +334,9 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
       has_key: !!api_key,
       key_masked: api_key ? `${api_key.slice(0, 5)}…${api_key.slice(-4)}` : '',
       has_login: !!(w.login_user && login_pass),
+      has_token: !!access_token,
+      // 填了令牌就以令牌为准（优先于密码登录）
+      auth_mode: access_token ? 'token' : w.login_user && login_pass ? 'login' : 'key',
     };
   };
 
@@ -322,6 +359,12 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     // 清空登录：login_user 传空串时一并清掉密码；否则密码留空 = 保持原值
     if ('login_user' in b && !str(b.login_user, 120)) out.login_pass = '';
     else if (str(b.login_pass, 200)) out.login_pass = str(b.login_pass, 200);
+    // 访问令牌（new-api 系统访问令牌）+ 可选用户 ID（老版本需要）。令牌传空串 = 清除
+    if ('access_token' in b) {
+      out.access_token = str(b.access_token, 300);
+      if (!out.access_token) out.token_user_id = '';
+    }
+    if (!partial || 'token_user_id' in b) out.token_user_id = str(b.token_user_id, 40);
     if (str(b.api_key, 500)) out.api_key = str(b.api_key, 500); // 留空 = 保持原值
     return out;
   }

@@ -171,6 +171,9 @@ export type PartyWallet = {
   last_wallet_kind: "" | "wallet" | "token" | "quota" | "subscription" | "login";
   login_user: string;
   has_login?: boolean;
+  token_user_id: string;
+  has_token?: boolean;
+  auth_mode?: "token" | "login" | "key";
   insecure: boolean;
   last_ratio: number | null;
   last_ratio_source: string;

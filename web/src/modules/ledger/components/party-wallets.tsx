@@ -68,6 +68,8 @@ export type WalletDraft = {
   api_key: string;
   custom: boolean;
   custom_ratio: string;
+  access_token: string;
+  token_user_id: string;
   login_user: string;
   login_pass: string;
   insecure: boolean;
@@ -79,6 +81,8 @@ export const EMPTY_WALLET: WalletDraft = {
   api_key: "",
   custom: false,
   custom_ratio: "",
+  access_token: "",
+  token_user_id: "",
   login_user: "",
   login_pass: "",
   insecure: false,
@@ -99,8 +103,10 @@ export const walletBody = (v: WalletDraft) => ({
   custom_ratio: v.custom ? Number(v.custom_ratio) : null,
   insecure: v.insecure,
   login_user: v.login_user.trim(),
+  token_user_id: v.token_user_id.trim(),
   ...(v.api_key.trim() ? { api_key: v.api_key.trim() } : {}),
   ...(v.login_pass.trim() ? { login_pass: v.login_pass.trim() } : {}),
+  ...(v.access_token.trim() ? { access_token: v.access_token.trim() } : {}),
 });
 
 // 平台 + 站点地址 + Key + 自定义倍率 + 账号密码（添加供应商表单和「余额」弹窗共用）
@@ -109,11 +115,13 @@ export function WalletFields({
   setV,
   keyHint,
   loginHint,
+  tokenHint,
 }: {
   v: WalletDraft;
   setV: (v: WalletDraft) => void;
   keyHint?: string;
   loginHint?: string;
+  tokenHint?: string;
 }) {
   return (
     <>
@@ -184,28 +192,44 @@ export function WalletFields({
       {v.platform === "newapi" ? (
         <div className="bg-muted/40 space-y-3 rounded-lg border p-3">
           <div>
-            <span className="text-sm font-medium">账号密码（可选，new-api）</span>
+            <span className="text-sm font-medium">访问令牌（推荐，new-api）</span>
             <span className="text-muted-foreground block text-xs">
-              无限额度的 Key
-              读不到钱包余额。填这个供应商站点的登录账号密码，就能按「用户视角」读到真实钱包余额和账户总消费。
-              {loginHint ? `当前 ${loginHint}。` : ""}
+              无限额度的 Key 读不到钱包余额。填这个站点的「系统访问令牌」（控制台 → 个人设置 → 生成系统访问令牌），
+              就能按「用户视角」读到真实钱包余额和账户总消费，比账号密码更稳，也不用登录。
+              {tokenHint ? `当前 ${tokenHint}。` : ""}
             </span>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Input
-              placeholder="账号 / 邮箱"
-              autoComplete="off"
-              value={v.login_user}
-              onChange={(e) => setV({ ...v, login_user: e.target.value })}
-            />
-            <Input
-              type="password"
-              autoComplete="new-password"
-              placeholder={loginHint ? "密码（留空 = 不修改）" : "密码"}
-              value={v.login_pass}
-              onChange={(e) => setV({ ...v, login_pass: e.target.value })}
-            />
-          </div>
+          <Input
+            type="password"
+            autoComplete="off"
+            placeholder={tokenHint ? "访问令牌（留空 = 不修改）" : "访问令牌"}
+            value={v.access_token}
+            onChange={(e) => setV({ ...v, access_token: e.target.value })}
+          />
+          <Input
+            placeholder="用户 ID（选填，仅老版本登录接口需要）"
+            inputMode="numeric"
+            value={v.token_user_id}
+            onChange={(e) => setV({ ...v, token_user_id: e.target.value })}
+          />
+          <details>
+            <summary className="text-muted-foreground cursor-pointer text-xs">用账号密码代替令牌（不推荐）</summary>
+            <div className="mt-2 grid gap-3 sm:grid-cols-2">
+              <Input
+                placeholder="账号 / 邮箱"
+                autoComplete="off"
+                value={v.login_user}
+                onChange={(e) => setV({ ...v, login_user: e.target.value })}
+              />
+              <Input
+                type="password"
+                autoComplete="new-password"
+                placeholder={loginHint ? "密码（留空 = 不修改）" : "密码"}
+                value={v.login_pass}
+                onChange={(e) => setV({ ...v, login_pass: e.target.value })}
+              />
+            </div>
+          </details>
         </div>
       ) : null}
       <label className="flex items-center justify-between gap-3 text-sm">
@@ -249,6 +273,8 @@ function WalletDialog({
             api_key: "",
             custom: wallet.custom,
             custom_ratio: wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
+            access_token: "",
+            token_user_id: wallet.token_user_id ?? "",
             login_user: wallet.login_user ?? "",
             login_pass: "",
             insecure: wallet.insecure,
@@ -299,6 +325,7 @@ function WalletDialog({
           setV={setV}
           keyHint={wallet ? (wallet.has_key ? `（当前 ${wallet.key_masked}，留空 = 不修改）` : "") : undefined}
           loginHint={wallet?.has_login ? `已绑定账号 ${wallet.login_user}` : undefined}
+          tokenHint={wallet?.has_token ? "已绑定令牌" : undefined}
         />
         <FormError>{error}</FormError>
         <div className="flex justify-end gap-2">
@@ -487,7 +514,7 @@ export function PartyWallets({ party }: { party: Party }) {
                 </div>
                 <div className="text-muted-foreground truncate font-mono text-xs" title={w.base_url}>
                   {w.base_url} · {w.key_masked}
-                  {w.has_login ? ` · 登录 ${w.login_user}` : ""}
+                  {w.has_token ? " · 令牌" : w.has_login ? ` · 登录 ${w.login_user}` : ""}
                   {w.insecure ? " · 跳过证书" : ""} ·{" "}
                   {w.last_checked_at ? `${relTime(w.last_checked_at)}抓取` : "未抓取"}
                 </div>
