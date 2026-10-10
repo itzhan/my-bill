@@ -212,6 +212,10 @@ const q = {
   deleteEntry: db.prepare('DELETE FROM entries WHERE id = ?'),
   // 某供应商的充值支出（计入已结算）
   entriesOfParty: db.prepare("SELECT * FROM entries WHERE party_id = ? AND type = 'expense'"),
+  // 某供应商的退款收入（他转给我们，抵减已结算）
+  incomesOfParty: db.prepare("SELECT * FROM entries WHERE party_id = ? AND type = 'income'"),
+  // 资金往来明细：挂该供应商的全部流水（含项目名，供详情页双向跳转）
+  entriesTaggedParty: db.prepare(`${ENTRY_SELECT} WHERE e.party_id = ? ORDER BY e.created_at DESC, e.id DESC`),
 
   transfersOfProject: db.prepare(`${TRANSFER_SELECT} WHERE t.project_id = ? ORDER BY t.created_at DESC, t.id DESC`),
   allTransfers: db.prepare(`${TRANSFER_SELECT} ORDER BY t.created_at DESC, t.id DESC`),
@@ -585,19 +589,17 @@ const ops = {
       }
       images = JSON.stringify(ids);
     }
-    // 充值 / 结算：支出可挂一个本项目的供应商；传 null 或空清除
+    // 挂供应商：支出 = 我们转给他（充值 / 结算），收入 = 他转给我们（退款 / 换钱）；传 null 或空清除
     let partyId = base ? base.party_id : null;
     if (body.party_id !== undefined) {
       if (body.party_id === null || body.party_id === '' || body.party_id === 0) partyId = null;
       else {
-        if (type !== 'expense') throw new HttpError(400, '只有支出可以挂供应商（充值 / 结算）');
         const pa = q.party.get(Number(body.party_id));
         if (!pa || pa.kind !== 'supplier') throw new HttpError(400, '供应商不存在');
         if (pa.project_id !== p.id) throw new HttpError(400, '供应商不属于这个项目');
         partyId = pa.id;
       }
     }
-    if (partyId && type !== 'expense') partyId = null;
     return { project: p, type, amount, currency, rate, handlerId, handler, note, at, images, partyId };
   },
   addEntry(user, body, via = '') {
@@ -796,13 +798,20 @@ function supplierSettlement(p) {
   const w = partyWallets ? partyWallets.summaryOf(p.id) : null;
   const payable = w && w.used != null ? r2(usdToCur(w.used, cur, rates)) : 0;
   const entries = q.entriesOfParty.all(p.id);
+  const incomes = q.incomesOfParty.all(p.id);
   // 币种相同直接用原值，否则按记账汇率折人民币再折结算币种（口径同往来 partySettle）
-  let fromEntries = 0;
-  for (const e of entries) fromEntries += e.currency === cur ? e.amount : cnyToCur(entryBase(e, rates), cur, rates);
-  fromEntries = r2(fromEntries);
+  const conv = (e) => (e.currency === cur ? e.amount : cnyToCur(entryBase(e, rates), cur, rates));
+  let paidOut = 0;
+  for (const e of entries) paidOut += conv(e);
+  let refunded = 0;
+  for (const e of incomes) refunded += conv(e);
+  paidOut = r2(paidOut);
+  refunded = r2(refunded);
+  // 净充值（计入已结算）= 我们转给他 − 他转回我们
+  const fromEntries = r2(paidOut - refunded);
   const base = r2(Number(p.settled_base) || 0);
   const settled = r2(base + fromEntries);
-  return { currency: cur, payable, settled, settled_base: base, from_entries: fromEntries, entry_count: entries.length, unsettled: r2(payable - settled) };
+  return { currency: cur, payable, settled, settled_base: base, from_entries: fromEntries, paid_out: paidOut, refunded, entry_count: entries.length + incomes.length, unsettled: r2(payable - settled) };
 }
 const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
@@ -2889,6 +2898,23 @@ app.get('/api/suppliers', auth, (req, res) => {
   const rows = db.prepare(`SELECT pa.*, p.name AS project_name, p.archived AS project_archived FROM parties pa JOIN projects p ON p.id = pa.project_id
                            WHERE pa.kind = 'supplier' ORDER BY pa.archived, p.archived, pa.id DESC`).all();
   res.json({ suppliers: rows.map((r) => ({ ...partyView(r), project_archived: !!r.project_archived, wallets: partyWallets.listOf(r.id) })), rates: getRates() });
+});
+// 供应商详情：资金往来（双向明细）+ 每把 Key 在站点的分组 / 每组消耗 / 每日消耗
+app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
+  const pa = q.party.get(Number(req.params.id));
+  if (!pa || pa.kind !== 'supplier') return fail(res, 404, '供应商不存在');
+  const rates = getRates();
+  const cur = pa.currency || 'CNY';
+  const conv = (e) => (e.currency === cur ? e.amount : cnyToCur(entryBase(e, rates), cur, rates));
+  let out = 0, income = 0;
+  const entries = q.entriesTaggedParty.all(pa.id).map((e) => {
+    const inCur = conv(e);
+    if (e.type === 'income') income += inCur; else out += inCur;
+    return { id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, rate: e.rate, cny: r2(entryBase(e, rates)), in_cur: r2(inCur), project_id: e.project_id, project_name: e.project_name, note: e.note, handler: e.handler_name };
+  });
+  const wallets = [];
+  for (const w of partyWallets.listOf(pa.id)) wallets.push(await partyWallets.detailOf(w.id));
+  res.json({ party: partyView(pa), funds: { currency: cur, out: r2(out), income: r2(income), net: r2(out - income), entries }, wallets, rates });
 });
 app.delete('/api/party-records/:id', auth, (req, res) => { ops.deletePartyRecord(req.user, req.params.id); res.json({ ok: true }); });
 

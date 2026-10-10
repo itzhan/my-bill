@@ -266,6 +266,116 @@ async function fetchNewapi(base, key, wantRatio, login, insecure, token) {
   return { wallet, kind, used, ratio, source, warning, loginUsed };
 }
 
+// ---------- 供应商详情：分组 / 每组消耗 / 每日消耗 ----------
+// 用访问令牌发 GET（带 New-Api-User），详情接口都走账户视角，令牌是唯一来源
+async function newapiAuthedGet(base, token, userId, path, insecure) {
+  const headers = { Accept: "application/json", Authorization: `Bearer ${token}` };
+  if (userId) headers["New-Api-User"] = String(userId);
+  let res;
+  try {
+    res = await fetch(`${base}${path}`, { headers, dispatcher: dispatcherFor(insecure), signal: AbortSignal.timeout(TIMEOUT_MS) });
+  } catch (e) {
+    return { ok: false, error: redact(e?.cause?.message || e?.message || e, token) };
+  }
+  const raw = await res.text();
+  let j = null;
+  try { j = raw ? JSON.parse(raw) : null; } catch {}
+  if (!j) return { ok: false, status: res.status, error: `HTTP ${res.status}` };
+  return { ok: true, status: res.status, json: j };
+}
+
+// 从模型名归类出大类（分组类型 Claude/Gemini/GPT/Grok 在接口里没有，靠模型名反推）
+function modelType(name) {
+  const m = String(name || "").toLowerCase();
+  if (m.includes("claude")) return "Claude";
+  if (m.includes("gemini")) return "Gemini";
+  if (m.includes("grok")) return "Grok";
+  if (m.includes("deepseek")) return "DeepSeek";
+  if (m.includes("qwen")) return "Qwen";
+  if (/gpt|chatgpt|o1|o3|o4|davinci|dall|whisper/.test(m)) return "GPT";
+  return "其他";
+}
+// data/self 的 created_at 是按天分桶的时间戳，统一按东八区格式化成 YYYY-MM-DD
+const tsDay = (ts) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(new Date((num(ts) || 0) * 1000));
+
+async function fetchNewapiDetail(w) {
+  const base = baseOf(w.base_url);
+  const insecure = !!w.insecure;
+  const token = w.access_token;
+  if (!token) throw new Error("这家供应商没有填访问令牌，详情需要令牌才能读分组与每组消耗");
+  const uid = w.token_user_id || "";
+  const st = await httpJson(`${base}/api/status`, { insecure });
+  const qpu = num(st.ok ? st.json.data?.quota_per_unit : null) || 500000;
+
+  // 分组：名称 / 倍率 / 介绍
+  const gr = await newapiAuthedGet(base, token, uid, "/api/user/groups", insecure);
+  if (!gr.ok) throw new Error(`读取分组失败：${gr.error || "令牌可能无效"}`);
+  const groupsRaw = gr.json.data && typeof gr.json.data === "object" ? gr.json.data : {};
+  // 定价：模型 → 启用的分组，用于反推每个分组服务了哪些模型、属于什么类型
+  const pr = await newapiAuthedGet(base, token, uid, "/api/pricing", insecure);
+  const models = pr.ok && Array.isArray(pr.json.data) ? pr.json.data : [];
+  const groupModels = {};
+  for (const m of models) for (const g of m.enable_groups || []) (groupModels[g] ||= new Set()).add(m.model_name);
+  const groups = Object.entries(groupsRaw)
+    .map(([name, v]) => {
+      const ms = [...(groupModels[name] || [])];
+      return { name, ratio: num(v && v.ratio), desc: (v && v.desc) || "", model_count: ms.length, types: [...new Set(ms.map(modelType))] };
+    })
+    .sort((a, b) => (b.ratio || 0) - (a.ratio || 0));
+
+  // 消耗：/api/data/self 按「天 × 模型 × 分组」预聚合。站点对跨度有上限（约 30 天），超了会返回空
+  const periodDays = 30;
+  const now = Math.floor(Date.now() / 1000);
+  const start = now - periodDays * 86400;
+  const d = await newapiAuthedGet(base, token, uid, `/api/data/self?start_timestamp=${start}&end_timestamp=${now}&default_time=day`, insecure);
+  const rows = d.ok && Array.isArray(d.json.data) ? d.json.data : [];
+  const byGroupMap = new Map(), byModelMap = new Map(), dailyMap = new Map(), groupDaily = {};
+  let total = 0;
+  for (const r of rows) {
+    const usd = (num(r.quota) || 0) / qpu, cnt = num(r.count) || 0, tok = num(r.token_used) || 0;
+    total += usd;
+    const g = r.use_group || "(无分组)";
+    const day = tsDay(r.created_at);
+    const bg = byGroupMap.get(g) || { group: g, usd: 0, count: 0, tokens: 0 };
+    bg.usd += usd; bg.count += cnt; bg.tokens += tok; byGroupMap.set(g, bg);
+    const bm = byModelMap.get(r.model_name) || { model: r.model_name, usd: 0, count: 0, tokens: 0 };
+    bm.usd += usd; bm.count += cnt; bm.tokens += tok; byModelMap.set(r.model_name, bm);
+    const dd = dailyMap.get(day) || { date: day, usd: 0, count: 0 };
+    dd.usd += usd; dd.count += cnt; dailyMap.set(day, dd);
+    (groupDaily[g] ||= new Map());
+    const gd = groupDaily[g].get(day) || { date: day, usd: 0, count: 0 };
+    gd.usd += usd; gd.count += cnt; groupDaily[g].set(day, gd);
+  }
+  const fin = (m) => [...m.values()].map((x) => ({ ...x, usd: round(x.usd, 4) }));
+  const gdaily = {};
+  for (const [g, m] of Object.entries(groupDaily)) gdaily[g] = fin(m).sort((a, b) => (a.date < b.date ? -1 : 1));
+  return {
+    platform: "newapi",
+    groups,
+    byGroup: fin(byGroupMap).sort((a, b) => b.usd - a.usd),
+    byModel: fin(byModelMap).sort((a, b) => b.usd - a.usd),
+    daily: fin(dailyMap).sort((a, b) => (a.date < b.date ? -1 : 1)),
+    groupDaily: gdaily,
+    period_days: periodDays,
+    period_used: round(total, 4),
+  };
+}
+
+// sub2api：用 Key 只能拿到按模型/按天的消耗，拿不到按分组的拆分（那要登录态）
+async function fetchSub2apiDetail(w) {
+  const base = baseOf(w.base_url);
+  const insecure = !!w.insecure;
+  const u = await httpJson(`${base}/v1/usage`, { key: w.api_key, insecure });
+  if (!u.ok) throw new Error(`读取失败：${u.error}`);
+  const d = u.json || {};
+  const costOf = (v) => (typeof v === "object" && v ? num(v.actual_cost ?? v.cost) : num(v)) || 0;
+  const mSrc = d.usage?.by_model || d.usage?.models || {};
+  const byModel = Object.entries(mSrc).map(([model, v]) => ({ model, usd: round(costOf(v), 4), count: num(v?.count) || 0, tokens: 0 })).sort((a, b) => b.usd - a.usd);
+  const dSrc = d.usage?.by_day || d.usage?.daily || {};
+  const daily = Object.entries(dSrc).map(([date, v]) => ({ date, usd: round(costOf(v), 4), count: num(v?.count) || 0 })).sort((a, b) => (a.date < b.date ? -1 : 1));
+  return { platform: "sub2api", groups: [], byGroup: [], byModel, daily, groupDaily: {}, period_days: null, period_used: num(d.usage?.total?.actual_cost), note: "sub2api 用 Key 拿不到按分组的消耗明细（需要登录态）" };
+}
+
 async function fetchWallet(w) {
   const base = baseOf(w.base_url);
   const wantRatio = !w.custom;
@@ -454,6 +564,23 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     summaryOf(partyId) {
       const r = sumStmt.get(partyId);
       return r && r.n ? { count: r.n, actual: r.actual === null ? null : round(r.actual, 4), used: r.used === null ? null : round(r.used, 4), errors: r.errors } : null;
+    },
+    // 详情页用：某把 Key 在供应商站点的分组 / 每组消耗 / 每日消耗（实时抓，不入库）
+    async detailOf(walletId) {
+      const w = getOne.get(Number(walletId));
+      if (!w) return null;
+      const ratio = w.custom ? num(w.custom_ratio) : num(w.last_ratio);
+      const meta = {
+        id: w.id, name: w.name, platform: w.platform, base_url: w.base_url, custom: !!w.custom, ratio,
+        last_wallet: num(w.last_wallet), last_used: num(w.last_used), last_used_actual: num(w.last_used_actual),
+        last_actual: num(w.last_actual), has_token: !!w.access_token,
+      };
+      try {
+        const data = w.platform === "sub2api" ? await fetchSub2apiDetail(w) : await fetchNewapiDetail(w);
+        return { ...meta, ok: true, ...data };
+      } catch (e) {
+        return { ...meta, ok: false, error: redact(e.message, w.api_key || w.access_token) };
+      }
     },
   };
 }
