@@ -108,6 +108,8 @@ export type Entry = {
   creator_name: string;
   base: number;
   images: Attachment[];
+  party_id: number | null;
+  party_name: string;
 };
 
 export type Settle = {
@@ -140,6 +142,17 @@ export type Party = {
   settle: Settle;
   // 供应商余额汇总（只有绑定了 new-api / sub2api Key 的供应商才有）
   wallet?: { count: number; actual: number | null; used: number | null; errors: number } | null;
+  settled_base?: number;
+  // 供应商结算：应付（消费折结算币种）/ 已结算（期初+充值支出）/ 未结算
+  recharge?: {
+    currency: Currency;
+    payable: number;
+    settled: number;
+    settled_base: number;
+    from_entries: number;
+    entry_count: number;
+    unsettled: number;
+  } | null;
 };
 
 // 供应商余额：我们在供应商站点（new-api / sub2api）的 Key 对应的钱包额度与倍率

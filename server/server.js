@@ -162,13 +162,21 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'images
 for (const [col, ddl] of [['relay_id', 'INTEGER'], ['relay_ref', "TEXT NOT NULL DEFAULT ''"], ['ratio', 'REAL NOT NULL DEFAULT 1']]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = ?").get(col)) db.exec(`ALTER TABLE parties ADD COLUMN ${col} ${ddl}`);
 }
+// 迁移：支出可挂供应商（充值 / 结算）；供应商可设「期初已结算」金额（按其结算币种）
+if (!db.prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'party_id'").get()) {
+  db.exec("ALTER TABLE entries ADD COLUMN party_id INTEGER REFERENCES parties(id) ON DELETE SET NULL");
+}
+if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = 'settled_base'").get()) {
+  db.exec("ALTER TABLE parties ADD COLUMN settled_base REAL NOT NULL DEFAULT 0");
+}
 
 const ENTRY_SELECT = `SELECT e.*, p.name AS project_name, p.archived AS project_archived,
-                             h.username AS handler_name, c.username AS creator_name
+                             h.username AS handler_name, c.username AS creator_name, sp.name AS party_name
                       FROM entries e
                       JOIN projects p ON p.id = e.project_id
                       JOIN users h ON h.id = e.handler_id
-                      JOIN users c ON c.id = e.created_by`;
+                      JOIN users c ON c.id = e.created_by
+                      LEFT JOIN parties sp ON sp.id = e.party_id`;
 
 const TRANSFER_SELECT = `SELECT t.*, f.username AS from_name, g.username AS to_name, c.username AS creator_name, p.name AS project_name
                          FROM transfers t
@@ -195,9 +203,11 @@ const q = {
   entry: db.prepare(`${ENTRY_SELECT} WHERE e.id = ?`),
   reportEntriesAll: db.prepare(`${ENTRY_SELECT} WHERE p.archived = 0 ORDER BY e.created_at DESC, e.id DESC`),
   reportEntriesEvery: db.prepare(`${ENTRY_SELECT} ORDER BY e.created_at DESC, e.id DESC`),
-  insertEntry: db.prepare(`INSERT INTO entries (project_id, type, amount, currency, rate, handler_id, created_by, note, created_at, images) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  updateEntry: db.prepare(`UPDATE entries SET project_id = ?, type = ?, amount = ?, currency = ?, rate = ?, handler_id = ?, note = ?, created_at = ?, images = ? WHERE id = ?`),
+  insertEntry: db.prepare(`INSERT INTO entries (project_id, type, amount, currency, rate, handler_id, created_by, note, created_at, images, party_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  updateEntry: db.prepare(`UPDATE entries SET project_id = ?, type = ?, amount = ?, currency = ?, rate = ?, handler_id = ?, note = ?, created_at = ?, images = ?, party_id = ? WHERE id = ?`),
   deleteEntry: db.prepare('DELETE FROM entries WHERE id = ?'),
+  // 某供应商的充值支出（计入已结算）
+  entriesOfParty: db.prepare("SELECT * FROM entries WHERE party_id = ? AND type = 'expense'"),
 
   transfersOfProject: db.prepare(`${TRANSFER_SELECT} WHERE t.project_id = ? ORDER BY t.created_at DESC, t.id DESC`),
   allTransfers: db.prepare(`${TRANSFER_SELECT} ORDER BY t.created_at DESC, t.id DESC`),
@@ -571,11 +581,24 @@ const ops = {
       }
       images = JSON.stringify(ids);
     }
-    return { project: p, type, amount, currency, rate, handlerId, handler, note, at, images };
+    // 充值 / 结算：支出可挂一个本项目的供应商；传 null 或空清除
+    let partyId = base ? base.party_id : null;
+    if (body.party_id !== undefined) {
+      if (body.party_id === null || body.party_id === '' || body.party_id === 0) partyId = null;
+      else {
+        if (type !== 'expense') throw new HttpError(400, '只有支出可以挂供应商（充值 / 结算）');
+        const pa = q.party.get(Number(body.party_id));
+        if (!pa || pa.kind !== 'supplier') throw new HttpError(400, '供应商不存在');
+        if (pa.project_id !== p.id) throw new HttpError(400, '供应商不属于这个项目');
+        partyId = pa.id;
+      }
+    }
+    if (partyId && type !== 'expense') partyId = null;
+    return { project: p, type, amount, currency, rate, handlerId, handler, note, at, images, partyId };
   },
   addEntry(user, body, via = '') {
     const n = ops.normalizeEntry(user, body);
-    const r = q.insertEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, user.id, n.note, n.at, n.images);
+    const r = q.insertEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, user.id, n.note, n.at, n.images, n.partyId || null);
     const entry = q.entry.get(Number(r.lastInsertRowid));
     dataChanged(user, `${via}记了一笔${n.type === 'income' ? '收入' : '支出'} ${n.amount.toLocaleString('zh-CN')} ${n.currency} · ${n.project.name}`, `${via}记了一笔${entryLine(entry)}`);
     return entry;
@@ -686,7 +709,7 @@ const ops = {
     if (!e) throw new HttpError(404, '记录不存在');
     if (!ops.canEditEntry(user, e)) throw new HttpError(403, '只能修改自己登记的记录');
     const n = ops.normalizeEntry(user, patch, e);
-    q.updateEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, n.note, n.at, n.images, e.id);
+    q.updateEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, n.note, n.at, n.images, n.partyId || null, e.id);
     const entry = q.entry.get(e.id);
     dataChanged(user, `${via}修改了一笔${n.type === 'income' ? '收入' : '支出'} ${n.amount.toLocaleString('zh-CN')} ${n.currency} · ${n.project.name}`, `${via}修改了记录 #${e.id}：原「${entryLine(e)}」→ 现「${entryLine(entry)}」`);
     return entry;
@@ -762,7 +785,22 @@ function partySettle(records, cur) {
 }
 // 供应商余额（new-api / sub2api 钱包额度 + 倍率），见 wallets.js；路由注册后才可用
 let partyWallets = null;
-const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
+// 供应商结算：应付 = 累计消费（折结算币种）；已结算 = 期初 + 记账时选了该供应商的充值支出；未结算 = 应付 − 已结算
+function supplierSettlement(p) {
+  const cur = p.currency || 'CNY';
+  const rates = getRates();
+  const w = partyWallets ? partyWallets.summaryOf(p.id) : null;
+  const payable = w && w.used != null ? r2(usdToCur(w.used, cur, rates)) : 0;
+  const entries = q.entriesOfParty.all(p.id);
+  // 币种相同直接用原值，否则按记账汇率折人民币再折结算币种（口径同往来 partySettle）
+  let fromEntries = 0;
+  for (const e of entries) fromEntries += e.currency === cur ? e.amount : cnyToCur(entryBase(e, rates), cur, rates);
+  fromEntries = r2(fromEntries);
+  const base = r2(Number(p.settled_base) || 0);
+  const settled = r2(base + fromEntries);
+  return { currency: cur, payable, settled, settled_base: base, from_entries: fromEntries, entry_count: entries.length, unsettled: r2(payable - settled) };
+}
+const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId) {
   const parties = q.partiesOfProject.all(projectId);
@@ -811,6 +849,12 @@ Object.assign(ops, {
     if (!(ratio > 0) || ratio > 100) throw new HttpError(400, '倍率必须是 0–100 之间的数字');
     ratio = Math.round(ratio * 10000) / 10000;
     q.updateParty.run(name, patch.contact === undefined ? pa.contact : String(patch.contact).trim().slice(0, 100), patch.note === undefined ? pa.note : String(patch.note).trim().slice(0, 200), currency, patch.external_id === undefined ? pa.external_id : String(patch.external_id).trim().slice(0, 100), patch.archived === undefined ? pa.archived : (patch.archived ? 1 : 0), ratio, pa.id);
+    // 期初已结算（按结算币种，可正可负 / 为 0）
+    if (patch.settled_base !== undefined) {
+      const sb = Number(patch.settled_base);
+      if (!Number.isFinite(sb)) throw new HttpError(400, '期初已结算必须是数字');
+      db.prepare('UPDATE parties SET settled_base = ? WHERE id = ?').run(r2(sb), pa.id);
+    }
     if (pa.relay_id && (ratio !== Number(pa.ratio) || currency !== pa.currency)) resetRelayAccrual(pa.id);
     dataChanged(user, `${via}修改了${PARTY_LABEL[pa.kind].name}「${pa.name}」${name !== pa.name ? ` → 「${name}」` : ''}${patch.ratio !== undefined && ratio !== pa.ratio ? `（倍率 ${pa.ratio} → ${ratio}）` : ''}${patch.archived !== undefined ? (patch.archived ? '（归档）' : '（恢复）') : ''} · ${pa.project_name}`);
     return q.party.get(pa.id);
@@ -1929,7 +1973,7 @@ function resolveMember(ref, user) {
   if (!m) throw new HttpError(404, `没有找到成员「${String(ref).trim()}」。团队成员：${q.members.all().map((x) => x.username).join('、')}`);
   return m;
 }
-const entryView = (e, user) => ({ id: e.id, time: fmtTZ(e.created_at), project: e.project_name, type: e.type, amount: e.amount, currency: e.currency, rate: e.rate, cny: r2(entryBase(e)), handler: e.handler_name, creator: e.creator_name, note: e.note, can_edit: ops.canEditEntry(user, e) });
+const entryView = (e, user) => ({ id: e.id, time: fmtTZ(e.created_at), project: e.project_name, type: e.type, amount: e.amount, currency: e.currency, rate: e.rate, cny: r2(entryBase(e)), handler: e.handler_name, creator: e.creator_name, note: e.note, party_id: e.party_id || null, party_name: e.party_name || '', can_edit: ops.canEditEntry(user, e) });
 function reportParamsFrom(input, ctx) {
   let scope = 'all';
   if (ctx.lockedProject) {

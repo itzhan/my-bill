@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { usePathname } from "next/navigation";
 
+import { useQuery } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -15,15 +16,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 
-import { del, patch, post } from "../api";
+import { del, get, patch, post } from "../api";
 import { CUR, CURRENCIES, fmt, parseAmount, toLocalInput } from "../format";
 import { useLedgerRefresh, useMe, useProjects } from "../hooks";
-import type { Currency, Entry, EntryType } from "../types";
+import type { Currency, Entry, EntryType, Party } from "../types";
 
 import { doneIds, EntryImagesInput, type ImageItem } from "./entry-images";
 import { FormError, MemberAvatar, ResponsiveDialog, useConfirm } from "./shared";
 
 const PREFS_KEY = "ledger:prefs";
+const NO_SUPPLIER = "none";
 type Prefs = { currency: Currency; type: EntryType; lastProject: number | null };
 function loadPrefs(): Prefs {
   try {
@@ -71,6 +73,7 @@ export function EntryDialog({
   const [amount, setAmount] = useState("");
   const [rate, setRate] = useState("");
   const [note, setNote] = useState("");
+  const [supplier, setSupplier] = useState<number | null>(null);
   const [time, setTime] = useState("");
   const [images, setImages] = useState<ImageItem[]>([]);
   const [defaultTime, setDefaultTime] = useState<string | null>(null);
@@ -80,6 +83,15 @@ export function EntryDialog({
   const projects = pd?.projects ?? [];
   const active = projects.filter((p) => !p.archived || (editing && p.id === editing.project_id));
   const rates = pd?.rates ?? me?.rates ?? { USD: 7.2, USDT: 7.2 };
+
+  // 充值 / 结算：支出可挂本项目的供应商
+  const isExpense = type === "expense";
+  const { data: suppliers } = useQuery({
+    queryKey: ["ledger", "project-suppliers", project],
+    queryFn: () =>
+      get<{ suppliers: Party[] }>(`/projects/${project}/parties`).then((d) => d.suppliers.filter((s) => !s.archived)),
+    enabled: open && isExpense && !!project,
+  });
 
   // 每次打开时按「新建 / 编辑」初始化表单
   useEffect(() => {
@@ -93,6 +105,7 @@ export function EntryDialog({
       setAmount(String(editing.amount));
       setRate(editing.currency === "CNY" ? "" : String(editing.rate ?? ""));
       setNote(editing.note || "");
+      setSupplier(editing.party_id ?? null);
       setTime(toLocalInput(new Date(editing.created_at)));
       setDefaultTime(null);
       setImages(editing.images.map((a) => ({ key: `a${a.id}`, status: "done", attachment: a })));
@@ -115,6 +128,7 @@ export function EntryDialog({
     setAmount("");
     setRate(prefs.currency === "CNY" ? "" : String(rates[prefs.currency] ?? ""));
     setNote("");
+    setSupplier(null);
     setImages([]);
     const now = toLocalInput(new Date());
     setTime(now);
@@ -127,7 +141,7 @@ export function EntryDialog({
     setRate(c === "CNY" ? "" : String(editing && editing.currency === c && editing.rate ? editing.rate : rates[c]));
   };
 
-  const isExp = type === "expense";
+  const isExp = isExpense;
   const parsed = parseAmount(amount);
   const timeHint = editing
     ? "修改后按新时间统计"
@@ -165,6 +179,7 @@ export function EntryDialog({
       note: note.trim(),
       time: iso,
       images: doneIds(images),
+      party_id: isExp ? supplier : null,
     };
     try {
       if (editing) {
@@ -278,7 +293,13 @@ export function EntryDialog({
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label>项目</Label>
-              <Select value={project ? String(project) : ""} onValueChange={(v) => setProject(Number(v))}>
+              <Select
+                value={project ? String(project) : ""}
+                onValueChange={(v) => {
+                  setProject(Number(v));
+                  setSupplier(null); // 换项目后清掉供应商（供应商归属项目）
+                }}
+              >
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="选择项目" />
                 </SelectTrigger>
@@ -320,6 +341,30 @@ export function EntryDialog({
               onChange={(e) => setNote(e.target.value)}
             />
           </div>
+
+          {isExp ? (
+            <div className="space-y-2">
+              <Label>供应商（充值 / 结算，可选）</Label>
+              <Select
+                value={supplier ? String(supplier) : NO_SUPPLIER}
+                onValueChange={(v) => setSupplier(v === NO_SUPPLIER ? null : Number(v))}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_SUPPLIER}>不挂供应商</SelectItem>
+                  {(suppliers ?? []).map((s) => (
+                    <SelectItem key={s.id} value={String(s.id)}>
+                      {s.name}
+                      {s.currency !== "CNY" ? `（${s.currency} 结算）` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-muted-foreground text-xs">挂上供应商后，这笔支出会计入该供应商的「已结算 / 充值」</p>
+            </div>
+          ) : null}
 
           <div className="space-y-2">
             <Label>图片（凭证 / 截图，可选）</Label>

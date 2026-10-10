@@ -66,7 +66,14 @@ export default function SuppliersPage() {
   const wallets = active.flatMap((s) => s.wallets).filter((w) => w.enabled);
   const totalActual = sum(wallets, (w) => w.last_actual);
   const totalUsed = sum(wallets, (w) => w.last_used_actual);
-  const totalOpen = active.reduce((a, s) => a + Math.max(0, s.settle.open_cny), 0);
+  const rates = pd?.rates ?? { USD: 7.2, USDT: 7.2 };
+  // 未结算折人民币粗略合计（USD×rates.USD、USDT×rates.USDT、CNY×1）
+  const totalUnsettledCny = active.reduce((a, s) => {
+    const rc = s.recharge;
+    if (!rc) return a;
+    const rate = rc.currency === "CNY" ? 1 : rc.currency === "USD" ? rates.USD : rates.USDT;
+    return a + Math.max(0, rc.unsettled) * rate;
+  }, 0);
   const failed = wallets.filter((w) => w.last_error && w.last_wallet == null && w.last_used == null).length;
   const archivedCount = (data ?? []).length - active.length;
 
@@ -95,10 +102,10 @@ export default function SuppliersPage() {
     },
     { label: "累计消费合计", value: amt(totalUsed), sub: "各 Key 在供应商站点总共用了多少", cls: "text-expense" },
     {
-      label: "未付合计",
-      value: money(totalOpen),
-      sub: "往来记账：应付 − 实付（折人民币）",
-      cls: totalOpen > 0 ? "text-warning" : "",
+      label: "未结算合计",
+      value: money(totalUnsettledCny),
+      sub: "应付(消费) − 已结算(充值)，折人民币",
+      cls: totalUnsettledCny > 0 ? "text-warning" : "",
     },
     {
       label: "绑定的 Key",
@@ -192,7 +199,8 @@ export default function SuppliersPage() {
                     <TableHead className="text-right">钱包余额</TableHead>
                     <TableHead className="text-right">实际余额</TableHead>
                     <TableHead className="text-right">累计消费</TableHead>
-                    <TableHead className="text-right">未付</TableHead>
+                    <TableHead className="text-right">已结算</TableHead>
+                    <TableHead className="text-right">未结算</TableHead>
                     <TableHead>最近抓取</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -201,7 +209,7 @@ export default function SuppliersPage() {
                     rows.map((s) => {
                       const ws = s.wallets;
                       const on = ws.filter((w) => w.enabled);
-                      const st = s.settle;
+                      const rc = s.recharge;
                       const latest = on
                         .map((w) => w.last_checked_at)
                         .filter(Boolean)
@@ -277,8 +285,13 @@ export default function SuppliersPage() {
                           <TableCell className="text-expense text-right tabular-nums">
                             {on.length ? amt(sum(on, (w) => w.last_used_actual)) : "-"}
                           </TableCell>
-                          <TableCell className={cn("text-right tabular-nums", st.open > 0 && "text-warning")}>
-                            {curf(st.open > 0 ? st.open : 0, st.currency)}
+                          <TableCell className="text-income text-right tabular-nums">
+                            {rc ? curf(rc.settled, rc.currency) : "-"}
+                          </TableCell>
+                          <TableCell
+                            className={cn("text-right tabular-nums", (rc?.unsettled ?? 0) > 0 && "text-warning")}
+                          >
+                            {rc ? curf(Math.abs(rc.unsettled), rc.currency) : "-"}
                           </TableCell>
                           <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
                             {latest ? relTime(latest) : "-"}
@@ -288,7 +301,7 @@ export default function SuppliersPage() {
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-muted-foreground py-10 text-center">
+                      <TableCell colSpan={8} className="text-muted-foreground py-10 text-center">
                         {data.length ? "没有符合条件的供应商" : "还没有供应商，点右上角「添加供应商」，选个项目开始"}
                       </TableCell>
                     </TableRow>

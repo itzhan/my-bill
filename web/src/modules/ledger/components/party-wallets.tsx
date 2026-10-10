@@ -15,7 +15,7 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
 import { del, get, patch, post } from "../api";
-import { relTime } from "../format";
+import { curf, relTime } from "../format";
 import { useLedgerRefresh } from "../hooks";
 import type { Party, PartyWallet } from "../types";
 
@@ -370,112 +370,141 @@ export function PartyWallets({ party }: { party: Party }) {
   const list = data ?? [];
   const total = list.filter((w) => w.enabled).reduce((a, w) => a + (w.last_actual ?? 0), 0);
   const totalUsed = list.filter((w) => w.enabled).reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
+  const r = party.recharge;
   return (
-    <div className="space-y-3 rounded-lg border p-4">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <b className="text-sm">余额</b>
+    <div className="space-y-3">
+      {r ? (
+        <div className="space-y-2 rounded-lg border p-4">
+          <b className="text-sm">结算</b>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-muted/50 rounded-md p-2">
+              <div className="text-muted-foreground text-xs">应付（累计消费）</div>
+              <div className="font-semibold tabular-nums">{curf(r.payable, r.currency)}</div>
+            </div>
+            <div className="bg-muted/50 rounded-md p-2">
+              <div className="text-muted-foreground text-xs">已结算（充值）</div>
+              <div className="text-income font-semibold tabular-nums">{curf(r.settled, r.currency)}</div>
+            </div>
+            <div className="bg-muted/50 rounded-md p-2">
+              <div className="text-muted-foreground text-xs">{r.unsettled >= 0 ? "未结算" : "已多结算 / 预充"}</div>
+              <div className={cn("font-semibold tabular-nums", r.unsettled > 0 && "text-warning")}>
+                {curf(Math.abs(r.unsettled), r.currency)}
+              </div>
+            </div>
+          </div>
           <p className="text-muted-foreground text-xs">
-            在供应商站点（new-api / sub2api）的 Key 对应的钱包额度、倍率与累计消费，每 30 分钟自动刷新
-            {list.length ? ` · 实际余额合计 ${amt(total)} · 累计消费合计 ${amt(totalUsed)}` : ""}
+            已结算 = 期初 {curf(r.settled_base, r.currency)} + 记账充值 {curf(r.from_entries, r.currency)}（
+            {r.entry_count} 笔）· 未结算 = 应付 − 已结算 · 期初可在「编辑」里改
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            setEditing(null);
-            setOpen(true);
-          }}
-        >
-          <Plus />
-          添加
-        </Button>
-      </div>
-      {list.length ? (
-        <div className="divide-y rounded-md border">
-          {list.map((w) => (
-            <div key={w.id} className={cn("space-y-2 p-3", !w.enabled && "opacity-60")}>
-              <div className="flex items-center gap-1.5 text-sm">
-                <span className="font-medium">{w.name}</span>
-                <Badge variant="outline">{w.platform === "sub2api" ? "sub2api" : "new-api"}</Badge>
-                {w.custom ? <Badge variant="secondary">自定义倍率</Badge> : null}
-                <span className="ml-auto flex items-center gap-0.5">
-                  <Switch checked={w.enabled} onCheckedChange={(x) => toggle(w, x)} className="mr-1 scale-90" />
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    title="刷新"
-                    disabled={busy.has(w.id)}
-                    onClick={() => refresh(w)}
-                  >
-                    <RefreshCw className={cn(busy.has(w.id) && "animate-spin")} />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    title="编辑"
-                    onClick={() => {
-                      setEditing(w);
-                      setOpen(true);
-                    }}
-                  >
-                    <Pencil />
-                  </Button>
-                  <Button variant="ghost" size="icon-sm" title="删除" onClick={() => remove(w)}>
-                    <Trash2 />
-                  </Button>
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <div className="bg-muted/50 rounded-md p-2">
-                  <div className="text-muted-foreground text-xs">{KIND_LABEL[w.last_wallet_kind] ?? "钱包额度"}</div>
-                  <div className="font-semibold tabular-nums" title={amtFull(w.last_wallet)}>
-                    {amt(w.last_wallet)}
-                  </div>
-                </div>
-                <div className="bg-muted/50 rounded-md p-2">
-                  <div className="text-muted-foreground truncate text-xs" title={ratioSource(w)}>
-                    倍率 · {ratioSource(w) || "-"}
-                  </div>
-                  <div className="font-semibold tabular-nums">
-                    {w.last_ratio == null ? "-" : `× ${+w.last_ratio.toFixed(4)}`}
-                  </div>
-                </div>
-                <div className="bg-muted/50 rounded-md p-2">
-                  <div className="text-muted-foreground text-xs">实际余额{w.custom ? "（钱包 × 倍率）" : ""}</div>
-                  <div className="text-income font-semibold tabular-nums" title={amtFull(w.last_actual)}>
-                    {amt(w.last_actual)}
-                  </div>
-                </div>
-                <div className="bg-muted/50 rounded-md p-2">
-                  <div className="text-muted-foreground text-xs">累计消费{w.custom ? "（× 倍率）" : ""}</div>
-                  <div className="text-expense font-semibold tabular-nums" title={amtFull(w.last_used_actual)}>
-                    {amt(w.last_used_actual)}
-                  </div>
-                  {w.custom && w.last_used != null ? (
-                    <div className="text-muted-foreground text-xs tabular-nums">站点额度 {amt(w.last_used)}</div>
-                  ) : null}
-                </div>
-              </div>
-              <div className="text-muted-foreground truncate font-mono text-xs" title={w.base_url}>
-                {w.base_url} · {w.key_masked}
-                {w.has_login ? ` · 登录 ${w.login_user}` : ""}
-                {w.insecure ? " · 跳过证书" : ""} · {w.last_checked_at ? `${relTime(w.last_checked_at)}抓取` : "未抓取"}
-              </div>
-              {w.last_error ? (
-                <p className={cn("text-xs", w.last_used != null ? "text-warning" : "text-destructive")}>
-                  {w.last_error}
-                </p>
-              ) : null}
-            </div>
-          ))}
+      ) : null}
+      <div className="space-y-3 rounded-lg border p-4">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <b className="text-sm">余额</b>
+            <p className="text-muted-foreground text-xs">
+              在供应商站点（new-api / sub2api）的 Key 对应的钱包额度、倍率与累计消费，每 30 分钟自动刷新
+              {list.length ? ` · 实际余额合计 ${amt(total)} · 累计消费合计 ${amt(totalUsed)}` : ""}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setEditing(null);
+              setOpen(true);
+            }}
+          >
+            <Plus />
+            添加
+          </Button>
         </div>
-      ) : (
-        <p className="text-muted-foreground text-sm">
-          还没有绑定 Key。点「添加」选平台（new-api / sub2api）并填 Key，就能自动抓钱包额度和倍率。
-        </p>
-      )}
+        {list.length ? (
+          <div className="divide-y rounded-md border">
+            {list.map((w) => (
+              <div key={w.id} className={cn("space-y-2 p-3", !w.enabled && "opacity-60")}>
+                <div className="flex items-center gap-1.5 text-sm">
+                  <span className="font-medium">{w.name}</span>
+                  <Badge variant="outline">{w.platform === "sub2api" ? "sub2api" : "new-api"}</Badge>
+                  {w.custom ? <Badge variant="secondary">自定义倍率</Badge> : null}
+                  <span className="ml-auto flex items-center gap-0.5">
+                    <Switch checked={w.enabled} onCheckedChange={(x) => toggle(w, x)} className="mr-1 scale-90" />
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      title="刷新"
+                      disabled={busy.has(w.id)}
+                      onClick={() => refresh(w)}
+                    >
+                      <RefreshCw className={cn(busy.has(w.id) && "animate-spin")} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      title="编辑"
+                      onClick={() => {
+                        setEditing(w);
+                        setOpen(true);
+                      }}
+                    >
+                      <Pencil />
+                    </Button>
+                    <Button variant="ghost" size="icon-sm" title="删除" onClick={() => remove(w)}>
+                      <Trash2 />
+                    </Button>
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div className="bg-muted/50 rounded-md p-2">
+                    <div className="text-muted-foreground text-xs">{KIND_LABEL[w.last_wallet_kind] ?? "钱包额度"}</div>
+                    <div className="font-semibold tabular-nums" title={amtFull(w.last_wallet)}>
+                      {amt(w.last_wallet)}
+                    </div>
+                  </div>
+                  <div className="bg-muted/50 rounded-md p-2">
+                    <div className="text-muted-foreground truncate text-xs" title={ratioSource(w)}>
+                      倍率 · {ratioSource(w) || "-"}
+                    </div>
+                    <div className="font-semibold tabular-nums">
+                      {w.last_ratio == null ? "-" : `× ${+w.last_ratio.toFixed(4)}`}
+                    </div>
+                  </div>
+                  <div className="bg-muted/50 rounded-md p-2">
+                    <div className="text-muted-foreground text-xs">实际余额{w.custom ? "（钱包 × 倍率）" : ""}</div>
+                    <div className="text-income font-semibold tabular-nums" title={amtFull(w.last_actual)}>
+                      {amt(w.last_actual)}
+                    </div>
+                  </div>
+                  <div className="bg-muted/50 rounded-md p-2">
+                    <div className="text-muted-foreground text-xs">累计消费{w.custom ? "（× 倍率）" : ""}</div>
+                    <div className="text-expense font-semibold tabular-nums" title={amtFull(w.last_used_actual)}>
+                      {amt(w.last_used_actual)}
+                    </div>
+                    {w.custom && w.last_used != null ? (
+                      <div className="text-muted-foreground text-xs tabular-nums">站点额度 {amt(w.last_used)}</div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="text-muted-foreground truncate font-mono text-xs" title={w.base_url}>
+                  {w.base_url} · {w.key_masked}
+                  {w.has_login ? ` · 登录 ${w.login_user}` : ""}
+                  {w.insecure ? " · 跳过证书" : ""} ·{" "}
+                  {w.last_checked_at ? `${relTime(w.last_checked_at)}抓取` : "未抓取"}
+                </div>
+                {w.last_error ? (
+                  <p className={cn("text-xs", w.last_used != null ? "text-warning" : "text-destructive")}>
+                    {w.last_error}
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-muted-foreground text-sm">
+            还没有绑定 Key。点「添加」选平台（new-api / sub2api）并填 Key，就能自动抓钱包额度和倍率。
+          </p>
+        )}
+      </div>
       <WalletDialog open={open} onOpenChange={setOpen} party={party} wallet={editing} onSaved={changed} />
       {confirmEl}
     </div>

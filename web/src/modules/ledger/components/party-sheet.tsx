@@ -805,6 +805,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   const [note, setNote] = useState(v.note);
   const [ratio, setRatio] = useState(String(v.ratio));
   const [ext, setExt] = useState(v.external_id);
+  const [settledBase, setSettledBase] = useState(v.kind === "supplier" ? String(v.settled_base ?? 0) : "");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => setError(null), [v.id]);
@@ -820,7 +821,15 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
     const r = Number(ratio);
     if (!(r > 0)) return setError("倍率必须大于 0");
     try {
-      await patch(`/parties/${v.id}`, { name, contact, note, currency, external_id: ext, ratio: r });
+      await patch(`/parties/${v.id}`, {
+        name,
+        contact,
+        note,
+        currency,
+        external_id: ext,
+        ratio: r,
+        ...(v.kind === "supplier" ? { settled_base: Number(settledBase) || 0 } : {}),
+      });
       toast.success("已保存");
       reload();
       onBack();
@@ -892,6 +901,21 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
           <Label htmlFor="pe-ext">外部系统编号</Label>
           <Input id="pe-ext" maxLength={100} value={ext} onChange={(e) => setExt(e.target.value)} />
         </div>
+        {v.kind === "supplier" ? (
+          <div className="space-y-2">
+            <Label htmlFor="pe-settled">期初已结算（{currency}）</Label>
+            <Input
+              id="pe-settled"
+              inputMode="decimal"
+              placeholder="0"
+              value={settledBase}
+              onChange={(e) => setSettledBase(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              用这套系统之前已经充值 / 结算过的金额，按结算币种填；之后记账选这个供应商的支出会自动累加
+            </p>
+          </div>
+        ) : null}
         <FormError>{error}</FormError>
         <div className="grid grid-cols-2 gap-2">
           <Button type="button" variant="outline" onClick={onBack}>

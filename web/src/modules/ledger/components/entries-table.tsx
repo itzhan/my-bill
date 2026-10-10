@@ -5,6 +5,7 @@ import { Fragment, useState } from "react";
 import { ImageIcon, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
@@ -135,6 +136,15 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                                     <ImageIcon className="size-3.5" />
                                     {e.images.length > 1 ? e.images.length : null}
                                   </span>
+                                ) : null}
+                                {e.party_name ? (
+                                  <Badge
+                                    variant="secondary"
+                                    className="shrink-0 font-normal"
+                                    title={`充值 / 结算：${e.party_name}`}
+                                  >
+                                    充值 · {e.party_name}
+                                  </Badge>
                                 ) : null}
                               </div>
                               <div className="text-muted-foreground text-xs sm:hidden">
