@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ExternalLink, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -456,6 +456,11 @@ export function PartyWallets({ party }: { party: Party }) {
                   {w.custom ? <Badge variant="secondary">自定义倍率</Badge> : null}
                   <span className="ml-auto flex items-center gap-0.5">
                     <Switch checked={w.enabled} onCheckedChange={(x) => toggle(w, x)} className="mr-1 scale-90" />
+                    <Button variant="ghost" size="icon-sm" title="打开站点（去拿访问令牌）" asChild>
+                      <a href={w.base_url} target="_blank" rel="noopener noreferrer">
+                        <ExternalLink />
+                      </a>
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon-sm"
@@ -513,7 +518,16 @@ export function PartyWallets({ party }: { party: Party }) {
                   </div>
                 </div>
                 <div className="text-muted-foreground truncate font-mono text-xs" title={w.base_url}>
-                  {w.base_url} · {w.key_masked}
+                  <a
+                    href={w.base_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-foreground hover:underline"
+                  >
+                    {w.base_url}
+                  </a>
+                  {" · "}
+                  {w.key_masked}
                   {w.has_token ? " · 令牌" : w.has_login ? ` · 登录 ${w.login_user}` : ""}
                   {w.insecure ? " · 跳过证书" : ""} ·{" "}
                   {w.last_checked_at ? `${relTime(w.last_checked_at)}抓取` : "未抓取"}
