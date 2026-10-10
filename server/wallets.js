@@ -222,7 +222,8 @@ async function fetchNewapi(base, key, wantRatio, login, insecure, token) {
   if (loginRes?.ok) warning = "";
   else if (loginErr) warning = `${loginErr}${warning ? `；${warning}` : ""}`;
   else if (loginRes) warning = `账号密码登录失败：${loginRes.error}${warning ? `；${warning}` : ""}`;
-  const loginUsed = loginRes?.ok ? { user: loginRes.user, pass: loginRes.pass } : null;
+  // 只有账号密码登录（newapiLogin 返回 user/pass）才回写凭据；访问令牌走 newapiSelf，没有 user 字段
+  const loginUsed = loginRes?.ok && loginRes.user ? { user: loginRes.user, pass: loginRes.pass } : null;
   if (!wantRatio) return { wallet, kind, used, warning, loginUsed };
 
   let ratio = null;
