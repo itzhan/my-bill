@@ -3,7 +3,7 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { ExternalLink, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 import { del, get, patch, post } from "../api";
 import { CUR, CURRENCIES, PL, curf, fmt, fmtCompact, fmtTime, parseAmount, relTime, todayLocal, usdf } from "../format";
 import { qk, useLedgerRefresh, useMe, useParty } from "../hooks";
-import type { Currency, Party, PartyKind, RelayLive } from "../types";
+import type { Currency, Party, PartyKind, PartyWallet, RelayLive } from "../types";
 
 import {
   EMPTY_WALLET,
@@ -283,6 +283,14 @@ function PartyDetailView({
     enabled: hasRelay && !editing,
     refetchInterval: 30_000,
   });
+  // 供应商的各站点地址（去重），放在名字下面方便点击（去拿访问令牌）。与「余额」区块共用这份缓存
+  const isSupplier = data?.party.kind === "supplier";
+  const walletsQ = useQuery({
+    queryKey: ["ledger", "party-wallets", id] as const,
+    queryFn: () => get<{ wallets: PartyWallet[] }>(`/parties/${id}/wallets`).then((d) => d.wallets),
+    enabled: !editing && isSupplier,
+  });
+  const siteUrls = [...new Set((walletsQ.data ?? []).map((w) => w.base_url).filter(Boolean))];
 
   if (isLoading || !data) {
     return (
@@ -314,6 +322,23 @@ function PartyDetailView({
               {v.archived ? <Badge variant="outline">归档</Badge> : null}
             </SheetTitle>
             <SheetDescription>{[v.project_name, v.contact, v.note].filter(Boolean).join(" · ")}</SheetDescription>
+            {siteUrls.length ? (
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {siteUrls.map((url) => (
+                  <a
+                    key={url}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="打开站点（去拿访问令牌）"
+                    className="text-primary bg-primary/5 hover:bg-primary/10 inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-0.5 text-xs"
+                  >
+                    <ExternalLink className="size-3 shrink-0" />
+                    <span className="truncate">{url.replace(/^https?:\/\//, "")}</span>
+                  </a>
+                ))}
+              </div>
+            ) : null}
           </div>
           <Button variant="ghost" size="icon-sm" onClick={() => setMode("edit")} aria-label="编辑">
             <Pencil />
