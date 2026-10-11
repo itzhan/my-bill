@@ -287,7 +287,9 @@ function NewPartyForm({
           id="pty-profile"
           maxLength={1000}
           rows={3}
-          placeholder={kind === "supplier" ? "这家供应商的特点、渠道、稳定性、合作方式等" : "这个客户的来源、规模、合作方式等"}
+          placeholder={
+            kind === "supplier" ? "这家供应商的特点、渠道、稳定性、合作方式等" : "这个客户的来源、规模、合作方式等"
+          }
           value={profile}
           onChange={(e) => setProfile(e.target.value)}
         />
@@ -943,6 +945,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   const [termDays, setTermDays] = useState(v.term_days == null ? "" : String(v.term_days));
   const [startDate, setStartDate] = useState(v.start_date ?? "");
   const [profile, setProfile] = useState(v.profile ?? "");
+  const [customerGroup, setCustomerGroup] = useState(v.customer_group ?? "");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => setError(null), [v.id]);
@@ -970,6 +973,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
         ...(v.kind === "supplier" ? { settled_base: Number(settledBase) || 0 } : {}),
         ...(v.kind === "customer"
           ? {
+              customer_group: customerGroup.trim(),
               balance_threshold: settleType === "prepaid" ? balThreshold : "",
               term_days: settleType === "credit" ? termDays : "",
               start_date: settleType === "credit" ? startDate : "",
@@ -1039,13 +1043,31 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
         </div>
         <div className="space-y-2">
           <Label htmlFor="pe-profile">画像 / 介绍</Label>
-          <Textarea id="pe-profile" maxLength={1000} rows={3} value={profile} onChange={(e) => setProfile(e.target.value)} />
+          <Textarea
+            id="pe-profile"
+            maxLength={1000}
+            rows={3}
+            value={profile}
+            onChange={(e) => setProfile(e.target.value)}
+          />
         </div>
         {v.kind === "customer" ? (
-          <div className="space-y-2">
-            <Label htmlFor="pe-ratio">折扣（应收 = 中转站消耗 × 折扣）</Label>
-            <Input id="pe-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
-          </div>
+          <>
+            <div className="space-y-2">
+              <Label htmlFor="pe-group">客户分组（可选）</Label>
+              <Input
+                id="pe-group"
+                maxLength={60}
+                placeholder="同一客户的多个项目填相同分组名，会在客户页合并为一个客户"
+                value={customerGroup}
+                onChange={(e) => setCustomerGroup(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="pe-ratio">折扣（应收 = 中转站消耗 × 折扣）</Label>
+              <Input id="pe-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
+            </div>
+          </>
         ) : null}
         <div className="space-y-2">
           <Label htmlFor="pe-ext">外部系统编号</Label>
@@ -1080,7 +1102,13 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="pe-term">账期（天）</Label>
-                  <Input id="pe-term" inputMode="numeric" placeholder="如 30" value={termDays} onChange={(e) => setTermDays(e.target.value)} />
+                  <Input
+                    id="pe-term"
+                    inputMode="numeric"
+                    placeholder="如 30"
+                    value={termDays}
+                    onChange={(e) => setTermDays(e.target.value)}
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="pe-start">起始使用时间</Label>

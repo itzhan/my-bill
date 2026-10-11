@@ -2,7 +2,6 @@
 
 import { useMemo, useState } from "react";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { useQuery } from "@tanstack/react-query";
@@ -25,54 +24,184 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
+import { amt } from "@/modules/ledger/components/party-wallets";
 import { PageHeader, Pager, usePaged } from "@/modules/ledger/components/shared";
-import { curf, money, usdf } from "@/modules/ledger/format";
+import { money, relTime } from "@/modules/ledger/format";
 import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
-import type { CustomerRow } from "@/modules/ledger/types";
+import type { CustomerGroup, CustomersResponse } from "@/modules/ledger/types";
+
+// 折扣：中转消耗 × 折扣 = 应收，可能多个项目档位不同
+const ratioText = (rs: number[]) => (rs.length ? rs.map((r) => `×${r}`).join(" / ") : "—");
+
+function CustomerTable({
+  title,
+  description,
+  customers,
+  withBalance,
+  usdRate,
+  fetchedAt,
+  resetKey,
+}: {
+  title: string;
+  description: string;
+  customers: CustomerGroup[];
+  withBalance: boolean;
+  usdRate: number;
+  fetchedAt: string;
+  resetKey: string;
+}) {
+  const router = useRouter();
+  const { rows, pager } = usePaged(customers, resetKey);
+  const open = (c: CustomerGroup) => router.push(`/dashboard/ledger/customers/${c.detail_party_id}`);
+  const cols = withBalance ? 7 : 5;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>客户</TableHead>
+                <TableHead>折扣</TableHead>
+                {withBalance ? <TableHead className="text-right">实际余额</TableHead> : null}
+                <TableHead className="text-right">累计消费</TableHead>
+                <TableHead className="text-right">已结算</TableHead>
+                <TableHead className="text-right">未结算</TableHead>
+                {withBalance ? <TableHead>最近抓取</TableHead> : null}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {customers.length ? (
+                rows.map((c) => (
+                  <TableRow
+                    key={c.key}
+                    className={cn("cursor-pointer align-top", c.archived && "opacity-60")}
+                    onClick={() => open(c)}
+                  >
+                    <TableCell>
+                      <div className="flex items-center gap-1.5 font-medium">
+                        {c.name}
+                        <Badge variant="outline" className="font-normal">
+                          {c.settle_type === "credit" ? "后付" : "预付"}
+                        </Badge>
+                        {c.low_balance ? <Badge variant="destructive">余额不足</Badge> : null}
+                        {c.overdue ? <Badge variant="destructive">逾期</Badge> : null}
+                      </div>
+                      <div className="text-muted-foreground mt-0.5 text-xs">
+                        {c.project_count} 个项目：{c.parties.map((p) => p.project_name).join("、")}
+                      </div>
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap tabular-nums">{ratioText(c.ratios)}</TableCell>
+                    {withBalance ? (
+                      <TableCell className="text-right tabular-nums">
+                        {c.settle_type === "credit" ? (
+                          <span className="text-muted-foreground">授信</span>
+                        ) : c.balance_usd != null ? (
+                          <>
+                            <div className={cn("text-income font-semibold", c.low_balance && "text-destructive")}>
+                              {money(c.balance_usd * usdRate)}
+                            </div>
+                            <div className="text-muted-foreground text-xs">
+                              ${amt(c.balance_usd)} @{usdRate}
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                    ) : null}
+                    <TableCell className="text-expense text-right tabular-nums">{money(c.due_cny)}</TableCell>
+                    <TableCell className="text-income text-right tabular-nums">{money(c.paid_cny)}</TableCell>
+                    <TableCell
+                      className={cn("text-right tabular-nums", c.open_cny > 0 && "text-warning")}
+                      title={c.open_cny > 0 ? "他还欠我们" : c.open_cny < 0 ? "预付结余 / 多付" : ""}
+                    >
+                      {(c.open_cny < 0 ? "−" : "") + money(Math.abs(c.open_cny))}
+                    </TableCell>
+                    {withBalance ? (
+                      <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
+                        {c.has_relay ? relTime(fetchedAt) : "-"}
+                      </TableCell>
+                    ) : null}
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={cols} className="text-muted-foreground py-8 text-center">
+                    暂无
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+        <Pager {...pager} className="mt-4" />
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function CustomersPage() {
-  const router = useRouter();
   const { openPartyNew } = useLedger();
   const { data: pd } = useProjects();
   const { data } = useQuery({
     queryKey: ["ledger", "customers"],
-    queryFn: () => get<{ customers: CustomerRow[] }>("/customers").then((d) => d.customers),
+    queryFn: () => get<CustomersResponse>("/customers"),
   });
   const [q, setQ] = useState("");
   const [showArchived, setShowArchived] = useState(false);
 
-  const usedOf = (c: CustomerRow) => c.settle.due;
-  const rows = useMemo(() => {
+  const filter = (list: CustomerGroup[]) => {
     const kw = q.trim().toLowerCase();
-    return (data ?? [])
+    return list
+      .filter((c) => showArchived || !c.archived)
       .filter(
         (c) =>
-          (showArchived || (!c.archived && !c.project_archived)) &&
-          (!kw || c.name.toLowerCase().includes(kw) || (c.project_name ?? "").toLowerCase().includes(kw)),
+          !kw || c.name.toLowerCase().includes(kw) || c.parties.some((p) => p.project_name.toLowerCase().includes(kw)),
       )
-      .sort((a, b) => usedOf(b) - usedOf(a));
-  }, [data, q, showArchived]);
-  const { rows: pageRows, pager } = usePaged(rows, `${q}|${showArchived}`);
+      .sort((a, b) => b.due_cny - a.due_cny);
+  };
+  const relay = useMemo(() => filter(data?.relay_customers ?? []), [data, q, showArchived]);
+  const project = useMemo(() => filter(data?.project_customers ?? []), [data, q, showArchived]);
+  const usdRate = data?.usd_rate ?? 7.2;
 
-  const active = (data ?? []).filter((c) => !c.archived && !c.project_archived);
-  const prepaid = active.filter((c) => c.settle_type === "prepaid");
-  const credit = active.filter((c) => c.settle_type === "credit");
-  const totalBalance = prepaid.reduce((a, c) => a + (c.balance_usd ?? 0), 0);
-  const totalArrears = credit.reduce((a, c) => a + Math.max(0, c.settle.open_cny), 0);
-  const lowCount = active.filter((c) => c.low_balance).length;
-  const overdueCount = active.filter((c) => c.term?.overdue).length;
-  const archivedCount = (data ?? []).length - active.length;
+  const all = [...(data?.relay_customers ?? []), ...(data?.project_customers ?? [])].filter((c) => !c.archived);
+  const totalBalCny = all.reduce((a, c) => a + (c.settle_type === "credit" ? 0 : (c.balance_usd ?? 0) * usdRate), 0);
+  const totalDue = all.reduce((a, c) => a + c.due_cny, 0);
+  const totalOwed = all.reduce((a, c) => a + Math.max(0, c.open_cny), 0);
+  const archivedCount =
+    (data?.relay_customers.filter((c) => c.archived).length ?? 0) +
+    (data?.project_customers.filter((c) => c.archived).length ?? 0);
 
   const stats = [
-    { label: "客户数", value: active.length, sub: `预付 ${prepaid.length} · 后付 ${credit.length}`, cls: "" },
-    { label: "预付余额合计", value: usdf(totalBalance), sub: "各预付客户中转站余额（美元）", cls: "text-income" },
-    { label: "后付欠费合计", value: money(totalArrears), sub: "各后付客户未收款，折人民币", cls: totalArrears > 0 ? "text-warning" : "" },
     {
-      label: "预警",
-      value: lowCount + overdueCount,
-      sub: `${lowCount} 个余额不足 · ${overdueCount} 个逾期`,
-      cls: lowCount + overdueCount > 0 ? "text-destructive" : "",
+      label: "客户数",
+      value: all.length,
+      sub: `中转 ${data?.relay_customers.filter((c) => !c.archived).length ?? 0} · 项目制 ${data?.project_customers.filter((c) => !c.archived).length ?? 0}`,
+      cls: "",
+    },
+    {
+      label: "中转余额合计",
+      value: money(totalBalCny),
+      sub: `各预付客户在中转站的余额，折人民币 @${usdRate}`,
+      cls: "text-income",
+    },
+    {
+      label: "累计消费合计",
+      value: money(totalDue),
+      sub: "各客户应收（中转消耗 × 折扣），折人民币",
+      cls: "text-expense",
+    },
+    {
+      label: "他还欠合计",
+      value: money(totalOwed),
+      sub: "未结算 = 累计消费 − 已结算，>0（欠我们）的部分",
+      cls: totalOwed > 0 ? "text-warning" : "",
     },
   ];
 
@@ -80,7 +209,7 @@ export default function CustomersPage() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="客户"
-        description="所有项目的客户、消费与结算情况。预付看中转站余额，后付看账期与欠费"
+        description="按客户聚合（一个客户可跨多个项目）。有中转项目的在「中转客户」，只有项目制的在「项目制客户」"
         actions={
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -115,110 +244,45 @@ export default function CustomersPage() {
         ))}
       </div>
 
-      <Card>
-        <CardHeader className="flex-col gap-4 space-y-0 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-1.5">
-            <CardTitle>客户列表</CardTitle>
-            <CardDescription>点一行查看客户详情：合作项目、往来记录、中转站实时</CardDescription>
+      <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+        {archivedCount ? (
+          <div className="flex items-center gap-2">
+            <Switch id="show-archived" checked={showArchived} onCheckedChange={setShowArchived} />
+            <Label htmlFor="show-archived" className="text-muted-foreground text-sm font-normal">
+              显示已归档（{archivedCount}）
+            </Label>
           </div>
-          <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center">
-            {archivedCount ? (
-              <div className="flex items-center gap-2">
-                <Switch id="show-archived" checked={showArchived} onCheckedChange={setShowArchived} />
-                <Label htmlFor="show-archived" className="text-muted-foreground text-sm font-normal">
-                  显示已归档（{archivedCount}）
-                </Label>
-              </div>
-            ) : null}
-            <div className="relative w-full sm:w-56">
-              <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
-              <Input placeholder="搜索客户 / 项目" value={q} onChange={(e) => setQ(e.target.value)} className="pl-9" />
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {!data ? (
-            <Skeleton className="h-48" />
-          ) : (
-            <div className="overflow-x-auto rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>客户</TableHead>
-                    <TableHead>结算</TableHead>
-                    <TableHead className="text-right">余额 / 欠费</TableHead>
-                    <TableHead className="text-right">累计消费</TableHead>
-                    <TableHead className="text-right">折扣</TableHead>
-                    <TableHead>状态</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rows.length ? (
-                    pageRows.map((c) => (
-                      <TableRow
-                        key={c.id}
-                        className={cn("cursor-pointer align-top", (c.archived || c.project_archived) && "opacity-60")}
-                        onClick={() => router.push(`/dashboard/ledger/customers/${c.id}`)}
-                      >
-                        <TableCell>
-                          <div className="flex items-center gap-1.5 font-medium">
-                            {c.name}
-                            {c.archived ? <Badge variant="outline">归档</Badge> : null}
-                          </div>
-                          <Link
-                            href={`/dashboard/ledger/projects/${c.project_id}`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="text-muted-foreground text-xs hover:underline"
-                          >
-                            {c.project_name}
-                            {c.project_type === "short" ? "（短期）" : ""}
-                          </Link>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="outline">{c.settle_type === "credit" ? "后付" : "预付"}</Badge>
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {c.settle_type === "credit" ? (
-                            <span className={cn((c.settle.open ?? 0) > 0 && "text-warning")}>
-                              {curf(c.settle.open, c.currency)}
-                            </span>
-                          ) : c.balance_usd != null ? (
-                            <span className={cn(c.low_balance && "text-destructive font-semibold")}>
-                              {usdf(c.balance_usd)}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">{curf(c.settle.due, c.currency)}</TableCell>
-                        <TableCell className="text-muted-foreground text-right tabular-nums">
-                          {+c.ratio.toFixed(4)}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-1">
-                            {c.low_balance ? <Badge variant="destructive">余额不足</Badge> : null}
-                            {c.term?.overdue ? <Badge variant="destructive">逾期</Badge> : null}
-                            {c.settle_type === "credit" && c.term && !c.term.overdue ? (
-                              <span className="text-muted-foreground text-xs">{c.term.days_to_due} 天到期</span>
-                            ) : null}
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  ) : (
-                    <TableRow>
-                      <TableCell colSpan={6} className="text-muted-foreground py-10 text-center">
-                        {data.length ? "没有符合条件的客户" : "还没有客户"}
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-          {data ? <Pager {...pager} className="mt-4" /> : null}
-        </CardContent>
-      </Card>
+        ) : null}
+        <div className="relative w-full sm:w-64">
+          <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+          <Input placeholder="搜索客户 / 项目" value={q} onChange={(e) => setQ(e.target.value)} className="pl-9" />
+        </div>
+      </div>
+
+      {!data ? (
+        <Skeleton className="h-64" />
+      ) : (
+        <>
+          <CustomerTable
+            title="中转客户"
+            description="有中转项目的客户，自动跟踪中转站余额、消费与应收（折扣 = 中转消耗 × 折扣）"
+            customers={relay}
+            withBalance
+            usdRate={usdRate}
+            fetchedAt={data.fetched_at}
+            resetKey={`relay|${q}|${showArchived}`}
+          />
+          <CustomerTable
+            title="项目制客户"
+            description="只有项目制项目的客户，按实际记账跟踪应收 / 已结算"
+            customers={project}
+            withBalance={false}
+            usdRate={usdRate}
+            fetchedAt={data.fetched_at}
+            resetKey={`proj|${q}|${showArchived}`}
+          />
+        </>
+      )}
     </div>
   );
 }

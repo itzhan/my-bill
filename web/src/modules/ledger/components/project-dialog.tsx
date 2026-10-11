@@ -144,13 +144,13 @@ export function ProjectDialog({
                 中转
               </ToggleGroupItem>
               <ToggleGroupItem value="short" className="flex-1 data-[state=on]:font-semibold">
-                短期
+                项目制
               </ToggleGroupItem>
             </ToggleGroup>
             <p className="text-muted-foreground text-xs">
               {ptype === "relay"
                 ? "中转：自动跟踪供应商与客户消耗，计入每日利润报表"
-                : "短期：按实际记账（收入 − 支出）算利润，不进每日利润报表"}
+                : "项目制：按实际记账（收入 − 支出）算利润，不进每日利润报表"}
             </p>
           </div>
           <div className="space-y-2">

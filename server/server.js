@@ -173,8 +173,8 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = 'settle
 if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = 'settle_type'").get()) {
   db.exec("ALTER TABLE parties ADD COLUMN settle_type TEXT NOT NULL DEFAULT 'prepaid'");
 }
-// 客户：预付余额提醒阈值（美元）、后付账期天数、起始使用时间；供应商/客户：画像（介绍）
-for (const [col, ddl] of [['balance_threshold', 'REAL'], ['term_days', 'INTEGER'], ['start_date', "TEXT NOT NULL DEFAULT ''"], ['profile', "TEXT NOT NULL DEFAULT ''"]]) {
+// 客户：预付余额提醒阈值（美元）、后付账期天数、起始使用时间；供应商/客户：画像（介绍）；客户分组（把跨项目的多个客户 party 归并成一个逻辑客户）
+for (const [col, ddl] of [['balance_threshold', 'REAL'], ['term_days', 'INTEGER'], ['start_date', "TEXT NOT NULL DEFAULT ''"], ['profile', "TEXT NOT NULL DEFAULT ''"], ['customer_group', "TEXT NOT NULL DEFAULT ''"]]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = ?").get(col)) db.exec(`ALTER TABLE parties ADD COLUMN ${col} ${ddl}`);
 }
 // 往来单位的电子合同（关联 attachments）
@@ -860,7 +860,7 @@ function supplierSettlement(p) {
   const unsettled = r2(payable - settled + balance);
   return { currency: cur, payable, balance, settled, settled_base: base, from_entries: fromEntries, paid_out: paidOut, refunded, entry_count: entries.length + incomes.length, unsettled };
 }
-const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
+const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId) {
   const parties = q.partiesOfProject.all(projectId);
@@ -897,6 +897,7 @@ Object.assign(ops, {
     if (body.ratio !== undefined && body.ratio !== null && body.ratio !== '') { const ratio = Number(body.ratio); if (ratio > 0 && ratio <= 100) db.prepare('UPDATE parties SET ratio = ? WHERE id = ?').run(Math.round(ratio * 10000) / 10000, party.id); }
     if (body.settle_type === 'credit') db.prepare("UPDATE parties SET settle_type = 'credit' WHERE id = ?").run(party.id);
     if (body.profile) db.prepare('UPDATE parties SET profile = ? WHERE id = ?').run(String(body.profile).slice(0, 1000), party.id);
+    if (kind === 'customer' && body.customer_group) db.prepare('UPDATE parties SET customer_group = ? WHERE id = ?').run(String(body.customer_group).slice(0, 60), party.id);
     if (kind === 'customer') {
       const sets = [], vals = [];
       if (body.balance_threshold !== undefined && body.balance_threshold !== '') { sets.push('balance_threshold = ?'); vals.push(Number(body.balance_threshold) >= 0 ? Number(body.balance_threshold) : null); }
@@ -928,6 +929,7 @@ Object.assign(ops, {
       db.prepare('UPDATE parties SET settle_type = ? WHERE id = ?').run(patch.settle_type === 'credit' ? 'credit' : 'prepaid', pa.id);
     }
     if (patch.profile !== undefined) db.prepare('UPDATE parties SET profile = ? WHERE id = ?').run(String(patch.profile || '').slice(0, 1000), pa.id);
+    if (patch.customer_group !== undefined && pa.kind === 'customer') db.prepare('UPDATE parties SET customer_group = ? WHERE id = ?').run(String(patch.customer_group || '').slice(0, 60), pa.id);
     // 客户：预付余额阈值（美元）、后付账期天数、起始使用时间
     if (pa.kind === 'customer') {
       if (patch.balance_threshold !== undefined) db.prepare('UPDATE parties SET balance_threshold = ? WHERE id = ?').run(patch.balance_threshold === '' || patch.balance_threshold === null ? null : (Number(patch.balance_threshold) >= 0 ? Number(patch.balance_threshold) : null), pa.id);
@@ -3031,37 +3033,73 @@ app.delete('/api/party-contracts/:id', auth, (req, res) => {
   if (a) { try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(a.file))); } catch {} db.prepare('DELETE FROM attachments WHERE id = ?').run(a.id); }
   res.json({ ok: true });
 });
-// 客户：跨项目平铺，含中转站余额、预付低余额标记、后付账期/欠费
+// 一个逻辑客户的归并键：手动分组优先，否则按 relay 账号，否则单独一个
+const custGroupKey = (r) => (r.customer_group || '').trim() || (r.relay_id != null ? `relay:${r.relay_id}` : `party:${r.id}`);
+function custSiblings(pa) {
+  const sel = "SELECT pa.*, p.name AS project_name, p.ptype AS project_type FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer'";
+  const g = (pa.customer_group || '').trim();
+  if (g) return db.prepare(`${sel} AND pa.customer_group = ? ORDER BY pa.id`).all(g);
+  if (pa.relay_id != null) return db.prepare(`${sel} AND (pa.customer_group = '' OR pa.customer_group IS NULL) AND pa.relay_id = ? ORDER BY pa.id`).all(pa.relay_id);
+  return db.prepare(`${sel} AND pa.id = ?`).all(pa.id);
+}
+// 客户：按逻辑客户聚合。有中转项目 → 中转客户；全部项目制 → 项目制客户
 app.get('/api/customers', auth, async (req, res) => {
   const rates = getRates();
-  const rows = db.prepare(`SELECT pa.*, p.name AS project_name, p.archived AS project_archived, p.ptype AS project_type FROM parties pa JOIN projects p ON p.id = pa.project_id
-                           WHERE pa.kind = 'customer' ORDER BY pa.archived, p.archived, pa.id DESC`).all();
+  const rows = db.prepare("SELECT pa.*, p.name AS project_name, p.archived AS project_archived, p.ptype AS project_type FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer' ORDER BY pa.id").all();
   const bal = await relayBalances();
   const todayS = todayKey();
-  const customers = rows.map((r) => {
+  const groups = new Map();
+  for (const r of rows) {
     const v = partyView(r);
+    const key = custGroupKey(r);
     const balance_usd = r.relay_id != null ? (bal.has(r.relay_id) ? bal.get(r.relay_id) : null) : null;
-    const low_balance = v.settle_type === 'prepaid' && v.balance_threshold != null && balance_usd != null && balance_usd < v.balance_threshold;
-    return { ...v, project_archived: !!r.project_archived, project_type: r.project_type || 'relay', balance_usd, low_balance, term: termStatus(v, todayS) };
+    const part = { party_id: r.id, name: r.name, project_id: r.project_id, project_name: r.project_name, project_type: r.project_type || 'relay', project_archived: !!r.project_archived, settle_type: v.settle_type, relay_id: r.relay_id || null, balance_usd, due_cny: v.settle.due_cny, paid_cny: v.settle.paid_cny, open_cny: v.settle.open_cny, ratio: v.ratio, archived: v.archived, low_balance: v.settle_type === 'prepaid' && v.balance_threshold != null && balance_usd != null && balance_usd < v.balance_threshold, term: termStatus(v, todayS), balance_threshold: v.balance_threshold };
+    if (!groups.has(key)) groups.set(key, { key, group: (r.customer_group || '').trim(), parties: [] });
+    groups.get(key).parties.push(part);
+  }
+  const customers = [...groups.values()].map((g) => {
+    const ps = g.parties;
+    return {
+      key: g.key, group: g.group, detail_party_id: ps[0].party_id,
+      name: g.group || ps[0].name,
+      parties: ps,
+      has_relay: ps.some((p) => p.project_type === 'relay'),
+      settle_type: ps.every((p) => p.settle_type === 'credit') ? 'credit' : 'prepaid',
+      balance_usd: ps.some((p) => p.balance_usd != null) ? r2(ps.reduce((a, p) => a + (p.balance_usd ?? 0), 0)) : null,
+      due_cny: r2(ps.reduce((a, p) => a + p.due_cny, 0)),
+      paid_cny: r2(ps.reduce((a, p) => a + p.paid_cny, 0)),
+      open_cny: r2(ps.reduce((a, p) => a + p.open_cny, 0)),
+      low_balance: ps.some((p) => p.low_balance),
+      overdue: ps.some((p) => p.term && p.term.overdue),
+      archived: ps.every((p) => p.archived || p.project_archived),
+      project_count: ps.length,
+      // 折扣：取绑定了中转站的项目的折扣（没有则取全部），去重
+      ratios: [...new Set((ps.some((p) => p.relay_id != null) ? ps.filter((p) => p.relay_id != null) : ps).map((p) => p.ratio))].sort((a, b) => a - b),
+    };
   });
-  res.json({ customers, rates });
+  res.json({ relay_customers: customers.filter((c) => c.has_relay), project_customers: customers.filter((c) => !c.has_relay), usd_rate: rates.USD, rates, fetched_at: now() });
 });
-// 客户详情：合作过的所有项目（按 relay 关联）+ 全部往来记录 + 中转站实时
+// 客户详情：按逻辑客户聚合所有项目 + 全部往来记录 + 电子合同 + 中转站实时
 app.get('/api/customers/:id/detail', auth, async (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa || pa.kind !== 'customer') return fail(res, 404, '客户不存在');
   const rates = getRates();
   const todayS = todayKey();
-  const siblings = pa.relay_id
-    ? db.prepare("SELECT pa.*, p.name AS project_name, p.ptype AS project_type FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer' AND pa.relay_id = ? ORDER BY pa.id").all(pa.relay_id)
-    : db.prepare("SELECT pa.*, p.name AS project_name, p.ptype AS project_type FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.id = ?").all(pa.id);
-  const projects = siblings.map((s) => { const v = partyView(s); return { party_id: s.id, project_id: s.project_id, project_name: s.project_name, project_type: s.project_type || 'relay', ratio: v.ratio, currency: v.currency, settle: v.settle }; });
+  const bal = await relayBalances();
+  const siblings = custSiblings(pa);
+  const projects = siblings.map((s) => { const v = partyView(s); return { party_id: s.id, project_id: s.project_id, project_name: s.project_name, project_type: s.project_type || 'relay', settle_type: v.settle_type, relay_id: s.relay_id || null, balance_usd: s.relay_id != null ? (bal.has(s.relay_id) ? bal.get(s.relay_id) : null) : null, ratio: v.ratio, currency: v.currency, settle: v.settle }; });
   const records = siblings.flatMap((s) => q.recordsWithCreator.all(s.id).map((r) => ({ ...recordView(r), project_name: s.project_name }))).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
-  let live = null, balance_usd = null;
-  if (pa.relay_id && relayConfigured()) { try { live = await relayCustomerLive(pa.relay_id, pa.relay_ref); balance_usd = live && live.user ? live.user.balance_usd : null; } catch { /* ignore */ } }
-  const v = partyView(pa);
   const contracts = siblings.flatMap((s) => qContractsOf.all(s.id).map((r) => ({ ...contractView(r), project_name: s.project_name })));
-  res.json({ customer: { ...v, balance_usd, term: termStatus(v, todayS) }, projects, records, contracts, live, rates });
+  // 实时：取第一个绑定了中转站的 party
+  let live = null;
+  const relaySib = siblings.find((s) => s.relay_id != null);
+  if (relaySib && relayConfigured()) { try { live = await relayCustomerLive(relaySib.relay_id, relaySib.relay_ref); } catch { /* ignore */ } }
+  const v = partyView(pa);
+  const balance_usd = projects.some((p) => p.balance_usd != null) ? r2(projects.reduce((a, p) => a + (p.balance_usd ?? 0), 0)) : null;
+  const agg = { due: 0, paid: 0, open: 0, due_cny: 0, paid_cny: 0, open_cny: 0 };
+  for (const s of siblings) { const st = partyView(s).settle; agg.due_cny += st.due_cny; agg.paid_cny += st.paid_cny; agg.open_cny += st.open_cny; }
+  const settle = { ...v.settle, due_cny: r2(agg.due_cny), paid_cny: r2(agg.paid_cny), open_cny: r2(agg.open_cny) };
+  res.json({ customer: { ...v, name: (pa.customer_group || '').trim() || pa.name, settle, balance_usd, term: termStatus(v, todayS) }, projects, records, contracts, live, rates });
 });
 // 供应商详情：资金往来（双向明细）+ 每把 Key 在站点的分组 / 每组消耗 / 每日消耗
 app.get('/api/suppliers/:id/detail', auth, async (req, res) => {

@@ -180,6 +180,8 @@ export type Party = {
   start_date?: string;
   // 供应商 / 客户画像（介绍）
   profile?: string;
+  // 客户逻辑分组：同名的多个项目往来视为同一个客户
+  customer_group?: string;
   // 供应商结算：应付（消费折结算币种）/ 已结算（期初+充值支出）/ 未结算
   recharge?: {
     currency: Currency;
@@ -314,20 +316,60 @@ export type ProfitDaily = {
   cached_at?: string;
 };
 
-// 客户（跨项目平铺）：中转站余额、预付低余额标记、后付账期/欠费
+// 客户：按逻辑客户聚合（一个客户可跨多个项目）
 export type TermStatus = { due_date: string; days_to_due: number; arrears: number; overdue: boolean };
-export type CustomerRow = Party & {
-  project_archived: boolean;
+export type CustomerPartyRow = {
+  party_id: number;
+  name: string;
+  project_id: number;
+  project_name: string;
   project_type: "relay" | "short";
+  project_archived: boolean;
+  settle_type: "prepaid" | "credit";
+  relay_id: number | null;
   balance_usd: number | null;
+  due_cny: number;
+  paid_cny: number;
+  open_cny: number;
+  ratio: number;
+  archived: boolean;
   low_balance: boolean;
   term: TermStatus | null;
+  balance_threshold: number | null;
+};
+export type CustomerGroup = {
+  key: string;
+  group: string;
+  detail_party_id: number;
+  name: string;
+  parties: CustomerPartyRow[];
+  has_relay: boolean;
+  settle_type: "prepaid" | "credit";
+  balance_usd: number | null;
+  due_cny: number;
+  paid_cny: number;
+  open_cny: number;
+  low_balance: boolean;
+  overdue: boolean;
+  archived: boolean;
+  project_count: number;
+  ratios: number[];
+};
+export type CustomersResponse = {
+  relay_customers: CustomerGroup[];
+  project_customers: CustomerGroup[];
+  usd_rate: number;
+  rates: Rates;
+  fetched_at: string;
 };
 export type CustomerProject = {
   party_id: number;
   project_id: number;
   project_name: string;
   project_type: "relay" | "short";
+  settle_type?: "prepaid" | "credit";
+  relay_id?: number | null;
+  balance_usd?: number | null;
   ratio: number;
   currency: Currency;
   settle: Settle;

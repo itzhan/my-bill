@@ -59,12 +59,14 @@ function RecordsTab({ records }: { records: CustomerDetail["records"] }) {
             {records.length ? (
               rows.map((r) => (
                 <TableRow key={r.id}>
-                  <TableCell className="text-muted-foreground tabular-nums whitespace-nowrap">{r.date}</TableCell>
+                  <TableCell className="text-muted-foreground whitespace-nowrap tabular-nums">{r.date}</TableCell>
                   <TableCell className="text-muted-foreground text-xs">{r.project_name}</TableCell>
                   <TableCell>
                     <Badge
                       variant="outline"
-                      className={cn(r.kind === "paid" ? "text-income border-income/30" : "text-warning border-warning/30")}
+                      className={cn(
+                        r.kind === "paid" ? "text-income border-income/30" : "text-warning border-warning/30",
+                      )}
                     >
                       {r.kind === "paid" ? "实收" : "应收"}
                       {r.source === "relay" ? " · 中转站" : ""}
@@ -158,14 +160,25 @@ function UploadContractDialog({
               if (f && !title.trim()) setTitle(f.name.replace(/\.[^.]+$/, ""));
             }}
           />
-          <Button type="button" variant="outline" className="w-full justify-start" onClick={() => fileRef.current?.click()}>
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full justify-start"
+            onClick={() => fileRef.current?.click()}
+          >
             <Upload />
             {file ? `${file.name}（${fmtSize(file.size)}）` : "选择文件"}
           </Button>
         </div>
         <div className="space-y-2">
           <Label htmlFor="ct-title">合同名称</Label>
-          <Input id="ct-title" maxLength={100} placeholder="如 2026 年度服务合同" value={title} onChange={(e) => setTitle(e.target.value)} />
+          <Input
+            id="ct-title"
+            maxLength={100}
+            placeholder="如 2026 年度服务合同"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
         </div>
         <div className="space-y-2">
           <Label>归属项目</Label>
@@ -319,7 +332,9 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
               </CardTitle>
             </CardHeader>
             <CardContent className="text-muted-foreground px-5 text-xs">
-              {c.balance_usd != null ? `中转站余额 $${c.balance_usd.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}` : "中转站余额"}
+              {c.balance_usd != null
+                ? `中转站余额 $${c.balance_usd.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`
+                : "中转站余额"}
               {c.balance_threshold != null ? ` · 阈值 $${c.balance_threshold}` : ""}
             </CardContent>
           </Card>
@@ -390,14 +405,19 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                 {projects.map((p) => (
                   <TableRow key={p.party_id}>
                     <TableCell>
-                      <Link href={`/dashboard/ledger/projects/${p.project_id}`} className="text-primary hover:underline">
+                      <Link
+                        href={`/dashboard/ledger/projects/${p.project_id}`}
+                        className="text-primary hover:underline"
+                      >
                         {p.project_name}
                       </Link>
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{p.project_type === "short" ? "短期" : "中转"}</Badge>
+                      <Badge variant="outline">{p.project_type === "short" ? "项目制" : "中转"}</Badge>
                     </TableCell>
-                    <TableCell className="text-muted-foreground text-right tabular-nums">{+p.ratio.toFixed(4)}</TableCell>
+                    <TableCell className="text-muted-foreground text-right tabular-nums">
+                      {+p.ratio.toFixed(4)}
+                    </TableCell>
                     <TableCell className="text-right">
                       <Amt cny={p.settle.due_cny} orig={p.settle.due} cur={p.currency} />
                     </TableCell>
