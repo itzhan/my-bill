@@ -336,7 +336,7 @@ function EmailTab() {
     <Card className="max-w-xl">
       <CardHeader>
         <CardTitle>每日利润邮件</CardTitle>
-        <CardDescription>到点自动把今日利润（分项目、各用户、近 7 天趋势）发到团队邮箱。用 SkyMail 发信。</CardDescription>
+        <CardDescription>每天早上自动把昨日利润（分项目、各用户、近 7 天趋势）发到团队邮箱。昨天数据完整，更准确。</CardDescription>
       </CardHeader>
       <form onSubmit={submit}>
         <CardContent className="space-y-5">
@@ -430,7 +430,7 @@ function EmailTab() {
           </Button>
           <Button type="button" variant="outline" onClick={sendNow} disabled={sending || !cfg.recipients.length || !cfg.email}>
             <Send className={cn(sending && "animate-pulse")} />
-            {sending ? "发送中…" : "立即发送今日"}
+            {sending ? "发送中…" : "立即发送一份"}
           </Button>
         </CardFooter>
       </form>

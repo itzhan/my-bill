@@ -3076,10 +3076,12 @@ async function skymailSend(cfg, { subject, html, text }) {
 const htmlEsc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtY = (n) => '¥' + Number(n || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtY0 = (n) => (n < 0 ? '-' : '') + '¥' + Math.round(Math.abs(Number(n) || 0)).toLocaleString('zh-CN');
-// 现代简约风格邮件（内联样式，邮件客户端安全）
-function buildProfitEmail(d) {
-  const today = todayKey();
-  const dateLabel = today.replace(/-/g, ' / ');
+const shiftDay = (key, delta) => { const [y, m, dd] = key.split('-').map(Number); const dt = new Date(Date.UTC(y, m - 1, dd)); dt.setUTCDate(dt.getUTCDate() + delta); return dt.toISOString().slice(0, 10); };
+// 现代简约风格邮件（内联样式，邮件客户端安全）。默认报告「昨日」（数据完整更准），targetDate 可指定某天
+function buildProfitEmail(d, targetDate) {
+  const today = targetDate || shiftDay(todayKey(), -1);
+  const wk = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][new Date(`${today}T00:00:00+08:00`).getDay()];
+  const dateLabel = today.replace(/-/g, ' / ') + '　' + wk;
   const tp = d.projects.map((p) => ({ name: p.project_name, id: p.project_id, day: p.days.find((x) => x.date === today) })).filter((x) => x.day).sort((a, b) => b.day.profit - a.day.profit);
   const tc = tp.reduce((a, x) => ({ c: a.c + x.day.customer, s: a.s + x.day.supplier, p: a.p + x.day.profit }), { c: 0, s: 0, p: 0 });
   const margin = tc.c > 0 ? ((tc.p / tc.c) * 100).toFixed(1) : '0.0';
@@ -3100,10 +3102,10 @@ function buildProfitEmail(d) {
 <div style="width:100%;padding:32px 16px;box-sizing:border-box;">
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="width:560px;max-width:100%;margin:0 auto;background:#ffffff;border:1px solid #edeff2;border-radius:18px;">
 <tr><td style="padding:34px 38px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td><span style="display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;vertical-align:middle;margin-right:9px;"></span><span style="font-size:14px;font-weight:600;color:#111827;vertical-align:middle;">元启智能账单</span></td><td style="text-align:right;color:#9ca3af;font-size:13px;">${dateLabel}</td></tr></table></td></tr>
-<tr><td style="padding:30px 38px 30px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">今日利润</div><div style="color:${pColor};font-size:48px;font-weight:700;line-height:1.05;margin:10px 0 0;letter-spacing:-1px;">${(tc.p < 0 ? '' : '+') + fmtY(tc.p)}</div></td></tr>
+<tr><td style="padding:30px 38px 30px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">全天利润</div><div style="color:${pColor};font-size:48px;font-weight:700;line-height:1.05;margin:10px 0 0;letter-spacing:-1px;">${(tc.p < 0 ? '' : '+') + fmtY(tc.p)}</div></td></tr>
 <tr><td style="padding:0 38px 32px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #edeff2;border-bottom:1px solid #edeff2;"><tr><td style="padding:18px 0;vertical-align:top;"><div style="font-size:11px;color:#9ca3af;">客户消耗</div><div style="font-size:19px;font-weight:600;color:#111827;margin-top:6px;">${fmtY0(tc.c)}</div></td><td style="width:1px;background:#edeff2;"></td><td style="padding:18px 0 18px 22px;vertical-align:top;"><div style="font-size:11px;color:#9ca3af;">供应商消耗</div><div style="font-size:19px;font-weight:600;color:#111827;margin-top:6px;">${fmtY0(tc.s)}</div></td><td style="width:1px;background:#edeff2;"></td><td style="padding:18px 0 18px 22px;vertical-align:top;"><div style="font-size:11px;color:#9ca3af;">利润率</div><div style="font-size:19px;font-weight:600;color:${pColor};margin-top:6px;">${margin}%</div></td></tr></table></td></tr>
 <tr><td style="padding:0 38px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">分项目</div></td></tr>
-${projBlocks || '<tr><td style="padding:16px 38px 0;color:#9ca3af;font-size:13px;">今天还没有有消耗的项目</td></tr>'}
+${projBlocks || '<tr><td style="padding:16px 38px 0;color:#9ca3af;font-size:13px;">当天没有有消耗的项目</td></tr>'}
 <tr><td style="padding:34px 38px 0;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">近 7 天利润</div></td></tr>
 <tr><td style="padding:16px 38px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size:13px;">${recentRows}</table></td></tr>
 <tr><td style="padding:36px 38px 34px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #edeff2;"><tr><td style="padding-top:22px;"><div style="font-size:12px;color:#b6bcc6;line-height:1.7;">利润 = 客户消耗（中转站消耗 × 折扣，折人民币）− 供应商消耗（钱包实际消费）<br>由「元启智能账单」每日 ${getEmailReport().time} 自动发送 · 内部数据，请勿外传</div></td></tr></table></td></tr>
