@@ -1,6 +1,6 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
 
 import Link from "next/link";
 
@@ -15,6 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
+import { MemberEntriesDialog } from "@/modules/ledger/components/member-entries-dialog";
 import { amt } from "@/modules/ledger/components/party-wallets";
 import { Pager, usePaged } from "@/modules/ledger/components/shared";
 import { curf, fmt0, usdf } from "@/modules/ledger/format";
@@ -334,10 +335,11 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
   );
 }
 
-// 资金往来：转给他 / 他转回 / 净 + 明细（项目可跳转）
+// 资金往来：转给他 / 他转回 / 净 + 明细（项目可跳转，经手人可点开成员流水）
 function FundsTab({ detail }: { detail: SupplierDetail }) {
   const { funds } = detail;
   const { rows, pager } = usePaged(funds.entries, "funds");
+  const [member, setMember] = useState<{ id: number; name: string } | null>(null);
   const cards = [
     { label: "我们转给他", value: curf(funds.out, funds.currency), icon: ArrowUpRight, cls: "text-expense" },
     { label: "他转给我们", value: curf(funds.income, funds.currency), icon: ArrowDownLeft, cls: "text-income" },
@@ -369,10 +371,10 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
+                  <TableHead>经手人</TableHead>
                   <TableHead>方向</TableHead>
                   <TableHead className="text-right">金额</TableHead>
                   <TableHead>项目</TableHead>
-                  <TableHead>经手人</TableHead>
                   <TableHead>备注</TableHead>
                 </TableRow>
               </TableHeader>
@@ -382,15 +384,24 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
                     <TableRow key={e.id}>
                       <TableCell className="text-muted-foreground text-xs whitespace-nowrap">{e.time}</TableCell>
                       <TableCell>
-                        {e.type === "income" ? (
-                          <Badge variant="outline" className="text-income border-income/30">
-                            他转回
-                          </Badge>
-                        ) : (
-                          <Badge variant="outline" className="text-expense border-expense/30">
-                            转给他
-                          </Badge>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => setMember({ id: e.handler_id, name: e.handler })}
+                          className="bg-secondary text-secondary-foreground hover:bg-secondary/70 inline-flex items-center rounded-full px-2 py-0.5 text-xs transition-colors"
+                          title="查看该成员的全部流水"
+                        >
+                          {e.handler}
+                        </button>
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            e.type === "income" ? "text-income border-income/30" : "text-expense border-expense/30",
+                          )}
+                        >
+                          {e.type === "income" ? "收入" : "支出"}
+                        </Badge>
                       </TableCell>
                       <TableCell
                         className={cn("text-right tabular-nums", e.type === "income" ? "text-income" : "text-expense")}
@@ -405,7 +416,6 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
                           {e.project_name}
                         </Link>
                       </TableCell>
-                      <TableCell className="text-muted-foreground text-xs">{e.handler}</TableCell>
                       <TableCell className="text-muted-foreground max-w-xs truncate text-xs">{e.note || "—"}</TableCell>
                     </TableRow>
                   ))
@@ -422,6 +432,7 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
           <Pager {...pager} className="mt-4" />
         </CardContent>
       </Card>
+      <MemberEntriesDialog member={member} onClose={() => setMember(null)} />
     </div>
   );
 }

@@ -216,6 +216,8 @@ const q = {
   incomesOfParty: db.prepare("SELECT * FROM entries WHERE party_id = ? AND type = 'income'"),
   // 资金往来明细：挂该供应商的全部流水（含项目名，供详情页双向跳转）
   entriesTaggedParty: db.prepare(`${ENTRY_SELECT} WHERE e.party_id = ? ORDER BY e.created_at DESC, e.id DESC`),
+  // 某成员经手的全部流水（跨项目，用于经手人明细）
+  entriesByHandler: db.prepare(`${ENTRY_SELECT} WHERE e.handler_id = ? ORDER BY e.created_at DESC, e.id DESC`),
 
   transfersOfProject: db.prepare(`${TRANSFER_SELECT} WHERE t.project_id = ? ORDER BY t.created_at DESC, t.id DESC`),
   allTransfers: db.prepare(`${TRANSFER_SELECT} ORDER BY t.created_at DESC, t.id DESC`),
@@ -2910,7 +2912,7 @@ app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
   const entries = q.entriesTaggedParty.all(pa.id).map((e) => {
     const inCur = conv(e);
     if (e.type === 'income') income += inCur; else out += inCur;
-    return { id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, rate: e.rate, cny: r2(entryBase(e, rates)), in_cur: r2(inCur), project_id: e.project_id, project_name: e.project_name, note: e.note, handler: e.handler_name };
+    return { id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, rate: e.rate, cny: r2(entryBase(e, rates)), in_cur: r2(inCur), project_id: e.project_id, project_name: e.project_name, note: e.note, handler: e.handler_name, handler_id: e.handler_id };
   });
   // 按站点去重：同一 base_url 是同一账户，分组 / 消耗完全一样，只取一把 Key 抓一次
   const wallets = [];
@@ -2922,6 +2924,17 @@ app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
     wallets.push(await partyWallets.detailOf(w.id));
   }
   res.json({ party: partyView(pa), funds: { currency: cur, out: r2(out), income: r2(income), net: r2(out - income), entries }, wallets, rates });
+});
+// 成员经手的全部流水（跨项目）：支出 / 收入、来源项目、供应商、备注
+app.get('/api/members/:id/entries', auth, (req, res) => {
+  const m = q.userById.get(Number(req.params.id));
+  if (!m) return fail(res, 404, '成员不存在');
+  const rates = getRates();
+  const rows = q.entriesByHandler.all(m.id);
+  const entries = rows.map((e) => ({ id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, cny: r2(entryBase(e, rates)), project_id: e.project_id, project_name: e.project_name, party_name: e.party_name || '', note: e.note }));
+  let income = 0, expense = 0;
+  for (const e of rows) (e.type === 'income' ? (income += entryBase(e, rates)) : (expense += entryBase(e, rates)));
+  res.json({ member: { id: m.id, name: m.username }, entries, totals: { income: r2(income), expense: r2(expense), count: rows.length }, rates });
 });
 app.delete('/api/party-records/:id', auth, (req, res) => { ops.deletePartyRecord(req.user, req.params.id); res.json({ ok: true }); });
 

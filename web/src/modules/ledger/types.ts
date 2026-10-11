@@ -201,6 +201,26 @@ export type FundEntry = {
   project_name: string;
   note: string;
   handler: string;
+  handler_id: number;
+};
+// 成员经手的流水（跨项目）
+export type MemberEntry = {
+  id: number;
+  time: string;
+  type: EntryType;
+  amount: number;
+  currency: Currency;
+  cny: number;
+  project_id: number;
+  project_name: string;
+  party_name: string;
+  note: string;
+};
+export type MemberEntries = {
+  member: { id: number; name: string };
+  entries: MemberEntry[];
+  totals: { income: number; expense: number; count: number };
+  rates: Rates;
 };
 export type WalletGroup = { name: string; ratio: number | null; desc: string; model_count: number; types: string[] };
 export type ConsumePoint = { date: string; usd: number; count: number };
