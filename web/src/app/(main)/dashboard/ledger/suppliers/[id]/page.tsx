@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use } from "react";
 
 import Link from "next/link";
 
@@ -15,7 +15,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
-import { MemberEntriesDialog } from "@/modules/ledger/components/member-entries-dialog";
 import { amt } from "@/modules/ledger/components/party-wallets";
 import { Pager, usePaged } from "@/modules/ledger/components/shared";
 import { curf, fmt0, usdf } from "@/modules/ledger/format";
@@ -339,7 +338,6 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
 function FundsTab({ detail }: { detail: SupplierDetail }) {
   const { funds } = detail;
   const { rows, pager } = usePaged(funds.entries, "funds");
-  const [member, setMember] = useState<{ id: number; name: string } | null>(null);
   const cards = [
     { label: "我们转给他", value: curf(funds.out, funds.currency), icon: ArrowUpRight, cls: "text-expense" },
     { label: "他转给我们", value: curf(funds.income, funds.currency), icon: ArrowDownLeft, cls: "text-income" },
@@ -384,14 +382,13 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
                     <TableRow key={e.id}>
                       <TableCell className="text-muted-foreground text-xs whitespace-nowrap">{e.time}</TableCell>
                       <TableCell>
-                        <button
-                          type="button"
-                          onClick={() => setMember({ id: e.handler_id, name: e.handler })}
+                        <Link
+                          href={`/dashboard/ledger/members/${e.handler_id}`}
                           className="bg-secondary text-secondary-foreground hover:bg-secondary/70 inline-flex items-center rounded-full px-2 py-0.5 text-xs transition-colors"
-                          title="查看该成员的全部流水"
+                          title="查看该成员的详细流水"
                         >
                           {e.handler}
-                        </button>
+                        </Link>
                       </TableCell>
                       <TableCell>
                         <Badge
@@ -432,7 +429,6 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
           <Pager {...pager} className="mt-4" />
         </CardContent>
       </Card>
-      <MemberEntriesDialog member={member} onClose={() => setMember(null)} />
     </div>
   );
 }

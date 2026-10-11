@@ -2925,16 +2925,18 @@ app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
   }
   res.json({ party: partyView(pa), funds: { currency: cur, out: r2(out), income: r2(income), net: r2(out - income), entries }, wallets, rates });
 });
-// 成员经手的全部流水（跨项目）：支出 / 收入、来源项目、供应商、备注
-app.get('/api/members/:id/entries', auth, (req, res) => {
+// 成员详情：总收 / 总付 / 沉淀资金 + 全部经手流水（跨项目）+ 转账往来
+app.get('/api/members/:id/detail', auth, (req, res) => {
   const m = q.userById.get(Number(req.params.id));
   if (!m) return fail(res, 404, '成员不存在');
   const rates = getRates();
   const rows = q.entriesByHandler.all(m.id);
   const entries = rows.map((e) => ({ id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, cny: r2(entryBase(e, rates)), project_id: e.project_id, project_name: e.project_name, party_name: e.party_name || '', note: e.note }));
-  let income = 0, expense = 0;
-  for (const e of rows) (e.type === 'income' ? (income += entryBase(e, rates)) : (expense += entryBase(e, rates)));
-  res.json({ member: { id: m.id, name: m.username }, entries, totals: { income: r2(income), expense: r2(expense), count: rows.length }, rates });
+  // 资金汇总（总收 income / 总付 expense / 转入 in / 转出 out / 沉淀 balance）取自全局成员资金
+  const funds = memberFunds(null, { includeZero: true });
+  const fund = funds.members.find((x) => x.id === m.id) || { id: m.id, name: m.username, income: 0, expense: 0, in: 0, out: 0, balance: 0, entry_count: 0, transfer_count: 0, cur: null, last_at: null };
+  const transfers = funds.transfers.filter((t) => t.from_id === m.id || t.to_id === m.id);
+  res.json({ member: { id: m.id, name: m.username }, fund, entries, transfers, rates });
 });
 app.delete('/api/party-records/:id', auth, (req, res) => { ops.deletePartyRecord(req.user, req.params.id); res.json({ ok: true }); });
 

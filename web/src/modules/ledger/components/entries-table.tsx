@@ -2,6 +2,8 @@
 
 import { Fragment, useState } from "react";
 
+import Link from "next/link";
+
 import { ImageIcon, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -146,8 +148,16 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                             </TableCell>
                             <TableCell className="hidden sm:table-cell">
                               <span className="inline-flex items-center gap-1.5">
-                                <MemberAvatar name={e.handler_name} className="size-5 text-[10px]" />
-                                {e.handler_name} {isExp ? "支付" : "收款"}
+                                <Link
+                                  href={`/dashboard/ledger/members/${e.handler_id}`}
+                                  onClick={(ev) => ev.stopPropagation()}
+                                  title="查看该成员的详细流水"
+                                  className="inline-flex items-center gap-1.5 hover:underline"
+                                >
+                                  <MemberAvatar name={e.handler_name} className="size-5 text-[10px]" />
+                                  {e.handler_name}
+                                </Link>
+                                {isExp ? "支付" : "收款"}
                                 {e.created_by !== e.handler_id ? (
                                   <span className="text-muted-foreground text-xs">· {e.creator_name} 登记</span>
                                 ) : null}

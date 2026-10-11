@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { ArrowRight, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -16,7 +18,7 @@ import type { FundMember, Funds } from "../types";
 
 import { MemberAvatar, useConfirm } from "./shared";
 
-function FundCard({ m, onClick }: { m: FundMember; onClick: () => void }) {
+function FundCard({ m }: { m: FundMember }) {
   const bits = CURRENCIES.filter((c) => c !== "CNY" && m.cur.balance[c])
     .map((c) => `${CUR[c].sym}${fmt(m.cur.balance[c])} ${c}`)
     .join(" · ");
@@ -24,10 +26,9 @@ function FundCard({ m, onClick }: { m: FundMember; onClick: () => void }) {
   // 负数分两种：自己垫了钱（付得比收得多），或者只是把手上的钱转给了别人
   const negLabel = m.expense - m.income > 0 ? "垫付" : "已转出";
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title="点这里给他记一笔转账"
+    <Link
+      href={`/dashboard/ledger/members/${m.id}`}
+      title="查看该成员的详细流水"
       className="hover:bg-accent/50 flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-colors"
     >
       <MemberAvatar name={m.name} className="size-9 text-sm" />
@@ -45,7 +46,7 @@ function FundCard({ m, onClick }: { m: FundMember; onClick: () => void }) {
         <div className={cn("font-semibold tabular-nums", neg && "text-expense")}>{signed(m.balance)}</div>
         <div className="text-muted-foreground text-xs">{neg ? negLabel : "沉淀"}</div>
       </div>
-    </button>
+    </Link>
   );
 }
 
@@ -102,7 +103,7 @@ export function FundsSection({
             <>
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {funds.members.map((m) => (
-                  <FundCard key={m.id} m={m} onClick={() => openTransfer({ projectId, fromId: m.id })} />
+                  <FundCard key={m.id} m={m} />
                 ))}
               </div>
               <div className="bg-muted/40 text-muted-foreground flex flex-wrap gap-x-5 gap-y-1 rounded-lg px-3 py-2 text-xs">

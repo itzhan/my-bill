@@ -216,10 +216,11 @@ export type MemberEntry = {
   party_name: string;
   note: string;
 };
-export type MemberEntries = {
+export type MemberDetail = {
   member: { id: number; name: string };
+  fund: FundMember;
   entries: MemberEntry[];
-  totals: { income: number; expense: number; count: number };
+  transfers: Transfer[];
   rates: Rates;
 };
 export type WalletGroup = { name: string; ratio: number | null; desc: string; model_count: number; types: string[] };
