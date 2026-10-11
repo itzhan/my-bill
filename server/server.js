@@ -2957,27 +2957,27 @@ app.get('/api/members/:id/detail', auth, (req, res) => {
   res.json({ member: { id: m.id, name: m.username }, fund, entries, transfers, rates });
 });
 // 每日利润明细（按项目）：客户每日消耗（中转站应收，CNY）− 供应商每日消耗（钱包实际消费，CNY）。只保留有消耗的
-app.get('/api/profit/daily', auth, async (req, res) => {
+// 结果缓存：历史不变，进页面直接返回缓存；只有点刷新（?refresh=1）才重算（重算要实时抓各供应商站点，较慢）
+let profitCache = null;
+async function computeProfitDaily() {
   const rates = getRates();
   const projName = new Map(q.projects.all().map((p) => [p.id, p.name]));
   const errors = [];
-  // 客户每日消耗：用中转站自动挂账记录（每 30 分钟同步、按天按用户，稳定可靠）。key = projectId|date
-  const cust = new Map();
-  const todayMap = new Map(); // projectId -> Map(用户名 -> 今日 cny)
   const todayS = todayKey();
+  // 客户每日消耗：中转站自动挂账记录（每 30 分钟同步、按天按用户，稳定可靠）。key = projectId|date
+  const cust = new Map();
+  const custPDU = new Map(); // projectId|date -> Map(用户名 -> cny)：每天各用户消耗
   for (const r of q.allRecords.all()) {
     if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
     const cny = recBase(r);
     const k = `${r.project_id}|${r.date}`;
     cust.set(k, r2((cust.get(k) || 0) + cny));
-    if (r.date === todayS && cny > 0) {
-      if (!todayMap.has(r.project_id)) todayMap.set(r.project_id, new Map());
-      const m = todayMap.get(r.project_id);
+    if (cny > 0) {
+      if (!custPDU.has(k)) custPDU.set(k, new Map());
+      const m = custPDU.get(k);
       m.set(r.party_name, r2((m.get(r.party_name) || 0) + cny));
     }
   }
-  const todayCust = new Map();
-  for (const [pid, m] of todayMap) todayCust.set(pid, [...m.entries()].map(([name, cny]) => ({ name, cny })));
   // 供应商每日消耗（实际消费 = 站点每日消耗 × 消耗倍率，折人民币）：钱包 detail 的 daily，按 项目+站点 去重
   const sup = new Map();
   const walletRows = db.prepare("SELECT w.id, w.base_url, p.project_id FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'").all();
@@ -2989,10 +2989,7 @@ app.get('/api/profit/daily', auth, async (req, res) => {
     const d = await partyWallets.detailOf(w.id);
     if (!d || !d.ok) { if (d) errors.push(`${d.name}：${(d.error || '').slice(0, 50)}`); continue; }
     const cr = d.consume_ratio || 1;
-    for (const x of d.daily || []) {
-      const k = `${w.project_id}|${x.date}`;
-      sup.set(k, r2((sup.get(k) || 0) + (x.usd || 0) * cr));
-    }
+    for (const x of d.daily || []) sup.set(`${w.project_id}|${x.date}`, r2((sup.get(`${w.project_id}|${x.date}`) || 0) + (x.usd || 0) * cr));
   }
   // 每个项目「客户最早使用日」：从这天开始算，客户上线前只有供应商消耗的日子不计入
   const firstCust = new Map();
@@ -3001,22 +2998,25 @@ app.get('/api/profit/daily', auth, async (req, res) => {
     const pid = Number(k.split('|')[0]), date = k.split('|')[1];
     if (!firstCust.has(pid) || date < firstCust.get(pid)) firstCust.set(pid, date);
   }
-  // 合并成 项目 → 每日
+  // 合并成 项目 → 每日（每天带各用户明细）
   const byProject = new Map();
   for (const k of new Set([...cust.keys(), ...sup.keys()])) {
     const c = cust.get(k) || 0, s = sup.get(k) || 0;
     if (c === 0 && s === 0) continue;
     const pid = Number(k.split('|')[0]);
     const date = k.split('|')[1];
-    // 有客户的项目：丢弃客户最早使用日之前的日子（那几天客户还没上线）
     const fc = firstCust.get(pid);
     if (fc && date < fc) continue;
     if (!byProject.has(pid)) byProject.set(pid, { project_id: pid, project_name: projName.get(pid) || '（已删除）', days: [], customer: 0, supplier: 0, profit: 0 });
     const pe = byProject.get(pid);
-    pe.days.push({ date, customer: r2(c), supplier: r2(s), profit: r2(c - s) });
+    const customers = [...(custPDU.get(k)?.entries() || [])].map(([name, cny]) => ({ name, cny })).sort((a, b) => b.cny - a.cny);
+    pe.days.push({ date, customer: r2(c), supplier: r2(s), profit: r2(c - s), customers });
     pe.customer = r2(pe.customer + c); pe.supplier = r2(pe.supplier + s); pe.profit = r2(pe.profit + (c - s));
   }
-  const projects = [...byProject.values()].map((pe) => ({ ...pe, days: pe.days.sort((a, b) => (a.date < b.date ? 1 : -1)), today_customers: (todayCust.get(pe.project_id) || []).sort((a, b) => b.cny - a.cny) })).sort((a, b) => b.profit - a.profit);
+  const projects = [...byProject.values()].map((pe) => {
+    const days = pe.days.sort((a, b) => (a.date < b.date ? 1 : -1));
+    return { ...pe, days, today_customers: days.find((d) => d.date === todayS)?.customers || [] };
+  }).sort((a, b) => b.profit - a.profit);
   const byDate = new Map();
   for (const pe of projects) for (const d of pe.days) {
     const e = byDate.get(d.date) || { date: d.date, customer: 0, supplier: 0, profit: 0 };
@@ -3025,7 +3025,13 @@ app.get('/api/profit/daily', auth, async (req, res) => {
   }
   const daily = [...byDate.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
   const totals = { customer: r2(projects.reduce((a, p) => a + p.customer, 0)), supplier: r2(projects.reduce((a, p) => a + p.supplier, 0)), profit: r2(projects.reduce((a, p) => a + p.profit, 0)) };
-  res.json({ projects, daily, totals, errors, rates });
+  return { projects, daily, totals, errors, rates };
+}
+app.get('/api/profit/daily', auth, async (req, res) => {
+  if (!req.query.refresh && profitCache) return res.json({ ...profitCache.data, cached_at: profitCache.at });
+  const data = await computeProfitDaily();
+  profitCache = { at: now(), data };
+  res.json({ ...data, cached_at: profitCache.at });
 });
 app.delete('/api/party-records/:id', auth, (req, res) => { ops.deletePartyRecord(req.user, req.params.id); res.json({ ok: true }); });
 

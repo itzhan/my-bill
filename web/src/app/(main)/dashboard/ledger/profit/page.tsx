@@ -1,7 +1,8 @@
 "use client";
 
+import { useState } from "react";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -11,20 +12,66 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
-import { PageHeader, Pager, usePaged } from "@/modules/ledger/components/shared";
-import { money, signed } from "@/modules/ledger/format";
-import type { ProfitDaily } from "@/modules/ledger/types";
+import { PageHeader, Pager, ResponsiveDialog, usePaged } from "@/modules/ledger/components/shared";
+import { money, relTime, signed } from "@/modules/ledger/format";
+import type { ProfitCustomer, ProfitDaily } from "@/modules/ledger/types";
 
 const todayStr = () => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(new Date());
 
-// 底部：按日期汇总（全部项目），分页
+function CustomerList({ customers }: { customers?: ProfitCustomer[] }) {
+  if (!customers?.length) return null;
+  return (
+    <div className="mt-1 space-y-1 border-t pt-2">
+      <div className="text-muted-foreground text-xs">各用户消耗</div>
+      {customers.map((c) => (
+        <div key={c.name} className="flex items-center justify-between gap-2 text-xs">
+          <span className="truncate">{c.name}</span>
+          <span className="text-income shrink-0 tabular-nums">{money(c.cny)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 某一天的详细：各项目的客户/供应商/利润 + 各用户消耗
+function DayDetailDialog({ date, data, onClose }: { date: string | null; data: ProfitDaily; onClose: () => void }) {
+  const rows = date
+    ? data.projects
+        .map((p) => ({ project_name: p.project_name, project_id: p.project_id, day: p.days.find((d) => d.date === date) }))
+        .filter((x) => x.day)
+        .map((x) => ({ ...x, day: x.day! }))
+        .sort((a, b) => b.day.profit - a.day.profit)
+    : [];
+  return (
+    <ResponsiveDialog open={!!date} onOpenChange={(o) => !o && onClose()} title={`${date ?? ""} 利润详情`}>
+      <div className="space-y-3">
+        {rows.map((x) => (
+          <div key={x.project_id} className="rounded-lg border p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium">{x.project_name}</span>
+              <span className={cn("font-semibold tabular-nums", x.day.profit < 0 ? "text-expense" : "text-income")}>
+                {signed(x.day.profit)}
+              </span>
+            </div>
+            <div className="text-muted-foreground mt-0.5 text-xs tabular-nums">
+              客 {money(x.day.customer)} · 供 {money(x.day.supplier)}
+            </div>
+            <CustomerList customers={x.day.customers} />
+          </div>
+        ))}
+      </div>
+    </ResponsiveDialog>
+  );
+}
+
 function DailySummary({ data }: { data: ProfitDaily }) {
   const { rows, pager } = usePaged(data.daily, "profit-daily", 15);
+  const [detailDate, setDetailDate] = useState<string | null>(null);
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">按日期汇总（全部项目）</CardTitle>
-        <CardDescription>每天所有项目合计的客户消耗、供应商消耗与利润</CardDescription>
+        <CardDescription>每天所有项目合计；点一行看当天各项目、各用户的明细</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="overflow-hidden rounded-md border">
@@ -39,7 +86,12 @@ function DailySummary({ data }: { data: ProfitDaily }) {
             </TableHeader>
             <TableBody>
               {rows.map((d) => (
-                <TableRow key={d.date}>
+                <TableRow
+                  key={d.date}
+                  className="cursor-pointer"
+                  onClick={() => setDetailDate(d.date)}
+                  title="点击查看当天明细"
+                >
                   <TableCell className="text-muted-foreground tabular-nums">{d.date}</TableCell>
                   <TableCell className="text-income text-right tabular-nums">{money(d.customer)}</TableCell>
                   <TableCell className="text-expense text-right tabular-nums">{money(d.supplier)}</TableCell>
@@ -53,20 +105,32 @@ function DailySummary({ data }: { data: ProfitDaily }) {
         </div>
         <Pager {...pager} className="mt-4" />
       </CardContent>
+      <DayDetailDialog date={detailDate} data={data} onClose={() => setDetailDate(null)} />
     </Card>
   );
 }
 
 export default function ProfitPage() {
-  const { data, isLoading, isFetching, refetch } = useQuery({
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery({
     queryKey: ["ledger", "profit-daily"],
     queryFn: () => get<ProfitDaily>("/profit/daily"),
-    staleTime: 5 * 60 * 1000,
+    staleTime: Infinity, // 历史不变，进页面直接用缓存，不重新抓取
     refetchOnWindowFocus: false,
   });
+  const [refreshing, setRefreshing] = useState(false);
+  // 只有点刷新才重算（服务端重新抓各供应商站点）
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const d = await get<ProfitDaily>("/profit/daily?refresh=1");
+      qc.setQueryData(["ledger", "profit-daily"], d);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const today = todayStr();
-  // 今日各项目利润（有今天消耗的项目）+ 今日各用户消耗
   const todayRows = (data?.projects ?? [])
     .map((p) => ({
       project_id: p.project_id,
@@ -90,25 +154,24 @@ export default function ProfitPage() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="每日利润"
-        description="每日利润 = 客户消耗（中转站实时消耗 × 折扣，折人民币）− 供应商消耗（钱包实际消费）。只列有消耗的项目"
+        description="每日利润 = 客户消耗（中转站消耗 × 折扣，折人民币）− 供应商消耗（钱包实际消费）。只列有消耗的项目"
         actions={
-          <Button variant="outline" onClick={() => refetch()} disabled={isFetching}>
-            <RefreshCw className={cn(isFetching && "animate-spin")} />
-            {isFetching ? "抓取中…" : "刷新"}
+          <Button variant="outline" onClick={refresh} disabled={refreshing || isLoading}>
+            <RefreshCw className={cn(refreshing && "animate-spin")} />
+            {refreshing ? "抓取中…" : "刷新数据"}
           </Button>
         }
       />
 
       {isLoading ? (
         <>
-          <p className="text-muted-foreground text-sm">正在抓取各供应商站点的每日消耗，请稍候…</p>
+          <p className="text-muted-foreground text-sm">首次加载，正在抓取各供应商站点的每日消耗…</p>
           <Skeleton className="h-48" />
         </>
       ) : !data ? (
         <div className="text-muted-foreground py-10 text-center">加载失败</div>
       ) : (
         <>
-          {/* 今日利润（重点） */}
           <Card className="from-primary/5 to-card border-primary/20 bg-gradient-to-br">
             <CardHeader className="gap-1">
               <CardDescription>今日利润 · {today}</CardDescription>
@@ -118,6 +181,7 @@ export default function ProfitPage() {
               <div className="text-muted-foreground text-sm">
                 客户消耗 <span className="text-income font-medium">{money(todayTotal.customer)}</span> − 供应商消耗{" "}
                 <span className="text-expense font-medium">{money(todayTotal.supplier)}</span>
+                {data.cached_at ? <span className="ml-2">· 数据 {relTime(data.cached_at)}更新，点右上角刷新</span> : null}
               </div>
             </CardHeader>
             <CardContent>
@@ -137,17 +201,7 @@ export default function ProfitPage() {
                       <div className="text-muted-foreground text-xs tabular-nums">
                         客 {money(x.day.customer)} · 供 {money(x.day.supplier)}
                       </div>
-                      {x.customers.length ? (
-                        <div className="mt-1 space-y-1 border-t pt-2">
-                          <div className="text-muted-foreground text-xs">今日各用户消耗</div>
-                          {x.customers.map((c) => (
-                            <div key={c.name} className="flex items-center justify-between gap-2 text-xs">
-                              <span className="truncate">{c.name}</span>
-                              <span className="text-income shrink-0 tabular-nums">{money(c.cny)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
+                      <CustomerList customers={x.customers} />
                     </div>
                   ))}
                 </div>
@@ -164,7 +218,6 @@ export default function ProfitPage() {
             </Alert>
           ) : null}
 
-          {/* 底部：按日期汇总，分页 */}
           {data.daily.length ? <DailySummary data={data} /> : null}
         </>
       )}
