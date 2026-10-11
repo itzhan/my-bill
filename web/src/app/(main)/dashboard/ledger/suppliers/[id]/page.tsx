@@ -171,10 +171,10 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
       cls: credit ? "text-muted-foreground" : "text-income",
     },
     {
-      label: rc && rc.unsettled < 0 ? "未结算（我们还欠）" : "未结算（预付结余）",
+      label: rc && rc.unsettled > 0 ? "未结算（我们还欠）" : "未结算（预付结余）",
       value: rc ? (rc.unsettled < 0 ? "−" : "") + curf(Math.abs(rc.unsettled), rc.currency) : "-",
-      sub: "已结算 − 累计消费 + 实际余额（负=我们还欠，正=预付/他欠我们）",
-      cls: rc && rc.unsettled < 0 ? "text-warning" : "text-income",
+      sub: "累计消费 − 已结算 + 实际余额（正=我们还欠，负=多付/预付结余）",
+      cls: rc && rc.unsettled > 0 ? "text-warning" : "text-income",
     },
   ];
 

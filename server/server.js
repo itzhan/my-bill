@@ -817,8 +817,8 @@ function supplierSettlement(p) {
   const fromEntries = r2(paidOut - refunded);
   const base = r2(Number(p.settled_base) || 0);
   const settled = r2(base + fromEntries);
-  // 未结算 = 已结算 − 累计消费 + 实际余额（授信时余额=0）。正=我们预付/他欠我们，负=我们还欠他
-  const unsettled = r2(settled - payable + balance);
+  // 未结算 = 累计消费 − 已结算 + 实际余额（授信时余额=0，即 累计消费 − 已结算）。正=我们还欠他，负=多付/预付结余
+  const unsettled = r2(payable - settled + balance);
   return { currency: cur, payable, balance, settled, settled_base: base, from_entries: fromEntries, paid_out: paidOut, refunded, entry_count: entries.length + incomes.length, unsettled };
 }
 const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
