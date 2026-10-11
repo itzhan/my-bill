@@ -267,6 +267,24 @@ export type SupplierDetail = {
   rates: Rates;
 };
 
+// 每日利润明细（按项目）：客户每日消耗 − 供应商每日消耗
+export type ProfitDay = { date: string; customer: number; supplier: number; profit: number };
+export type ProfitProject = {
+  project_id: number;
+  project_name: string;
+  days: ProfitDay[];
+  customer: number;
+  supplier: number;
+  profit: number;
+};
+export type ProfitDaily = {
+  projects: ProfitProject[];
+  daily: ProfitDay[];
+  totals: { customer: number; supplier: number; profit: number };
+  errors: string[];
+  rates: Rates;
+};
+
 export type PartiesSummary = {
   suppliers: Party[];
   customers: Party[];

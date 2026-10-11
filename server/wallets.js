@@ -600,6 +600,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
       const ratio = w.custom ? num(w.custom_ratio) : num(w.last_ratio);
       const meta = {
         id: w.id, name: w.name, platform: w.platform, base_url: w.base_url, custom: !!w.custom, ratio,
+        consume_ratio: w.custom ? (num(w.consume_ratio) ?? 1) : 1, // 每日消耗 × 这个 = 实际消费
         last_wallet: num(w.last_wallet), last_used: num(w.last_used), last_used_actual: num(w.last_used_actual),
         last_actual: num(w.last_actual), has_token: !!w.access_token,
       };

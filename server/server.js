@@ -2955,6 +2955,57 @@ app.get('/api/members/:id/detail', auth, (req, res) => {
   const transfers = funds.transfers.filter((t) => t.from_id === m.id || t.to_id === m.id);
   res.json({ member: { id: m.id, name: m.username }, fund, entries, transfers, rates });
 });
+// 每日利润明细（按项目）：客户每日消耗（中转站应收，CNY）− 供应商每日消耗（钱包实际消费，CNY）。只保留有消耗的
+app.get('/api/profit/daily', auth, async (req, res) => {
+  const rates = getRates();
+  const projName = new Map(q.projects.all().map((p) => [p.id, p.name]));
+  // 客户每日消耗（应收，中转站自动按天挂账，折人民币）：key = projectId|date
+  const cust = new Map();
+  for (const r of q.allRecords.all()) {
+    if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
+    const k = `${r.project_id}|${r.date}`;
+    cust.set(k, r2((cust.get(k) || 0) + recBase(r)));
+  }
+  // 供应商每日消耗（实际消费 = 站点每日消耗 × 消耗倍率，折人民币）：钱包 detail 的 daily，按 项目+站点 去重
+  const sup = new Map();
+  const errors = [];
+  const walletRows = db.prepare("SELECT w.id, w.base_url, p.project_id FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'").all();
+  const seen = new Set();
+  for (const w of walletRows) {
+    const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
+    if (seen.has(site)) continue;
+    seen.add(site);
+    const d = await partyWallets.detailOf(w.id);
+    if (!d || !d.ok) { if (d) errors.push(`${d.name}：${(d.error || '').slice(0, 50)}`); continue; }
+    const cr = d.consume_ratio || 1;
+    for (const x of d.daily || []) {
+      const k = `${w.project_id}|${x.date}`;
+      sup.set(k, r2((sup.get(k) || 0) + (x.usd || 0) * cr));
+    }
+  }
+  // 合并成 项目 → 每日
+  const byProject = new Map();
+  for (const k of new Set([...cust.keys(), ...sup.keys()])) {
+    const c = cust.get(k) || 0, s = sup.get(k) || 0;
+    if (c === 0 && s === 0) continue;
+    const pid = Number(k.split('|')[0]);
+    const date = k.split('|')[1];
+    if (!byProject.has(pid)) byProject.set(pid, { project_id: pid, project_name: projName.get(pid) || '（已删除）', days: [], customer: 0, supplier: 0, profit: 0 });
+    const pe = byProject.get(pid);
+    pe.days.push({ date, customer: r2(c), supplier: r2(s), profit: r2(c - s) });
+    pe.customer = r2(pe.customer + c); pe.supplier = r2(pe.supplier + s); pe.profit = r2(pe.profit + (c - s));
+  }
+  const projects = [...byProject.values()].map((pe) => ({ ...pe, days: pe.days.sort((a, b) => (a.date < b.date ? 1 : -1)) })).sort((a, b) => b.profit - a.profit);
+  const byDate = new Map();
+  for (const pe of projects) for (const d of pe.days) {
+    const e = byDate.get(d.date) || { date: d.date, customer: 0, supplier: 0, profit: 0 };
+    e.customer = r2(e.customer + d.customer); e.supplier = r2(e.supplier + d.supplier); e.profit = r2(e.profit + d.profit);
+    byDate.set(d.date, e);
+  }
+  const daily = [...byDate.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
+  const totals = { customer: r2(projects.reduce((a, p) => a + p.customer, 0)), supplier: r2(projects.reduce((a, p) => a + p.supplier, 0)), profit: r2(projects.reduce((a, p) => a + p.profit, 0)) };
+  res.json({ projects, daily, totals, errors, rates });
+});
 app.delete('/api/party-records/:id', auth, (req, res) => { ops.deletePartyRecord(req.user, req.params.id); res.json({ ok: true }); });
 
 // ---- 对外接口（外部系统实时同步应收 / 应付），用 X-API-Key 鉴权
