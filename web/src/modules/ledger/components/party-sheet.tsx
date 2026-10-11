@@ -2,8 +2,10 @@
 
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
+import { useRouter } from "next/navigation";
+
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { ExternalLink, LayoutDashboard, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -92,6 +94,7 @@ export function PartySheet({
             editing={state.mode === "edit"}
             setMode={(mode) => setState({ open: true, mode, id: state.id })}
             onDeleted={close}
+            onClose={close}
           />
         ) : null}
         {!state.open ? (
@@ -285,12 +288,15 @@ function PartyDetailView({
   editing,
   setMode,
   onDeleted,
+  onClose,
 }: {
   id: number;
   editing: boolean;
   setMode: (m: "view" | "edit") => void;
   onDeleted: () => void;
+  onClose: () => void;
 }) {
+  const router = useRouter();
   const { data, isLoading, error } = useParty(id);
   const hasRelay = !!data?.party.relay;
   const live = useQuery({
@@ -359,9 +365,24 @@ function PartyDetailView({
               </div>
             ) : null}
           </div>
-          <Button variant="ghost" size="icon-sm" onClick={() => setMode("edit")} aria-label="编辑">
-            <Pencil />
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            {v.kind === "supplier" ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  onClose();
+                  router.push(`/dashboard/ledger/suppliers/${id}`);
+                }}
+              >
+                <LayoutDashboard />
+                查看详情
+              </Button>
+            ) : null}
+            <Button variant="ghost" size="icon-sm" onClick={() => setMode("edit")} aria-label="编辑">
+              <Pencil />
+            </Button>
+          </div>
         </div>
       </SheetHeader>
       <div className="space-y-5 p-4">

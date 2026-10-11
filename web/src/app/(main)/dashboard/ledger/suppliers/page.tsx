@@ -3,7 +3,6 @@
 import { useMemo, useState } from "react";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw, Search } from "lucide-react";
@@ -37,8 +36,7 @@ type SupplierRow = Party & { project_archived: boolean; wallets: PartyWallet[] }
 
 // 侧栏「供应商」：汇总所有项目的供应商，以及我们在各供应商站点（new-api / sub2api）的余额、倍率、累计消费
 export default function SuppliersPage() {
-  const { openPartyNew } = useLedger();
-  const router = useRouter();
+  const { openParty, openPartyNew } = useLedger();
   const qc = useQueryClient();
   const { data: pd } = useProjects();
   const { data } = useQuery({
@@ -223,7 +221,7 @@ export default function SuppliersPage() {
                         <TableRow
                           key={s.id}
                           className={cn("cursor-pointer align-top", (s.archived || s.project_archived) && "opacity-60")}
-                          onClick={() => router.push(`/dashboard/ledger/suppliers/${s.id}`)}
+                          onClick={() => openParty(s.id)}
                         >
                           <TableCell>
                             <div className="flex items-center gap-1.5 font-medium">
