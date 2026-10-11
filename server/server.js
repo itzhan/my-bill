@@ -3003,6 +3003,13 @@ app.get('/api/profit/daily', auth, async (req, res) => {
       sup.set(k, r2((sup.get(k) || 0) + (x.usd || 0) * cr));
     }
   }
+  // 每个项目「客户最早使用日」：从这天开始算，客户上线前只有供应商消耗的日子不计入
+  const firstCust = new Map();
+  for (const [k, v] of cust) {
+    if (v <= 0) continue;
+    const pid = Number(k.split('|')[0]), date = k.split('|')[1];
+    if (!firstCust.has(pid) || date < firstCust.get(pid)) firstCust.set(pid, date);
+  }
   // 合并成 项目 → 每日
   const byProject = new Map();
   for (const k of new Set([...cust.keys(), ...sup.keys()])) {
@@ -3010,6 +3017,9 @@ app.get('/api/profit/daily', auth, async (req, res) => {
     if (c === 0 && s === 0) continue;
     const pid = Number(k.split('|')[0]);
     const date = k.split('|')[1];
+    // 有客户的项目：丢弃客户最早使用日之前的日子（那几天客户还没上线）
+    const fc = firstCust.get(pid);
+    if (fc && date < fc) continue;
     if (!byProject.has(pid)) byProject.set(pid, { project_id: pid, project_name: projName.get(pid) || '（已删除）', days: [], customer: 0, supplier: 0, profit: 0 });
     const pe = byProject.get(pid);
     pe.days.push({ date, customer: r2(c), supplier: r2(s), profit: r2(c - s) });
