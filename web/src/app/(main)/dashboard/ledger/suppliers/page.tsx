@@ -71,11 +71,12 @@ export default function SuppliersPage() {
   const totalUsed = active.reduce((a, s) => a + (s.wallet?.used ?? 0), 0);
   const rates = pd?.rates ?? { USD: 7.2, USDT: 7.2 };
   // 未结算折人民币粗略合计（USD×rates.USD、USDT×rates.USDT、CNY×1）
-  const totalUnsettledCny = active.reduce((a, s) => {
+  // 未结算 = 已结算 − 累计消费 + 实际余额：<0 = 我们还欠他。这里合计我们还欠的部分（折人民币）
+  const totalOwedCny = active.reduce((a, s) => {
     const rc = s.recharge;
     if (!rc) return a;
     const rate = rc.currency === "CNY" ? 1 : rc.currency === "USD" ? rates.USD : rates.USDT;
-    return a + Math.max(0, rc.unsettled) * rate;
+    return a + Math.max(0, -rc.unsettled) * rate;
   }, 0);
   const failed = wallets.filter((w) => w.last_error && w.last_wallet == null && w.last_used == null).length;
   const archivedCount = (data ?? []).length - active.length;
@@ -105,10 +106,10 @@ export default function SuppliersPage() {
     },
     { label: "累计消费合计", value: amt(totalUsed), sub: "各 Key 在供应商站点总共用了多少", cls: "text-expense" },
     {
-      label: "未结算合计",
-      value: money(totalUnsettledCny),
-      sub: "累计消费 − 已结算 + 实际余额，<0 才计，折人民币",
-      cls: totalUnsettledCny > 0 ? "text-warning" : "",
+      label: "我们还欠合计",
+      value: money(totalOwedCny),
+      sub: "未结算 = 已结算 − 累计消费 + 实际余额，<0（欠他）的部分，折人民币",
+      cls: totalOwedCny > 0 ? "text-warning" : "",
     },
     {
       label: "绑定的 Key",
@@ -287,9 +288,10 @@ export default function SuppliersPage() {
                             {rc ? curf(rc.settled, rc.currency) : "-"}
                           </TableCell>
                           <TableCell
-                            className={cn("text-right tabular-nums", (rc?.unsettled ?? 0) > 0 && "text-warning")}
+                            className={cn("text-right tabular-nums", (rc?.unsettled ?? 0) < 0 && "text-warning")}
+                            title={rc ? (rc.unsettled < 0 ? "我们还欠他" : "预付结余 / 他欠我们") : ""}
                           >
-                            {rc ? curf(Math.abs(rc.unsettled), rc.currency) : "-"}
+                            {rc ? (rc.unsettled < 0 ? "−" : "") + curf(Math.abs(rc.unsettled), rc.currency) : "-"}
                           </TableCell>
                           <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
                             {latest ? relTime(latest) : "-"}

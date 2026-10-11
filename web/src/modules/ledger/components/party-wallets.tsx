@@ -403,15 +403,15 @@ export function PartyWallets({ party }: { party: Party }) {
               <div className="text-income font-semibold tabular-nums">{curf(r.settled, r.currency)}</div>
             </div>
             <div className="bg-muted/50 rounded-md p-2">
-              <div className="text-muted-foreground text-xs">{r.unsettled >= 0 ? "未结算" : "已多结算 / 预充"}</div>
-              <div className={cn("font-semibold tabular-nums", r.unsettled > 0 && "text-warning")}>
-                {curf(Math.abs(r.unsettled), r.currency)}
+              <div className="text-muted-foreground text-xs">{r.unsettled < 0 ? "未结算（我们还欠）" : "未结算（预付结余）"}</div>
+              <div className={cn("font-semibold tabular-nums", r.unsettled < 0 && "text-warning")}>
+                {(r.unsettled < 0 ? "−" : "") + curf(Math.abs(r.unsettled), r.currency)}
               </div>
             </div>
           </div>
           <p className="text-muted-foreground text-xs">
             已结算 = 期初 {curf(r.settled_base, r.currency)} + 记账充值 {curf(r.from_entries, r.currency)}（
-            {r.entry_count} 笔）· 未结算 = 累计消费 − 已结算 + 实际余额（&lt;0 才显示）· 期初可在「编辑」里改
+            {r.entry_count} 笔）· 未结算 = 已结算 − 累计消费 + 实际余额（负=还欠他，正=预付结余）· 期初可在「编辑」里改
           </p>
         </div>
       ) : null}
