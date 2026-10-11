@@ -112,6 +112,12 @@ function UploadContractDialog({
   const [partyId, setPartyId] = useState<string>(String(projects[0]?.party_id ?? ""));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const pick = (f: File | null) => {
+    setFile(f);
+    if (f && !title.trim()) setTitle(f.name.replace(/\.[^.]+$/, ""));
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -150,25 +156,36 @@ function UploadContractDialog({
       <form onSubmit={submit} className="space-y-4">
         <div className="space-y-2">
           <Label>合同文件（PDF / 图片 / Word 等，≤ 20MB）</Label>
-          <input
-            ref={fileRef}
-            type="file"
-            hidden
-            onChange={(e) => {
-              const f = e.target.files?.[0] ?? null;
-              setFile(f);
-              if (f && !title.trim()) setTitle(f.name.replace(/\.[^.]+$/, ""));
-            }}
-          />
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full justify-start"
+          <input ref={fileRef} type="file" hidden onChange={(e) => pick(e.target.files?.[0] ?? null)} />
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => fileRef.current?.click()}
+            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              pick(e.dataTransfer.files?.[0] ?? null);
+            }}
+            className={cn(
+              "border-input hover:bg-accent/40 flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-md border border-dashed px-4 py-6 text-center transition-colors",
+              dragging && "border-primary bg-primary/5",
+            )}
           >
-            <Upload />
-            {file ? `${file.name}（${fmtSize(file.size)}）` : "选择文件"}
-          </Button>
+            <Upload className="text-muted-foreground size-5" />
+            {file ? (
+              <span className="text-sm font-medium">
+                {file.name}（{fmtSize(file.size)}）
+              </span>
+            ) : (
+              <span className="text-muted-foreground text-sm">点击选择文件，或把文件拖到这里</span>
+            )}
+          </div>
         </div>
         <div className="space-y-2">
           <Label htmlFor="ct-title">合同名称</Label>

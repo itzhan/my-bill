@@ -3069,6 +3069,8 @@ app.get('/api/customers', auth, async (req, res) => {
       has_relay: ps.some((p) => p.project_type === 'relay'),
       settle_type: ps.every((p) => p.settle_type === 'credit') ? 'credit' : 'prepaid',
       balance_usd: ps.some((p) => p.balance_usd != null) ? r2(ps.reduce((a, p) => a + (p.balance_usd ?? 0), 0)) : null,
+      // 余额 × 折扣（美金）：预付余额按折扣折算后的实收价
+      bal_rev_usd: ps.some((p) => p.balance_usd != null) ? r2(ps.reduce((a, p) => a + (p.balance_usd ?? 0) * p.ratio, 0)) : null,
       due_cny: r2(ps.reduce((a, p) => a + p.due_cny, 0)),
       paid_cny: r2(ps.reduce((a, p) => a + p.paid_cny, 0)),
       open_cny: r2(ps.reduce((a, p) => a + p.open_cny, 0)),

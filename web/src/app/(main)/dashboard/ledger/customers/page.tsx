@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
 import { amt } from "@/modules/ledger/components/party-wallets";
 import { PageHeader, Pager, usePaged } from "@/modules/ledger/components/shared";
-import { money, relTime } from "@/modules/ledger/format";
+import { money, relTime, usdf } from "@/modules/ledger/format";
 import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { CustomerGroup, CustomersResponse } from "@/modules/ledger/types";
@@ -39,7 +39,6 @@ function CustomerTable({
   description,
   customers,
   withBalance,
-  usdRate,
   fetchedAt,
   resetKey,
 }: {
@@ -47,7 +46,6 @@ function CustomerTable({
   description: string;
   customers: CustomerGroup[];
   withBalance: boolean;
-  usdRate: number;
   fetchedAt: string;
   resetKey: string;
 }) {
@@ -102,14 +100,9 @@ function CustomerTable({
                         {c.settle_type === "credit" ? (
                           <span className="text-muted-foreground">授信</span>
                         ) : c.balance_usd != null ? (
-                          <>
-                            <div className={cn("text-income font-semibold", c.low_balance && "text-destructive")}>
-                              {money(c.balance_usd * usdRate)}
-                            </div>
-                            <div className="text-muted-foreground text-xs">
-                              ${amt(c.balance_usd)} @{usdRate}
-                            </div>
-                          </>
+                          <span className={cn("text-income font-semibold", c.low_balance && "text-destructive")}>
+                            ${amt(c.balance_usd)}
+                          </span>
                         ) : (
                           <span className="text-muted-foreground">—</span>
                         )}
@@ -171,9 +164,13 @@ export default function CustomersPage() {
   const usdRate = data?.usd_rate ?? 7.2;
 
   const all = [...(data?.relay_customers ?? []), ...(data?.project_customers ?? [])].filter((c) => !c.archived);
-  const totalBalCny = all.reduce((a, c) => a + (c.settle_type === "credit" ? 0 : (c.balance_usd ?? 0) * usdRate), 0);
-  const totalDue = all.reduce((a, c) => a + c.due_cny, 0);
-  const totalOwed = all.reduce((a, c) => a + Math.max(0, c.open_cny), 0);
+  const prepaid = all.filter((c) => c.settle_type !== "credit");
+  const totalBalUsd = prepaid.reduce((a, c) => a + (c.balance_usd ?? 0), 0); // 中转余额（美金，不乘汇率）
+  const totalBalRevUsd = prepaid.reduce((a, c) => a + (c.bal_rev_usd ?? 0), 0); // 余额 × 折扣（美金）
+  const totalDue = all.reduce((a, c) => a + c.due_cny, 0); // 累计消费（应收，人民币）
+  const totalPaid = all.reduce((a, c) => a + c.paid_cny, 0);
+  const totalUnsettled = totalDue - totalPaid; // 未结算 = 累计消费 − 已结算
+  const toUsd = (cny: number) => cny / usdRate; // 折人民币 ÷ 汇率 = 美金 × 折扣
   const archivedCount =
     (data?.relay_customers.filter((c) => c.archived).length ?? 0) +
     (data?.project_customers.filter((c) => c.archived).length ?? 0);
@@ -187,21 +184,21 @@ export default function CustomersPage() {
     },
     {
       label: "中转余额合计",
-      value: money(totalBalCny),
-      sub: `各预付客户在中转站的余额，折人民币 @${usdRate}`,
+      value: usdf(totalBalUsd),
+      sub: `折后 ${usdf(totalBalRevUsd)} · 余额 × 折扣`,
       cls: "text-income",
     },
     {
       label: "累计消费合计",
       value: money(totalDue),
-      sub: "各客户应收（中转消耗 × 折扣），折人民币",
+      sub: `${usdf(toUsd(totalDue))} · 美金 × 折扣`,
       cls: "text-expense",
     },
     {
-      label: "他还欠合计",
-      value: money(totalOwed),
-      sub: "未结算 = 累计消费 − 已结算，>0（欠我们）的部分",
-      cls: totalOwed > 0 ? "text-warning" : "",
+      label: "未结算",
+      value: money(totalUnsettled),
+      sub: `累计消费 − 已结算 · ${usdf(toUsd(totalUnsettled))}`,
+      cls: totalUnsettled > 0 ? "text-warning" : "",
     },
   ];
 
@@ -268,7 +265,6 @@ export default function CustomersPage() {
             description="有中转项目的客户，自动跟踪中转站余额、消费与应收（折扣 = 中转消耗 × 折扣）"
             customers={relay}
             withBalance
-            usdRate={usdRate}
             fetchedAt={data.fetched_at}
             resetKey={`relay|${q}|${showArchived}`}
           />
@@ -277,7 +273,6 @@ export default function CustomersPage() {
             description="只有项目制项目的客户，按实际记账跟踪应收 / 已结算"
             customers={project}
             withBalance={false}
-            usdRate={usdRate}
             fetchedAt={data.fetched_at}
             resetKey={`proj|${q}|${showArchived}`}
           />

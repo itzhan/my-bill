@@ -346,6 +346,7 @@ export type CustomerGroup = {
   has_relay: boolean;
   settle_type: "prepaid" | "credit";
   balance_usd: number | null;
+  bal_rev_usd: number | null;
   due_cny: number;
   paid_cny: number;
   open_cny: number;
