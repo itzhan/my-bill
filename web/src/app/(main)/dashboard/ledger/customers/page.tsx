@@ -6,10 +6,18 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -19,10 +27,14 @@ import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
 import { PageHeader, Pager, usePaged } from "@/modules/ledger/components/shared";
 import { curf, money, usdf } from "@/modules/ledger/format";
+import { useProjects } from "@/modules/ledger/hooks";
+import { useLedger } from "@/modules/ledger/provider";
 import type { CustomerRow } from "@/modules/ledger/types";
 
 export default function CustomersPage() {
   const router = useRouter();
+  const { openPartyNew } = useLedger();
+  const { data: pd } = useProjects();
   const { data } = useQuery({
     queryKey: ["ledger", "customers"],
     queryFn: () => get<{ customers: CustomerRow[] }>("/customers").then((d) => d.customers),
@@ -66,7 +78,30 @@ export default function CustomersPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title="客户" description="所有项目的客户、消费与结算情况。预付看中转站余额，后付看账期与欠费" />
+      <PageHeader
+        title="客户"
+        description="所有项目的客户、消费与结算情况。预付看中转站余额，后付看账期与欠费"
+        actions={
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button>
+                <Plus />
+                添加客户
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="max-h-80 w-56 overflow-y-auto">
+              <DropdownMenuLabel>加到哪个项目</DropdownMenuLabel>
+              {(pd?.projects ?? [])
+                .filter((p) => !p.archived)
+                .map((p) => (
+                  <DropdownMenuItem key={p.id} onClick={() => openPartyNew(p.id, "customer")}>
+                    {p.name}
+                  </DropdownMenuItem>
+                ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        }
+      />
 
       <div className="*:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card dark:*:data-[slot=card]:bg-card grid grid-cols-2 gap-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:shadow-xs lg:grid-cols-4">
         {stats.map((s) => (

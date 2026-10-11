@@ -5,7 +5,7 @@ import { use, useRef, useState } from "react";
 import Link from "next/link";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink, FileText, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, ExternalLink, FileText, Pencil, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { apiUrl, del, get, post } from "@/modules/ledger/api";
 import { Pager, useConfirm, usePaged } from "@/modules/ledger/components/shared";
 import { curf, fmtSize, usdf } from "@/modules/ledger/format";
+import { useLedger } from "@/modules/ledger/provider";
 import type { CustomerDetail, PartyContract } from "@/modules/ledger/types";
 
 function RecordsTab({ records }: { records: CustomerDetail["records"] }) {
@@ -169,6 +170,7 @@ function ContractsCard({ customerId, contracts }: { customerId: number; contract
 export default function CustomerDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const cid = Number(id);
+  const { openParty } = useLedger();
   const { data, isLoading } = useQuery({
     queryKey: ["ledger", "customer-detail", cid],
     queryFn: () => get<CustomerDetail>(`/customers/${cid}/detail`),
@@ -218,12 +220,19 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         >
           <ArrowLeft className="size-4" /> 返回客户列表
         </Link>
-        <div className="flex items-center gap-2">
-          <h1 className="text-2xl font-semibold">{c.name}</h1>
-          <Badge variant="outline">{credit ? "后付" : "预付"}</Badge>
-          {c.archived ? <Badge variant="outline">归档</Badge> : null}
-          <span className="text-muted-foreground text-sm">折扣 {+c.ratio.toFixed(4)}</span>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-semibold">{c.name}</h1>
+            <Badge variant="outline">{credit ? "后付" : "预付"}</Badge>
+            {c.archived ? <Badge variant="outline">归档</Badge> : null}
+            <span className="text-muted-foreground text-sm">折扣 {+c.ratio.toFixed(4)}</span>
+          </div>
+          <Button variant="outline" onClick={() => openParty(cid)}>
+            <Pencil />
+            编辑客户
+          </Button>
         </div>
+        {c.profile ? <p className="text-muted-foreground max-w-3xl text-sm">{c.profile}</p> : null}
       </div>
 
       <div className="*:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card dark:*:data-[slot=card]:bg-card grid grid-cols-2 gap-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:shadow-xs lg:grid-cols-4">
