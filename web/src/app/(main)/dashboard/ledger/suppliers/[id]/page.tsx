@@ -1,6 +1,6 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
 
 import Link from "next/link";
 
@@ -17,9 +17,9 @@ import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
 import { amt } from "@/modules/ledger/components/party-wallets";
 import { Pager, usePaged } from "@/modules/ledger/components/shared";
-import { curf, fmt0, usdf } from "@/modules/ledger/format";
+import { curf, fmt0, money } from "@/modules/ledger/format";
 import { useLedger } from "@/modules/ledger/provider";
-import type { ConsumePoint, SupplierDetail, WalletDetail } from "@/modules/ledger/types";
+import type { ConsumePoint, SupplierDetail, WalletDetail, WalletGroup } from "@/modules/ledger/types";
 
 // 分组类型配色
 const TYPE_CLS: Record<string, string> = {
@@ -38,20 +38,102 @@ const TypeBadge = ({ t }: { t: string }) => (
   </span>
 );
 
-// 每日消耗迷你柱状图（近 30 天），纯 CSS，无额外依赖
+const TYPE_ORDER = ["Claude", "Gemini", "GPT", "Grok", "DeepSeek", "Qwen", "其他", "未分类"];
+
+// 分组按类型展开：一个分组服务多种类型就在每个类型下各列一次；无类型归「未分类」
+function GroupsByType({ groups }: { groups: WalletGroup[] }) {
+  const byType = new Map<string, WalletGroup[]>();
+  for (const g of groups) {
+    for (const t of g.types.length ? g.types : ["未分类"]) {
+      if (!byType.has(t)) byType.set(t, []);
+      byType.get(t)!.push(g);
+    }
+  }
+  const types = [...byType.keys()].sort(
+    (a, b) => (TYPE_ORDER.indexOf(a) + 1 || 99) - (TYPE_ORDER.indexOf(b) + 1 || 99),
+  );
+  return (
+    <div className="space-y-4">
+      {types.map((t) => {
+        const gs = byType
+          .get(t)!
+          .slice()
+          .sort((a, b) => (b.ratio ?? 0) - (a.ratio ?? 0));
+        return (
+          <div key={t}>
+            <div className="mb-2 flex items-center gap-2">
+              <TypeBadge t={t} />
+              <span className="text-muted-foreground text-xs">{gs.length} 个分组</span>
+            </div>
+            <div className="overflow-x-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>分组</TableHead>
+                    <TableHead className="text-right">倍率</TableHead>
+                    <TableHead className="text-right">模型数</TableHead>
+                    <TableHead>介绍</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {gs.map((g) => (
+                    <TableRow key={g.name}>
+                      <TableCell className="font-medium">{g.name}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {g.ratio == null ? "—" : `×${+g.ratio.toFixed(4)}`}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-right tabular-nums">{g.model_count}</TableCell>
+                      <TableCell className="text-muted-foreground max-w-xs truncate text-xs">{g.desc || "—"}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// 每日消耗柱状图（近 30 天）：按日期显示，悬浮看当日消耗。纯 CSS，无额外依赖
 function DailyBars({ data }: { data: ConsumePoint[] }) {
+  const [hover, setHover] = useState<number | null>(null);
   if (!data.length) return <div className="text-muted-foreground py-6 text-center text-sm">近 30 天没有消耗</div>;
   const max = Math.max(...data.map((d) => d.usd), 0.0001);
+  const hd = hover != null ? data[hover] : null;
   return (
-    <div className="flex h-28 items-end gap-0.5">
-      {data.map((d) => (
-        <div
-          key={d.date}
-          className="bg-expense/70 hover:bg-expense min-w-0 flex-1 rounded-t-sm transition-colors"
-          style={{ height: `${Math.max(2, (d.usd / max) * 100)}%` }}
-          title={`${d.date} · ${usdf(d.usd)} · ${fmt0(d.count)} 次`}
-        />
-      ))}
+    <div>
+      <div className="mb-1 h-5 text-xs">
+        {hd ? (
+          <>
+            <span className="font-medium">{hd.date}</span>{" "}
+            <span className="text-expense font-semibold">{money(hd.usd)}</span>{" "}
+            <span className="text-muted-foreground">· {fmt0(hd.count)} 次</span>
+          </>
+        ) : (
+          <span className="text-muted-foreground">鼠标悬浮查看当日消耗</span>
+        )}
+      </div>
+      <div className="flex h-28 items-end gap-0.5">
+        {data.map((d, i) => (
+          <div
+            key={d.date}
+            onMouseEnter={() => setHover(i)}
+            onMouseLeave={() => setHover((h) => (h === i ? null : h))}
+            className={cn(
+              "min-w-0 flex-1 rounded-t-sm transition-colors",
+              hover === i ? "bg-expense" : "bg-expense/70",
+            )}
+            style={{ height: `${Math.max(2, (d.usd / max) * 100)}%` }}
+            title={`${d.date} · ${money(d.usd)} · ${fmt0(d.count)} 次`}
+          />
+        ))}
+      </div>
+      <div className="text-muted-foreground mt-1 flex justify-between text-[10px] tabular-nums">
+        <span>{data[0]?.date}</span>
+        <span>{data[data.length - 1]?.date}</span>
+      </div>
     </div>
   );
 }
@@ -67,7 +149,7 @@ function WalletConsume({ w }: { w: WalletDetail }) {
       <div className="flex items-baseline justify-between">
         <span className="text-muted-foreground text-xs">
           近 {w.period_days ?? 30} 天消耗 · 合计{" "}
-          <span className="text-expense font-semibold">{usdf(w.period_used)}</span>
+          <span className="text-expense font-semibold">{money(w.period_used ?? 0)}</span>
         </span>
       </div>
       <DailyBars data={w.daily ?? []} />
@@ -89,7 +171,7 @@ function WalletConsume({ w }: { w: WalletDetail }) {
                   byModel.slice(0, 20).map((m) => (
                     <TableRow key={m.model}>
                       <TableCell className="font-mono text-xs">{m.model || "—"}</TableCell>
-                      <TableCell className="text-expense text-right tabular-nums">{usdf(m.usd)}</TableCell>
+                      <TableCell className="text-expense text-right tabular-nums">{money(m.usd)}</TableCell>
                       <TableCell className="text-muted-foreground text-right text-xs tabular-nums">
                         {fmt0(m.count)}
                       </TableCell>
@@ -122,7 +204,7 @@ function WalletConsume({ w }: { w: WalletDetail }) {
                   {byGroup.map((g) => (
                     <TableRow key={g.group}>
                       <TableCell className="text-xs">{g.group}</TableCell>
-                      <TableCell className="text-expense text-right tabular-nums">{usdf(g.usd)}</TableCell>
+                      <TableCell className="text-expense text-right tabular-nums">{money(g.usd)}</TableCell>
                       <TableCell className="text-muted-foreground text-right text-xs tabular-nums">
                         {fmt0(g.count)}
                       </TableCell>
@@ -271,40 +353,7 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
                 ) : !(w.groups ?? []).length ? (
                   <div className="text-muted-foreground text-sm">{w.note || "没有分组信息"}</div>
                 ) : (
-                  <div className="overflow-x-auto rounded-md border">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>分组</TableHead>
-                          <TableHead>类型</TableHead>
-                          <TableHead className="text-right">倍率</TableHead>
-                          <TableHead className="text-right">模型数</TableHead>
-                          <TableHead>介绍</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {(w.groups ?? []).map((g) => (
-                          <TableRow key={g.name}>
-                            <TableCell className="font-medium">{g.name}</TableCell>
-                            <TableCell>
-                              <div className="flex flex-wrap gap-1">
-                                {g.types.length ? g.types.map((t) => <TypeBadge key={t} t={t} />) : "—"}
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-right tabular-nums">
-                              {g.ratio == null ? "—" : `×${+g.ratio.toFixed(4)}`}
-                            </TableCell>
-                            <TableCell className="text-muted-foreground text-right tabular-nums">
-                              {g.model_count}
-                            </TableCell>
-                            <TableCell className="text-muted-foreground max-w-xs truncate text-xs">
-                              {g.desc || "—"}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
+                  <GroupsByType groups={w.groups ?? []} />
                 )}
               </CardContent>
             </Card>

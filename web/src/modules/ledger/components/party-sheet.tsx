@@ -386,35 +386,37 @@ function PartyDetailView({
         </div>
       </SheetHeader>
       <div className="space-y-5 p-4">
-        <div className="grid grid-cols-3 gap-2">
-          <Kv
-            label={
-              <>
-                {L.due}（{st0.currency}）
-                {v.relay ? (
-                  <span className="block">
-                    自动 {fmt(st0.relay_due)}
-                    {st0.manual_due ? ` + 手工 ${fmt(st0.manual_due)}` : ""}
-                  </span>
-                ) : null}
-              </>
-            }
-            value={curf(st0.due, st0.currency)}
-          />
-          <Kv label={`${L.paid}（${st0.currency}）`} value={curf(st0.paid, st0.currency)} />
-          <Kv
-            label={
-              <>
-                {openLabel}（{st0.currency}）
-                {st0.currency !== "CNY" && (st0.open > 0 || st0.credit > 0) ? (
-                  <span className="block">≈¥{fmt(Math.abs(st0.open_cny))}</span>
-                ) : null}
-              </>
-            }
-            value={curf(st0.open > 0 ? st0.open : st0.credit, st0.currency)}
-            className={st0.open > 0 ? "text-warning" : st0.credit > 0 ? "text-income" : ""}
-          />
-        </div>
+        {v.kind !== "supplier" ? (
+          <div className="grid grid-cols-3 gap-2">
+            <Kv
+              label={
+                <>
+                  {L.due}（{st0.currency}）
+                  {v.relay ? (
+                    <span className="block">
+                      自动 {fmt(st0.relay_due)}
+                      {st0.manual_due ? ` + 手工 ${fmt(st0.manual_due)}` : ""}
+                    </span>
+                  ) : null}
+                </>
+              }
+              value={curf(st0.due, st0.currency)}
+            />
+            <Kv label={`${L.paid}（${st0.currency}）`} value={curf(st0.paid, st0.currency)} />
+            <Kv
+              label={
+                <>
+                  {openLabel}（{st0.currency}）
+                  {st0.currency !== "CNY" && (st0.open > 0 || st0.credit > 0) ? (
+                    <span className="block">≈¥{fmt(Math.abs(st0.open_cny))}</span>
+                  ) : null}
+                </>
+              }
+              value={curf(st0.open > 0 ? st0.open : st0.credit, st0.currency)}
+              className={st0.open > 0 ? "text-warning" : st0.credit > 0 ? "text-income" : ""}
+            />
+          </div>
+        ) : null}
 
         {v.kind === "supplier" ? <PartyWallets party={v} /> : null}
 
@@ -424,19 +426,21 @@ function PartyDetailView({
 
         {v.archived ? <p className="text-muted-foreground text-sm">已归档，只能查看</p> : <RecordForm party={v} />}
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <h3 className="font-medium">
-              往来明细 <span className="text-muted-foreground text-sm">{data.records.length}</span>
-            </h3>
-            <span className="text-muted-foreground text-xs">按日期倒序</span>
+        {v.kind !== "supplier" ? (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h3 className="font-medium">
+                往来明细 <span className="text-muted-foreground text-sm">{data.records.length}</span>
+              </h3>
+              <span className="text-muted-foreground text-xs">按日期倒序</span>
+            </div>
+            {data.records.length ? (
+              <RecordList party={v} records={data.records} />
+            ) : (
+              <p className="text-muted-foreground text-sm">还没有往来记录</p>
+            )}
           </div>
-          {data.records.length ? (
-            <RecordList party={v} records={data.records} />
-          ) : (
-            <p className="text-muted-foreground text-sm">还没有往来记录</p>
-          )}
-        </div>
+        ) : null}
       </div>
     </>
   );
@@ -652,7 +656,8 @@ function RecordForm({ party: v }: { party: Party }) {
   const refresh = useLedgerRefresh();
   const qc = useQueryClient();
   const L = PL[v.kind];
-  const [kind, setKind] = useState<"due" | "paid">("due");
+  // 供应商默认记实付（付款），客户默认记应收
+  const [kind, setKind] = useState<"due" | "paid">(v.kind === "supplier" ? "paid" : "due");
   const [amount, setAmount] = useState("");
   const [currency, setCurrency] = useState<Currency>(v.currency);
   const [rate, setRate] = useState(v.currency === "CNY" ? "" : String(me?.rates[v.currency] ?? ""));

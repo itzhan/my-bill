@@ -186,6 +186,9 @@ export type PartyWallet = {
   // 这把 Key 在供应商站点的累计消费；自定义倍率时 last_used_actual = 累计消费 × 倍率
   last_used: number | null;
   last_used_actual: number | null;
+  // 今日消费（自定义倍率时 last_today_actual = 今日消费 × 倍率）
+  last_today: number | null;
+  last_today_actual: number | null;
   last_error: string;
   last_checked_at: string | null;
 };

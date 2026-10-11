@@ -25,15 +25,7 @@ const PLATFORMS: [PartyWallet["platform"], string][] = [
   ["newapi", "new-api"],
   ["sub2api", "sub2api"],
 ];
-const KIND_LABEL: Record<string, string> = {
-  login: "钱包余额",
-  wallet: "钱包余额",
-  token: "Key 剩余额度",
-  quota: "Key 限额剩余",
-  subscription: "订阅剩余",
-};
-
-// 额度数字：两位小数、千分位，不带币种（供应商站点的额度单位，一般是 $）
+// 额度数字：两位小数、千分位，不带币种（供应商站点的额度单位）
 // 供应商站点的额度单位（一般是 $）。满 1 万用「w」（万），满 1 千用「k」，不足 1 千显示两位小数
 export const amt = (v: number | null | undefined) => {
   if (v == null) return "-";
@@ -379,14 +371,10 @@ export function PartyWallets({ party }: { party: Party }) {
   const list = data ?? [];
   // 合计按站点去重：同一 base_url 是同一账户，钱包/消费只算一次（多把 Key 只为各自追踪倍率）
   const uniqSites = [
-    ...new Map(
-      list
-        .filter((w) => w.enabled)
-        .map((w) => [w.base_url.replace(/\/+$/, ""), w] as const),
-    ).values(),
+    ...new Map(list.filter((w) => w.enabled).map((w) => [w.base_url.replace(/\/+$/, ""), w] as const)).values(),
   ];
-  const total = uniqSites.reduce((a, w) => a + (w.last_actual ?? 0), 0);
   const totalUsed = uniqSites.reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
+  const totalToday = uniqSites.reduce((a, w) => a + (w.last_today_actual ?? 0), 0);
   const r = party.recharge;
   return (
     <div className="space-y-3">
@@ -403,25 +391,23 @@ export function PartyWallets({ party }: { party: Party }) {
               <div className="text-income font-semibold tabular-nums">{curf(r.settled, r.currency)}</div>
             </div>
             <div className="bg-muted/50 rounded-md p-2">
-              <div className="text-muted-foreground text-xs">{r.unsettled > 0 ? "未结算（我们还欠）" : "未结算（预付结余）"}</div>
+              <div className="text-muted-foreground text-xs">
+                {r.unsettled > 0 ? "未结算（我们还欠）" : "未结算（预付结余）"}
+              </div>
               <div className={cn("font-semibold tabular-nums", r.unsettled > 0 && "text-warning")}>
                 {(r.unsettled < 0 ? "−" : "") + curf(Math.abs(r.unsettled), r.currency)}
               </div>
             </div>
           </div>
-          <p className="text-muted-foreground text-xs">
-            已结算 = 期初 {curf(r.settled_base, r.currency)} + 记账充值 {curf(r.from_entries, r.currency)}（
-            {r.entry_count} 笔）· 未结算 = 累计消费 − 已结算 + 实际余额（正=还欠他，负=预付结余）· 期初可在「编辑」里改
-          </p>
         </div>
       ) : null}
       <div className="space-y-3 rounded-lg border p-4">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <b className="text-sm">余额</b>
+            <b className="text-sm">Key 消费</b>
             <p className="text-muted-foreground text-xs">
-              在供应商站点（new-api / sub2api）的 Key 对应的钱包额度、倍率与累计消费，每 30 分钟自动刷新
-              {list.length ? ` · 实际余额合计 ${amt(total)} · 累计消费合计 ${amt(totalUsed)}` : ""}
+              每把 Key 在供应商站点的倍率、累计消费与今日消费，每 30 分钟自动刷新
+              {list.length ? ` · 累计消费合计 ${amt(totalUsed)} · 今日 ${amt(totalToday)}` : ""}
             </p>
           </div>
           <Button
@@ -476,35 +462,26 @@ export function PartyWallets({ party }: { party: Party }) {
                     </Button>
                   </span>
                 </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  <div className="bg-muted/50 rounded-md p-2">
-                    <div className="text-muted-foreground text-xs">{KIND_LABEL[w.last_wallet_kind] ?? "钱包额度"}</div>
-                    <div className="font-semibold tabular-nums" title={amtFull(w.last_wallet)}>
-                      {amt(w.last_wallet)}
-                    </div>
-                  </div>
+                <div className="grid grid-cols-3 gap-2">
                   <div className="bg-muted/50 rounded-md p-2">
                     <div className="text-muted-foreground truncate text-xs" title={ratioSource(w)}>
-                      倍率 · {ratioSource(w) || "-"}
+                      倍率{w.custom ? "（自定义）" : ""}
                     </div>
                     <div className="font-semibold tabular-nums">
                       {w.last_ratio == null ? "-" : `× ${+w.last_ratio.toFixed(4)}`}
                     </div>
                   </div>
                   <div className="bg-muted/50 rounded-md p-2">
-                    <div className="text-muted-foreground text-xs">实际余额{w.custom ? "（钱包 × 倍率）" : ""}</div>
-                    <div className="text-income font-semibold tabular-nums" title={amtFull(w.last_actual)}>
-                      {amt(w.last_actual)}
-                    </div>
-                  </div>
-                  <div className="bg-muted/50 rounded-md p-2">
-                    <div className="text-muted-foreground text-xs">累计消费{w.custom ? "（× 倍率）" : ""}</div>
+                    <div className="text-muted-foreground text-xs">实际总消费{w.custom ? "（× 倍率）" : ""}</div>
                     <div className="text-expense font-semibold tabular-nums" title={amtFull(w.last_used_actual)}>
                       {amt(w.last_used_actual)}
                     </div>
-                    {w.custom && w.last_used != null ? (
-                      <div className="text-muted-foreground text-xs tabular-nums">站点额度 {amt(w.last_used)}</div>
-                    ) : null}
+                  </div>
+                  <div className="bg-muted/50 rounded-md p-2">
+                    <div className="text-muted-foreground text-xs">今日消费{w.custom ? "（× 倍率）" : ""}</div>
+                    <div className="text-expense font-semibold tabular-nums" title={amtFull(w.last_today_actual)}>
+                      {amt(w.last_today_actual)}
+                    </div>
                   </div>
                 </div>
                 <div className="text-muted-foreground truncate font-mono text-xs" title={w.base_url}>

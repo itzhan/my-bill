@@ -224,7 +224,16 @@ async function fetchNewapi(base, key, wantRatio, login, insecure, token) {
   else if (loginRes) warning = `账号密码登录失败：${loginRes.error}${warning ? `；${warning}` : ""}`;
   // 只有账号密码登录（newapiLogin 返回 user/pass）才回写凭据；访问令牌走 newapiSelf，没有 user 字段
   const loginUsed = loginRes?.ok && loginRes.user ? { user: loginRes.user, pass: loginRes.pass } : null;
-  if (!wantRatio) return { wallet, kind, used, warning, loginUsed };
+  // 今日消费（账户视角，需要令牌）：data/self 当天范围按分桶求和
+  let today = null;
+  if (token && token.value) {
+    const nowTs = Math.floor(Date.now() / 1000);
+    const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
+    const startTs = Math.floor(new Date(`${ymd}T00:00:00+08:00`).getTime() / 1000);
+    const dres = await newapiAuthedGet(base, token.value, token.userId, `/api/data/self?start_timestamp=${startTs}&end_timestamp=${nowTs}&default_time=day`, insecure);
+    if (dres.ok && Array.isArray(dres.json.data)) today = dres.json.data.reduce((a, x) => a + (num(x.quota) || 0), 0) / qpu;
+  }
+  if (!wantRatio) return { wallet, kind, used, today, warning, loginUsed };
 
   let ratio = null;
   let source = "";
@@ -263,7 +272,7 @@ async function fetchNewapi(base, key, wantRatio, login, insecure, token) {
       source = "pricing-default";
     } else source = "读不到倍率（这把 Key 还没有消费记录，且站点没公开分组倍率）";
   }
-  return { wallet, kind, used, ratio, source, warning, loginUsed };
+  return { wallet, kind, used, today, ratio, source, warning, loginUsed };
 }
 
 // ---------- 供应商详情：分组 / 每组消耗 / 每日消耗 ----------
@@ -394,7 +403,9 @@ async function fetchWallet(w) {
   const actual = wallet === null ? null : w.custom ? (ratio === null ? null : round(wallet * ratio, 4)) : wallet;
   const used = r.used === null || r.used === undefined ? null : round(r.used, 4);
   const usedActual = used === null ? null : w.custom ? (ratio === null ? null : round(used * ratio, 4)) : used;
-  return { wallet, kind: r.kind, ratio, source: w.custom ? "custom" : r.source || "", actual, used, usedActual, warning: r.warning || "", loginUsed: r.loginUsed || null };
+  const today = r.today === null || r.today === undefined ? null : round(r.today, 4);
+  const todayActual = today === null ? null : w.custom ? (ratio === null ? null : round(today * ratio, 4)) : today;
+  return { wallet, kind: r.kind, ratio, source: w.custom ? "custom" : r.source || "", actual, used, usedActual, today, todayActual, warning: r.warning || "", loginUsed: r.loginUsed || null };
 }
 
 // ---------- 存储与路由 ----------
@@ -422,8 +433,8 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     );
     CREATE INDEX IF NOT EXISTS idx_party_wallets_party ON party_wallets(party_id);
   `);
-  // 迁移：累计消费（这把 Key 在供应商站点总共用了多少；自定义倍率时另存 × 倍率后的实际消费）
-  for (const col of ['last_used', 'last_used_actual']) {
+  // 迁移：累计消费（这把 Key 在供应商站点总共用了多少；自定义倍率时另存 × 倍率后的实际消费）+ 今日消费
+  for (const col of ['last_used', 'last_used_actual', 'last_today', 'last_today_actual']) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} REAL`);
   }
   // 迁移：new-api 账号密码登录（读账户钱包与总消费，用户视角）、跳过证书校验
@@ -488,8 +499,8 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     try {
       if (!w.api_key) throw new Error('还没有填 API Key');
       const r = await fetchWallet(w);
-      db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
-        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, r.usedActual, r.warning, t, id);
+      db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_today = ?, last_today_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
+        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, r.usedActual, r.today, r.todayActual, r.warning, t, id);
       // 批量试出来的账号密码存下来，以后自动刷新直接用
       if (r.loginUsed && (r.loginUsed.user !== w.login_user || r.loginUsed.pass !== w.login_pass)) {
         db.prepare('UPDATE party_wallets SET login_user = ?, login_pass = ? WHERE id = ?').run(r.loginUsed.user, r.loginUsed.pass, id);

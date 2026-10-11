@@ -199,7 +199,6 @@ export default function SuppliersPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>供应商</TableHead>
-                    <TableHead>Key（平台 · 倍率）</TableHead>
                     <TableHead className="text-right">实际余额</TableHead>
                     <TableHead className="text-right">累计消费</TableHead>
                     <TableHead className="text-right">已结算</TableHead>
@@ -240,42 +239,6 @@ export default function SuppliersPage() {
                               {s.project_archived ? "（项目已归档）" : ""}
                             </Link>
                           </TableCell>
-                          <TableCell>
-                            {ws.length ? (
-                              <div className="space-y-1">
-                                {ws.map((w) => (
-                                  <div
-                                    key={w.id}
-                                    className={cn("flex items-center gap-1.5 text-xs", !w.enabled && "opacity-50")}
-                                  >
-                                    <Badge variant="outline" className="px-1.5 py-0 text-[11px]">
-                                      {w.platform === "sub2api" ? "sub2api" : "new-api"}
-                                    </Badge>
-                                    <span className="max-w-32 truncate" title={w.base_url}>
-                                      {w.name}
-                                    </span>
-                                    <span className="text-muted-foreground tabular-nums">
-                                      {w.last_ratio == null ? "×-" : `×${+w.last_ratio.toFixed(4)}`}
-                                      {w.custom ? "（自定义）" : ""}
-                                    </span>
-                                    {w.last_error ? (
-                                      <span
-                                        title={w.last_error}
-                                        className={cn(
-                                          "size-1.5 shrink-0 rounded-full",
-                                          w.last_wallet == null && w.last_used == null
-                                            ? "bg-destructive"
-                                            : "bg-warning",
-                                        )}
-                                      />
-                                    ) : null}
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <span className="text-muted-foreground text-xs">未绑定 Key</span>
-                            )}
-                          </TableCell>
                           <TableCell className="text-income text-right font-semibold tabular-nums">
                             {s.settle_type === "credit" ? (
                               <span className="text-muted-foreground font-normal">授信</span>
@@ -301,7 +264,7 @@ export default function SuppliersPage() {
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-muted-foreground py-10 text-center">
+                      <TableCell colSpan={6} className="text-muted-foreground py-10 text-center">
                         {data.length ? "没有符合条件的供应商" : "还没有供应商，点右上角「添加供应商」，选个项目开始"}
                       </TableCell>
                     </TableRow>
