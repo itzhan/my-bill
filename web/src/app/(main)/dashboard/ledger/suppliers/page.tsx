@@ -199,6 +199,7 @@ export default function SuppliersPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>供应商</TableHead>
+                    <TableHead className="hidden lg:table-cell">画像</TableHead>
                     <TableHead className="text-right">实际余额</TableHead>
                     <TableHead className="text-right">累计消费</TableHead>
                     <TableHead className="text-right">已结算</TableHead>
@@ -239,6 +240,11 @@ export default function SuppliersPage() {
                               {s.project_archived ? "（项目已归档）" : ""}
                             </Link>
                           </TableCell>
+                          <TableCell className="hidden max-w-[16rem] lg:table-cell">
+                            <span className="text-muted-foreground line-clamp-2 text-xs" title={s.profile || ""}>
+                              {s.profile || "—"}
+                            </span>
+                          </TableCell>
                           <TableCell className="text-income text-right font-semibold tabular-nums">
                             {s.settle_type === "credit" ? (
                               <span className="text-muted-foreground font-normal">授信</span>
@@ -264,7 +270,7 @@ export default function SuppliersPage() {
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-muted-foreground py-10 text-center">
+                      <TableCell colSpan={7} className="text-muted-foreground py-10 text-center">
                         {data.length ? "没有符合条件的供应商" : "还没有供应商，点右上角「添加供应商」，选个项目开始"}
                       </TableCell>
                     </TableRow>

@@ -24,7 +24,21 @@ export type EmailReport = {
   sender_name: string;
   recipients: string[];
   time: string;
+  supplier_threshold: number | null;
   has_password: boolean;
+};
+export type PartyContract = {
+  id: number;
+  party_id: number;
+  title: string;
+  name: string;
+  mime: string;
+  size: number;
+  url: string;
+  image: boolean;
+  created_at: string;
+  creator_name: string;
+  project_name?: string;
 };
 
 export type Me = {
@@ -164,6 +178,8 @@ export type Party = {
   balance_threshold?: number | null;
   term_days?: number | null;
   start_date?: string;
+  // 供应商 / 客户画像（介绍）
+  profile?: string;
   // 供应商结算：应付（消费折结算币种）/ 已结算（期初+充值支出）/ 未结算
   recharge?: {
     currency: Currency;
@@ -326,6 +342,7 @@ export type CustomerDetail = {
   customer: Party & { balance_usd: number | null; term: TermStatus | null };
   projects: CustomerProject[];
   records: (PartyRecord & { project_name: string })[];
+  contracts: PartyContract[];
   live: CustomerLive;
   rates: Rates;
 };

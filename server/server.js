@@ -173,10 +173,16 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = 'settle
 if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = 'settle_type'").get()) {
   db.exec("ALTER TABLE parties ADD COLUMN settle_type TEXT NOT NULL DEFAULT 'prepaid'");
 }
-// 客户：预付余额提醒阈值（美元）、后付账期天数、起始使用时间
-for (const [col, ddl] of [['balance_threshold', 'REAL'], ['term_days', 'INTEGER'], ['start_date', "TEXT NOT NULL DEFAULT ''"]]) {
+// 客户：预付余额提醒阈值（美元）、后付账期天数、起始使用时间；供应商/客户：画像（介绍）
+for (const [col, ddl] of [['balance_threshold', 'REAL'], ['term_days', 'INTEGER'], ['start_date', "TEXT NOT NULL DEFAULT ''"], ['profile', "TEXT NOT NULL DEFAULT ''"]]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('parties') WHERE name = ?").get(col)) db.exec(`ALTER TABLE parties ADD COLUMN ${col} ${ddl}`);
 }
+// 往来单位的电子合同（关联 attachments）
+db.exec(`CREATE TABLE IF NOT EXISTS party_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+  attachment_id INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '', created_by INTEGER, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_party_files_party ON party_files(party_id);`);
 // 项目类型：relay 中转（自动跟踪供应商/客户消耗）/ short 短期（按记账收支算利润）
 if (!db.prepare("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'ptype'").get()) {
   db.exec("ALTER TABLE projects ADD COLUMN ptype TEXT NOT NULL DEFAULT 'relay'");
@@ -785,6 +791,7 @@ const ops = {
         sender_name: a.sender_name === undefined ? cur.sender_name : String(a.sender_name).trim() || '元启智能账单',
         recipients,
         time: a.time === undefined ? cur.time : String(a.time),
+        supplier_threshold: a.supplier_threshold === undefined ? cur.supplier_threshold : (a.supplier_threshold === '' || a.supplier_threshold === null ? null : (Number(a.supplier_threshold) >= 0 ? Number(a.supplier_threshold) : null)),
       };
       if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(cfg.time)) throw new HttpError(400, '发送时间格式为 HH:MM');
       if (cfg.email && !emailRe.test(cfg.email)) throw new HttpError(400, '发件邮箱格式不对');
@@ -853,7 +860,7 @@ function supplierSettlement(p) {
   const unsettled = r2(payable - settled + balance);
   return { currency: cur, payable, balance, settled, settled_base: base, from_entries: fromEntries, paid_out: paidOut, refunded, entry_count: entries.length + incomes.length, unsettled };
 }
-const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
+const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId) {
   const parties = q.partiesOfProject.all(projectId);
@@ -889,6 +896,7 @@ Object.assign(ops, {
     const party = q.party.get(Number(r.lastInsertRowid));
     if (body.ratio !== undefined && body.ratio !== null && body.ratio !== '') { const ratio = Number(body.ratio); if (ratio > 0 && ratio <= 100) db.prepare('UPDATE parties SET ratio = ? WHERE id = ?').run(Math.round(ratio * 10000) / 10000, party.id); }
     if (body.settle_type === 'credit') db.prepare("UPDATE parties SET settle_type = 'credit' WHERE id = ?").run(party.id);
+    if (body.profile) db.prepare('UPDATE parties SET profile = ? WHERE id = ?').run(String(body.profile).slice(0, 1000), party.id);
     if (kind === 'customer') {
       const sets = [], vals = [];
       if (body.balance_threshold !== undefined && body.balance_threshold !== '') { sets.push('balance_threshold = ?'); vals.push(Number(body.balance_threshold) >= 0 ? Number(body.balance_threshold) : null); }
@@ -919,6 +927,7 @@ Object.assign(ops, {
     if (patch.settle_type !== undefined) {
       db.prepare('UPDATE parties SET settle_type = ? WHERE id = ?').run(patch.settle_type === 'credit' ? 'credit' : 'prepaid', pa.id);
     }
+    if (patch.profile !== undefined) db.prepare('UPDATE parties SET profile = ? WHERE id = ?').run(String(patch.profile || '').slice(0, 1000), pa.id);
     // 客户：预付余额阈值（美元）、后付账期天数、起始使用时间
     if (pa.kind === 'customer') {
       if (patch.balance_threshold !== undefined) db.prepare('UPDATE parties SET balance_threshold = ? WHERE id = ?').run(patch.balance_threshold === '' || patch.balance_threshold === null ? null : (Number(patch.balance_threshold) >= 0 ? Number(patch.balance_threshold) : null), pa.id);
@@ -2988,6 +2997,40 @@ function termStatus(v, todayS) {
   const daysToDue = Math.round((Date.parse(dueDate) - Date.parse(todayS)) / dayMs);
   return { due_date: dueDate, days_to_due: daysToDue, arrears: v.settle.open, overdue: v.settle.open > 0 && daysToDue < 0 };
 }
+// 往来单位的电子合同
+const qContractsOf = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.username AS creator_name FROM party_files pf JOIN attachments a ON a.id = pf.attachment_id LEFT JOIN users u ON u.id = pf.created_by WHERE pf.party_id = ? ORDER BY pf.id DESC`);
+const qContractById = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.username AS creator_name FROM party_files pf JOIN attachments a ON a.id = pf.attachment_id LEFT JOIN users u ON u.id = pf.created_by WHERE pf.id = ?`);
+const contractView = (r) => ({ id: r.id, party_id: r.party_id, title: r.title || r.name, name: r.name, mime: r.mime, size: r.size, url: `/api/attachments/${r.attachment_id}`, image: IMAGE_MIME.test(r.mime), created_at: r.created_at, creator_name: r.creator_name || '' });
+app.get('/api/parties/:id/contracts', auth, (req, res) => {
+  const pa = q.party.get(Number(req.params.id));
+  if (!pa) return fail(res, 404, '往来单位不存在');
+  res.json({ contracts: qContractsOf.all(pa.id).map(contractView) });
+});
+app.post('/api/parties/:id/contracts', auth, (req, res) => {
+  const pa = q.party.get(Number(req.params.id));
+  if (!pa) return fail(res, 404, '往来单位不存在');
+  const body = req.body || {};
+  const name = String(body.name || 'contract').replace(/[\\/]/g, '_').slice(0, 120);
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const mime = String(body.mime || MIME_BY_EXT[ext] || 'application/octet-stream');
+  const data = Buffer.from(String(body.data || ''), 'base64');
+  if (!data.length) return fail(res, 400, '文件为空');
+  if (data.length > 20 * 1024 * 1024) return fail(res, 400, '文件不能超过 20MB');
+  const file = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${safeName(name)}`;
+  fs.writeFileSync(path.join(UPLOAD_DIR, file), data);
+  const a = q.insertAttachment.run(file, name, mime, data.length, req.user.id, now());
+  const r = db.prepare('INSERT INTO party_files (party_id, attachment_id, title, created_by, created_at) VALUES (?, ?, ?, ?, ?)').run(pa.id, Number(a.lastInsertRowid), String(body.title || '').slice(0, 100), req.user.id, now());
+  dataChanged(req.user, `给${PARTY_LABEL[pa.kind].name}「${pa.name}」上传了合同「${body.title || name}」`);
+  res.json({ contract: contractView(qContractById.get(Number(r.lastInsertRowid))) });
+});
+app.delete('/api/party-contracts/:id', auth, (req, res) => {
+  const row = qContractById.get(Number(req.params.id));
+  if (!row) return fail(res, 404, '合同不存在');
+  const a = q.attachment.get(row.attachment_id);
+  db.prepare('DELETE FROM party_files WHERE id = ?').run(row.id);
+  if (a) { try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(a.file))); } catch {} db.prepare('DELETE FROM attachments WHERE id = ?').run(a.id); }
+  res.json({ ok: true });
+});
 // 客户：跨项目平铺，含中转站余额、预付低余额标记、后付账期/欠费
 app.get('/api/customers', auth, async (req, res) => {
   const rates = getRates();
@@ -3017,7 +3060,8 @@ app.get('/api/customers/:id/detail', auth, async (req, res) => {
   let live = null, balance_usd = null;
   if (pa.relay_id && relayConfigured()) { try { live = await relayCustomerLive(pa.relay_id, pa.relay_ref); balance_usd = live && live.user ? live.user.balance_usd : null; } catch { /* ignore */ } }
   const v = partyView(pa);
-  res.json({ customer: { ...v, balance_usd, term: termStatus(v, todayS) }, projects, records, live, rates });
+  const contracts = siblings.flatMap((s) => qContractsOf.all(s.id).map((r) => ({ ...contractView(r), project_name: s.project_name })));
+  res.json({ customer: { ...v, balance_usd, term: termStatus(v, todayS) }, projects, records, contracts, live, rates });
 });
 // 供应商详情：资金往来（双向明细）+ 每把 Key 在站点的分组 / 每组消耗 / 每日消耗
 app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
@@ -3139,9 +3183,9 @@ app.get('/api/profit/daily', auth, async (req, res) => {
 });
 
 // ---------- 每日利润邮件（SkyMail）----------
-const EMAIL_DEFAULT = { enabled: false, base_url: 'https://mail.visionlabs.cc/api', email: '', password: '', account_id: 1, sender_name: '元启智能账单', recipients: [], time: '09:00' };
+const EMAIL_DEFAULT = { enabled: false, base_url: 'https://mail.visionlabs.cc/api', email: '', password: '', account_id: 1, sender_name: '元启智能账单', recipients: [], time: '09:00', supplier_threshold: null };
 function getEmailReport() { let a = {}; try { a = JSON.parse(getSetting('email_report', '{}')); } catch {} return { ...EMAIL_DEFAULT, ...a }; }
-function emailReportView() { const c = getEmailReport(); return { enabled: !!c.enabled, base_url: c.base_url, email: c.email, account_id: c.account_id, sender_name: c.sender_name, recipients: Array.isArray(c.recipients) ? c.recipients : [], time: c.time, has_password: !!c.password }; }
+function emailReportView() { const c = getEmailReport(); return { enabled: !!c.enabled, base_url: c.base_url, email: c.email, account_id: c.account_id, sender_name: c.sender_name, recipients: Array.isArray(c.recipients) ? c.recipients : [], time: c.time, supplier_threshold: c.supplier_threshold == null ? null : Number(c.supplier_threshold), has_password: !!c.password }; }
 // 登录拿 token 再发信（token 会过期，每次登录最稳）
 async function skymailSend(cfg, { subject, html, text }) {
   if (!cfg.email || !cfg.password) throw new HttpError(400, '还没配置发件邮箱和密码');
@@ -3217,12 +3261,26 @@ async function sendLowBalanceAlert() {
   const bal = await relayBalances();
   const rows = db.prepare("SELECT pa.name, pa.relay_id, pa.balance_threshold, p.name AS project_name FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer' AND pa.archived = 0 AND pa.settle_type = 'prepaid' AND pa.balance_threshold IS NOT NULL AND pa.relay_id IS NOT NULL").all();
   const low = rows.map((r) => ({ name: r.name, project: r.project_name, bal: bal.has(r.relay_id) ? bal.get(r.relay_id) : null, threshold: Number(r.balance_threshold) })).filter((x) => x.bal != null && x.bal < x.threshold).sort((a, b) => a.bal - b.bal);
-  if (!low.length) return null;
-  const list = low.map((x) => `<tr><td style="padding:10px 0;border-top:1px solid #f3f4f6;font-weight:500;color:#111827;">${htmlEsc(x.name)}<span style="color:#9ca3af;font-size:12px;font-weight:400;"> · ${htmlEsc(x.project)}</span></td><td style="padding:10px 0;border-top:1px solid #f3f4f6;text-align:right;color:#dc2626;font-weight:700;">$${x.bal.toFixed(2)}</td><td style="padding:10px 0;border-top:1px solid #f3f4f6;text-align:right;color:#9ca3af;font-size:12px;">阈值 $${x.threshold}</td></tr>`).join('');
-  const html = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif;"><div style="padding:32px 16px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="width:520px;max-width:100%;margin:0 auto;background:#fff;border:1px solid #edeff2;border-radius:18px;"><tr><td style="padding:30px 36px 8px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">余额提醒</div><div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:8px;">${low.length} 个预付客户余额不足</div></td></tr><tr><td style="padding:16px 36px 30px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size:14px;">${list}</table><div style="margin-top:20px;font-size:12px;color:#b6bcc6;">请及时提醒客户充值 · 元启智能账单</div></td></tr></table></div></body></html>`;
-  const text = `预付客户余额不足（${low.length}）：\n` + low.map((x) => `· ${x.name}（${x.project}）$${x.bal.toFixed(2)} < 阈值 $${x.threshold}`).join('\n');
-  await skymailSend(cfg, { subject: `⚠ ${low.length} 个预付客户余额不足`, html, text });
-  return low.length;
+  // 供应商：统一阈值（人民币，实际余额），只看预付
+  const supLow = [];
+  const st = cfg.supplier_threshold;
+  if (st != null && partyWallets) {
+    for (const s of db.prepare("SELECT id, name FROM parties WHERE kind = 'supplier' AND archived = 0 AND settle_type = 'prepaid'").all()) {
+      const sum = partyWallets.summaryOf(s.id);
+      if (sum && sum.actual != null && sum.actual < st) supLow.push({ name: s.name, bal: sum.actual, threshold: st });
+    }
+    supLow.sort((a, b) => a.bal - b.bal);
+  }
+  if (!low.length && !supLow.length) return null;
+  const rowHtml = (name, sub, bal, thr, sym) => `<tr><td style="padding:10px 0;border-top:1px solid #f3f4f6;font-weight:500;color:#111827;">${htmlEsc(name)}${sub ? `<span style="color:#9ca3af;font-size:12px;font-weight:400;"> · ${htmlEsc(sub)}</span>` : ''}</td><td style="padding:10px 0;border-top:1px solid #f3f4f6;text-align:right;color:#dc2626;font-weight:700;">${sym}${bal}</td><td style="padding:10px 0;border-top:1px solid #f3f4f6;text-align:right;color:#9ca3af;font-size:12px;">阈值 ${sym}${thr}</td></tr>`;
+  const custList = low.map((x) => rowHtml(x.name, x.project, x.bal.toFixed(2), x.threshold, '$')).join('');
+  const supList = supLow.map((x) => rowHtml(x.name, '', Math.round(x.bal).toLocaleString('zh-CN'), Math.round(x.threshold).toLocaleString('zh-CN'), '¥')).join('');
+  const section = (title, body) => body ? `<tr><td style="padding:14px 36px 2px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">${title}</div></td></tr><tr><td style="padding:6px 36px 10px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size:14px;">${body}</table></td></tr>` : '';
+  const total = low.length + supLow.length;
+  const html = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif;"><div style="padding:32px 16px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="width:520px;max-width:100%;margin:0 auto;background:#fff;border:1px solid #edeff2;border-radius:18px;"><tr><td style="padding:30px 36px 8px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">余额提醒</div><div style="font-size:22px;font-weight:700;color:#dc2626;margin-top:8px;">${total} 项余额不足</div></td></tr>${section('预付客户', custList)}${section('预付供应商', supList)}<tr><td style="padding:18px 36px 30px;"><div style="font-size:12px;color:#b6bcc6;">客户请及时提醒充值；供应商请及时补款 · 元启智能账单</div></td></tr></table></div></body></html>`;
+  const text = [low.length ? `预付客户余额不足：\n` + low.map((x) => `· ${x.name}（${x.project}）$${x.bal.toFixed(2)} < $${x.threshold}`).join('\n') : '', supLow.length ? `预付供应商余额不足：\n` + supLow.map((x) => `· ${x.name} ¥${Math.round(x.bal)} < ¥${Math.round(x.threshold)}`).join('\n') : ''].filter(Boolean).join('\n\n');
+  await skymailSend(cfg, { subject: `⚠ ${total} 项余额不足（客户 ${low.length} · 供应商 ${supLow.length}）`, html, text });
+  return total;
 }
 async function checkEmailReport() {
   const cfg = getEmailReport();

@@ -1,21 +1,23 @@
 "use client";
 
-import { use } from "react";
+import { use, useRef, useState } from "react";
 
 import Link from "next/link";
 
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, ExternalLink, FileText, Trash2, Upload } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import { get } from "@/modules/ledger/api";
-import { Pager, usePaged } from "@/modules/ledger/components/shared";
-import { curf, usdf } from "@/modules/ledger/format";
-import type { CustomerDetail } from "@/modules/ledger/types";
+import { apiUrl, del, get, post } from "@/modules/ledger/api";
+import { Pager, useConfirm, usePaged } from "@/modules/ledger/components/shared";
+import { curf, fmtSize, usdf } from "@/modules/ledger/format";
+import type { CustomerDetail, PartyContract } from "@/modules/ledger/types";
 
 function RecordsTab({ records }: { records: CustomerDetail["records"] }) {
   const { rows, pager } = usePaged(records, "cust-records");
@@ -72,6 +74,98 @@ function RecordsTab({ records }: { records: CustomerDetail["records"] }) {
   );
 }
 
+function ContractsCard({ customerId, contracts }: { customerId: number; contracts: PartyContract[] }) {
+  const qc = useQueryClient();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirm, confirmEl] = useConfirm();
+  const reload = () => qc.invalidateQueries({ queryKey: ["ledger", "customer-detail", customerId] });
+
+  const upload = async (file: File) => {
+    if (file.size > 20 * 1024 * 1024) return toast.error("文件不能超过 20MB");
+    setBusy(true);
+    try {
+      const data = await new Promise<string>((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result).split(",")[1] || "");
+        r.onerror = rej;
+        r.readAsDataURL(file);
+      });
+      await post(`/parties/${customerId}/contracts`, { name: file.name, mime: file.type, data, title: file.name });
+      toast.success("合同已上传");
+      reload();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+  const remove = async (c: PartyContract) => {
+    if (!(await confirm({ title: `删除合同「${c.title}」？`, destructive: true, confirmText: "删除" }))) return;
+    try {
+      await del(`/party-contracts/${c.id}`);
+      toast.success("已删除");
+      reload();
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
+        <div className="space-y-1">
+          <CardTitle className="text-base">电子合同（{contracts.length}）</CardTitle>
+          <CardDescription>与该客户的所有电子合同 · PDF / 图片 / Word 等，最大 20MB</CardDescription>
+        </div>
+        <Button variant="outline" size="sm" disabled={busy} onClick={() => fileRef.current?.click()}>
+          <Upload className={cn(busy && "animate-pulse")} />
+          {busy ? "上传中…" : "上传合同"}
+        </Button>
+        <input
+          ref={fileRef}
+          type="file"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) upload(f);
+          }}
+        />
+      </CardHeader>
+      <CardContent>
+        {contracts.length ? (
+          <div className="divide-y rounded-md border">
+            {contracts.map((c) => (
+              <div key={c.id} className="flex items-center gap-3 p-3">
+                <FileText className="text-muted-foreground size-4 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">{c.title}</div>
+                  <div className="text-muted-foreground text-xs">
+                    {c.project_name ? `${c.project_name} · ` : ""}
+                    {fmtSize(c.size)} · {c.creator_name} · {new Date(c.created_at).toLocaleDateString("zh-CN")}
+                  </div>
+                </div>
+                <Button variant="ghost" size="icon-sm" title="查看 / 下载" asChild>
+                  <a href={apiUrl(c.url)} target="_blank" rel="noreferrer">
+                    <ExternalLink />
+                  </a>
+                </Button>
+                <Button variant="ghost" size="icon-sm" title="删除" onClick={() => remove(c)}>
+                  <Trash2 />
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-muted-foreground text-sm">还没有合同，点「上传合同」添加</p>
+        )}
+      </CardContent>
+      {confirmEl}
+    </Card>
+  );
+}
+
 export default function CustomerDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const cid = Number(id);
@@ -83,7 +177,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   if (isLoading) return <Skeleton className="h-96" />;
   if (!data) return <div className="text-muted-foreground py-10 text-center">加载失败</div>;
 
-  const { customer: c, projects, records } = data;
+  const { customer: c, projects, records, contracts } = data;
   const credit = c.settle_type === "credit";
 
   const kpis = credit
@@ -199,6 +293,8 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
           <RecordsTab records={records} />
         </CardContent>
       </Card>
+
+      <ContractsCard customerId={cid} contracts={contracts} />
     </div>
   );
 }

@@ -308,6 +308,7 @@ function EmailTab() {
         sender_name: cfg.sender_name,
         recipients: cfg.recipients,
         time: cfg.time,
+        supplier_threshold: cfg.supplier_threshold ?? "",
       };
       if (password.trim()) body.password = password.trim();
       const d = await save({ email_report: body });
@@ -411,15 +412,29 @@ function EmailTab() {
             )}
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="er-time">发送时间（每天，{me.tz || "Asia/Shanghai"}）</Label>
-            <Input
-              id="er-time"
-              type="time"
-              className="w-40"
-              value={cfg.time}
-              onChange={(e) => setCfg({ ...cfg, time: e.target.value })}
-            />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="er-time">发送时间（每天，{me.tz || "Asia/Shanghai"}）</Label>
+              <Input
+                id="er-time"
+                type="time"
+                className="w-40"
+                value={cfg.time}
+                onChange={(e) => setCfg({ ...cfg, time: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="er-supthreshold">供应商余额提醒阈值（人民币，可选）</Label>
+              <Input
+                id="er-supthreshold"
+                inputMode="decimal"
+                placeholder="如 5000，预付供应商余额低于此值发邮件提醒"
+                value={cfg.supplier_threshold == null ? "" : String(cfg.supplier_threshold)}
+                onChange={(e) =>
+                  setCfg({ ...cfg, supplier_threshold: e.target.value === "" ? null : Number(e.target.value) })
+                }
+              />
+            </div>
           </div>
 
           {error ? <FormError>{error}</FormError> : null}

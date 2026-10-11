@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 
@@ -133,6 +134,7 @@ function NewPartyForm({
   const [balThreshold, setBalThreshold] = useState("");
   const [termDays, setTermDays] = useState("");
   const [startDate, setStartDate] = useState("");
+  const [profile, setProfile] = useState("");
   // 供应商余额：绑定我们在供应商站点（new-api / sub2api）的 Key，添加后立即抓钱包额度和倍率
   const [walletOn, setWalletOn] = useState(false);
   const [wallet, setWallet] = useState<WalletDraft>(EMPTY_WALLET);
@@ -160,6 +162,7 @@ function NewPartyForm({
         external_id: ext,
         ratio: r,
         settle_type: settleType,
+        profile,
         ...(kind === "customer"
           ? {
               balance_threshold: settleType === "prepaid" ? balThreshold : "",
@@ -277,6 +280,17 @@ function NewPartyForm({
       <div className="space-y-2">
         <Label htmlFor="pty-note">备注（可选）</Label>
         <Input id="pty-note" maxLength={200} value={note} onChange={(e) => setNote(e.target.value)} />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="pty-profile">画像 / 介绍（可选）</Label>
+        <Textarea
+          id="pty-profile"
+          maxLength={1000}
+          rows={3}
+          placeholder={kind === "supplier" ? "这家供应商的特点、渠道、稳定性、合作方式等" : "这个客户的来源、规模、合作方式等"}
+          value={profile}
+          onChange={(e) => setProfile(e.target.value)}
+        />
       </div>
       {relayOn ? (
         <div className="grid gap-4 sm:grid-cols-2">
@@ -928,6 +942,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   const [balThreshold, setBalThreshold] = useState(v.balance_threshold == null ? "" : String(v.balance_threshold));
   const [termDays, setTermDays] = useState(v.term_days == null ? "" : String(v.term_days));
   const [startDate, setStartDate] = useState(v.start_date ?? "");
+  const [profile, setProfile] = useState(v.profile ?? "");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => setError(null), [v.id]);
@@ -951,6 +966,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
         external_id: ext,
         ratio: r,
         settle_type: settleType,
+        profile,
         ...(v.kind === "supplier" ? { settled_base: Number(settledBase) || 0 } : {}),
         ...(v.kind === "customer"
           ? {
@@ -1020,6 +1036,10 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
         <div className="space-y-2">
           <Label htmlFor="pe-note">备注</Label>
           <Input id="pe-note" maxLength={200} value={note} onChange={(e) => setNote(e.target.value)} />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="pe-profile">画像 / 介绍</Label>
+          <Textarea id="pe-profile" maxLength={1000} rows={3} value={profile} onChange={(e) => setProfile(e.target.value)} />
         </div>
         {v.kind === "customer" ? (
           <div className="space-y-2">
