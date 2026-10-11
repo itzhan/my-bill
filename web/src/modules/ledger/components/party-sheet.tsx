@@ -129,6 +129,10 @@ function NewPartyForm({
   const [ratio, setRatio] = useState("1");
   const [ext, setExt] = useState("");
   const [settleType, setSettleType] = useState<"prepaid" | "credit">("prepaid");
+  // 客户：预付余额提醒阈值（美元）、后付账期天数、起始使用时间
+  const [balThreshold, setBalThreshold] = useState("");
+  const [termDays, setTermDays] = useState("");
+  const [startDate, setStartDate] = useState("");
   // 供应商余额：绑定我们在供应商站点（new-api / sub2api）的 Key，添加后立即抓钱包额度和倍率
   const [walletOn, setWalletOn] = useState(false);
   const [wallet, setWallet] = useState<WalletDraft>(EMPTY_WALLET);
@@ -155,7 +159,14 @@ function NewPartyForm({
         currency,
         external_id: ext,
         ratio: r,
-        ...(kind === "supplier" ? { settle_type: settleType } : {}),
+        settle_type: settleType,
+        ...(kind === "customer"
+          ? {
+              balance_threshold: settleType === "prepaid" ? balThreshold : "",
+              term_days: settleType === "credit" ? termDays : "",
+              start_date: settleType === "credit" ? startDate : "",
+            }
+          : {}),
       });
       toast.success(`已添加${L.name}「${d.party.name}」`);
       if (relayRef.trim()) {
@@ -212,18 +223,55 @@ function NewPartyForm({
           <CurrencySelect value={currency} onChange={setCurrency} />
         </div>
       </div>
-      {kind === "supplier" ? (
+      <div className="space-y-2">
+        <Label>结算方式</Label>
+        <Select value={settleType} onValueChange={(v) => setSettleType(v as "prepaid" | "credit")}>
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {kind === "supplier" ? (
+              <>
+                <SelectItem value="prepaid">预付（先充值后使用，看钱包余额）</SelectItem>
+                <SelectItem value="credit">授信（先使用后付费，余额按 0，只看消费）</SelectItem>
+              </>
+            ) : (
+              <>
+                <SelectItem value="prepaid">预付（先充值后使用，余额不足发邮件提醒）</SelectItem>
+                <SelectItem value="credit">后付（先使用后付费，按账期跟踪欠费）</SelectItem>
+              </>
+            )}
+          </SelectContent>
+        </Select>
+      </div>
+      {kind === "customer" && settleType === "prepaid" ? (
         <div className="space-y-2">
-          <Label>结算方式</Label>
-          <Select value={settleType} onValueChange={(v) => setSettleType(v as "prepaid" | "credit")}>
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="prepaid">预付（先充值后使用，看钱包余额）</SelectItem>
-              <SelectItem value="credit">授信（先使用后付费，余额按 0，只看消费）</SelectItem>
-            </SelectContent>
-          </Select>
+          <Label htmlFor="pty-threshold">余额提醒阈值（美元，可选）</Label>
+          <Input
+            id="pty-threshold"
+            inputMode="decimal"
+            placeholder="如 50，余额低于此值发邮件提醒团队"
+            value={balThreshold}
+            onChange={(e) => setBalThreshold(e.target.value)}
+          />
+        </div>
+      ) : null}
+      {kind === "customer" && settleType === "credit" ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="pty-term">账期（天）</Label>
+            <Input
+              id="pty-term"
+              inputMode="numeric"
+              placeholder="如 30"
+              value={termDays}
+              onChange={(e) => setTermDays(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="pty-start">起始使用时间</Label>
+            <Input id="pty-start" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </div>
         </div>
       ) : null}
       <div className="space-y-2">
@@ -341,9 +389,9 @@ function PartyDetailView({
           <div className="min-w-0">
             <SheetTitle className="flex items-center gap-2">
               {v.name} <Badge variant="secondary">{L.name}</Badge>
-              {v.kind === "supplier" ? (
-                <Badge variant="outline">{v.settle_type === "credit" ? "授信" : "预付"}</Badge>
-              ) : null}
+              <Badge variant="outline">
+                {v.settle_type === "credit" ? (v.kind === "supplier" ? "授信" : "后付") : "预付"}
+              </Badge>
               {v.archived ? <Badge variant="outline">归档</Badge> : null}
             </SheetTitle>
             <SheetDescription>{[v.project_name, v.contact, v.note].filter(Boolean).join(" · ")}</SheetDescription>
@@ -877,6 +925,9 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   const [ext, setExt] = useState(v.external_id);
   const [settledBase, setSettledBase] = useState(v.kind === "supplier" ? String(v.settled_base ?? 0) : "");
   const [settleType, setSettleType] = useState<"prepaid" | "credit">(v.settle_type === "credit" ? "credit" : "prepaid");
+  const [balThreshold, setBalThreshold] = useState(v.balance_threshold == null ? "" : String(v.balance_threshold));
+  const [termDays, setTermDays] = useState(v.term_days == null ? "" : String(v.term_days));
+  const [startDate, setStartDate] = useState(v.start_date ?? "");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => setError(null), [v.id]);
@@ -899,7 +950,15 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
         currency,
         external_id: ext,
         ratio: r,
-        ...(v.kind === "supplier" ? { settled_base: Number(settledBase) || 0, settle_type: settleType } : {}),
+        settle_type: settleType,
+        ...(v.kind === "supplier" ? { settled_base: Number(settledBase) || 0 } : {}),
+        ...(v.kind === "customer"
+          ? {
+              balance_threshold: settleType === "prepaid" ? balThreshold : "",
+              term_days: settleType === "credit" ? termDays : "",
+              start_date: settleType === "credit" ? startDate : "",
+            }
+          : {}),
       });
       toast.success("已保存");
       reload();
@@ -972,6 +1031,45 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
           <Label htmlFor="pe-ext">外部系统编号</Label>
           <Input id="pe-ext" maxLength={100} value={ext} onChange={(e) => setExt(e.target.value)} />
         </div>
+        {v.kind === "customer" ? (
+          <>
+            <div className="space-y-2">
+              <Label>结算方式</Label>
+              <Select value={settleType} onValueChange={(x) => setSettleType(x as "prepaid" | "credit")}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="prepaid">预付（余额不足发邮件提醒）</SelectItem>
+                  <SelectItem value="credit">后付（按账期跟踪欠费）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {settleType === "prepaid" ? (
+              <div className="space-y-2">
+                <Label htmlFor="pe-threshold">余额提醒阈值（美元，可选）</Label>
+                <Input
+                  id="pe-threshold"
+                  inputMode="decimal"
+                  placeholder="如 50，余额低于此值发邮件提醒团队"
+                  value={balThreshold}
+                  onChange={(e) => setBalThreshold(e.target.value)}
+                />
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="pe-term">账期（天）</Label>
+                  <Input id="pe-term" inputMode="numeric" placeholder="如 30" value={termDays} onChange={(e) => setTermDays(e.target.value)} />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="pe-start">起始使用时间</Label>
+                  <Input id="pe-start" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+                </div>
+              </div>
+            )}
+          </>
+        ) : null}
         {v.kind === "supplier" ? (
           <>
             <div className="space-y-2">

@@ -55,6 +55,7 @@ export type Project = {
   archived: number | boolean;
   created_at: string;
   creator_name: string;
+  ptype?: "relay" | "short";
 };
 export type ProjectWithSummary = Project & {
   summary: Summary;
@@ -159,6 +160,10 @@ export type Party = {
   wallet?: { count: number; actual: number | null; used: number | null; errors: number } | null;
   settled_base?: number;
   settle_type?: "prepaid" | "credit";
+  // 客户：预付余额阈值（美元）、后付账期天数、起始使用时间
+  balance_threshold?: number | null;
+  term_days?: number | null;
+  start_date?: string;
   // 供应商结算：应付（消费折结算币种）/ 已结算（期初+充值支出）/ 未结算
   recharge?: {
     currency: Currency;
@@ -291,6 +296,38 @@ export type ProfitDaily = {
   errors: string[];
   rates: Rates;
   cached_at?: string;
+};
+
+// 客户（跨项目平铺）：中转站余额、预付低余额标记、后付账期/欠费
+export type TermStatus = { due_date: string; days_to_due: number; arrears: number; overdue: boolean };
+export type CustomerRow = Party & {
+  project_archived: boolean;
+  project_type: "relay" | "short";
+  balance_usd: number | null;
+  low_balance: boolean;
+  term: TermStatus | null;
+};
+export type CustomerProject = {
+  party_id: number;
+  project_id: number;
+  project_name: string;
+  project_type: "relay" | "short";
+  ratio: number;
+  currency: Currency;
+  settle: Settle;
+};
+export type CustomerLive = {
+  user?: { balance_usd?: number; status?: string };
+  total?: { cost_usd?: number; requests?: number };
+  today?: { cost_usd?: number; requests?: number };
+  daily?: { date: string; cost_usd: number; requests: number }[];
+} | null;
+export type CustomerDetail = {
+  customer: Party & { balance_usd: number | null; term: TermStatus | null };
+  projects: CustomerProject[];
+  records: (PartyRecord & { project_name: string })[];
+  live: CustomerLive;
+  rates: Rates;
 };
 
 export type PartiesSummary = {

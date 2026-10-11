@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 import { del, patch, post } from "../api";
 import { useLedgerRefresh, useMe } from "../hooks";
@@ -35,6 +36,7 @@ export function ProjectDialog({
   const [confirm, confirmEl] = useConfirm();
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
+  const [ptype, setPtype] = useState<"relay" | "short">("relay");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -42,6 +44,7 @@ export function ProjectDialog({
     if (!open) return;
     setName(project?.name ?? "");
     setNote(project?.note ?? "");
+    setPtype(project?.ptype === "short" ? "short" : "relay");
     setError(null);
   }, [open, project]);
 
@@ -52,12 +55,12 @@ export function ProjectDialog({
     setError(null);
     try {
       if (project) {
-        await patch(`/projects/${project.id}`, { name: name.trim(), note: note.trim() });
+        await patch(`/projects/${project.id}`, { name: name.trim(), note: note.trim(), ptype });
         toast.success("项目已更新");
         onOpenChange(false);
         refresh();
       } else {
-        const d = await post<{ project: Project }>("/projects", { name: name.trim(), note: note.trim() });
+        const d = await post<{ project: Project }>("/projects", { name: name.trim(), note: note.trim(), ptype });
         toast.success(`项目「${d.project.name}」已创建`);
         onOpenChange(false);
         refresh();
@@ -127,6 +130,28 @@ export function ProjectDialog({
           <div className="space-y-2">
             <Label htmlFor="project-name">项目名称</Label>
             <Input id="project-name" autoFocus maxLength={60} value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="space-y-2">
+            <Label>项目类型</Label>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              value={ptype}
+              onValueChange={(v) => v && setPtype(v as "relay" | "short")}
+              className="w-full"
+            >
+              <ToggleGroupItem value="relay" className="flex-1 data-[state=on]:font-semibold">
+                中转
+              </ToggleGroupItem>
+              <ToggleGroupItem value="short" className="flex-1 data-[state=on]:font-semibold">
+                短期
+              </ToggleGroupItem>
+            </ToggleGroup>
+            <p className="text-muted-foreground text-xs">
+              {ptype === "relay"
+                ? "中转：自动跟踪供应商与客户消耗，计入每日利润报表"
+                : "短期：按实际记账（收入 − 支出）算利润，不进每日利润报表"}
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="project-note">备注（可选）</Label>
