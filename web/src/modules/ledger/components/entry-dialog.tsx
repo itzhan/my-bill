@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 
 import { useQuery } from "@tanstack/react-query";
-import { Trash2 } from "lucide-react";
+import { Minus, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -121,7 +121,7 @@ export function EntryDialog({
     let pid = projectId ?? fromPath ?? prefs.lastProject;
     const act = (pd?.projects ?? []).filter((p) => !p.archived);
     if (!act.some((p) => p.id === pid)) pid = act[0]?.id ?? null;
-    setType(prefs.type);
+    setType("expense"); // 记一笔默认支出
     setCurrency(prefs.currency);
     setProject(pid);
     setHandler(me.user.id);
@@ -229,12 +229,20 @@ export function EntryDialog({
             variant="outline"
             value={type}
             onValueChange={(v) => v && setType(v as EntryType)}
-            className="w-full"
+            className="w-full gap-2"
           >
-            <ToggleGroupItem value="expense" className="data-[state=on]:text-expense flex-1">
+            <ToggleGroupItem
+              value="expense"
+              className="data-[state=on]:bg-expense data-[state=on]:border-expense h-11 flex-1 gap-1.5 text-base font-semibold data-[state=on]:text-white"
+            >
+              <Minus className="size-4" />
               支出
             </ToggleGroupItem>
-            <ToggleGroupItem value="income" className="data-[state=on]:text-income flex-1">
+            <ToggleGroupItem
+              value="income"
+              className="data-[state=on]:bg-income data-[state=on]:border-income h-11 flex-1 gap-1.5 text-base font-semibold data-[state=on]:text-white"
+            >
+              <Plus className="size-4" />
               收入
             </ToggleGroupItem>
           </ToggleGroup>
