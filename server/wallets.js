@@ -557,13 +557,26 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   };
   setTimeout(loop, 30_000).unref();
 
-  // 往来单位卡片用：每家供应商的余额汇总
-  const sumStmt = db.prepare("SELECT count(*) AS n, sum(last_actual) AS actual, sum(last_used_actual) AS used, sum(CASE WHEN last_error != '' THEN 1 ELSE 0 END) AS errors FROM party_wallets WHERE party_id = ? AND enabled = 1");
+  // 往来单位卡片用：每家供应商的余额汇总。
+  // 钱包余额和累计消费是「账户级」的：同一站点（base_url）下的多把 Key 读到的是同一个账户，
+  // 数值完全一样——Key 多只是为了各自追踪倍率。所以按站点去重，余额/消费每个账户只算一次。
+  const sumRowsStmt = db.prepare('SELECT base_url, last_actual, last_used_actual, last_error FROM party_wallets WHERE party_id = ? AND enabled = 1');
   return {
     listOf: (partyId) => ofParty.all(partyId).map(view),
     summaryOf(partyId) {
-      const r = sumStmt.get(partyId);
-      return r && r.n ? { count: r.n, actual: r.actual === null ? null : round(r.actual, 4), used: r.used === null ? null : round(r.used, 4), errors: r.errors } : null;
+      const rows = sumRowsStmt.all(partyId);
+      if (!rows.length) return null;
+      const bySite = new Map();
+      for (const r of rows) {
+        const k = baseOf(r.base_url);
+        if (!bySite.has(k)) bySite.set(k, r); // 同站点取第一把（数值相同）
+      }
+      const uniq = [...bySite.values()];
+      const sumOf = (f) => {
+        const vals = uniq.map(f).filter((v) => v !== null && v !== undefined);
+        return vals.length ? round(vals.reduce((a, b) => a + b, 0), 4) : null;
+      };
+      return { count: rows.length, actual: sumOf((r) => r.last_actual), used: sumOf((r) => r.last_used_actual), errors: rows.filter((r) => r.last_error).length };
     },
     // 详情页用：某把 Key 在供应商站点的分组 / 每组消耗 / 每日消耗（实时抓，不入库）
     async detailOf(walletId) {

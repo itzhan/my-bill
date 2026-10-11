@@ -35,9 +35,6 @@ import type { Party, PartyWallet } from "@/modules/ledger/types";
 
 type SupplierRow = Party & { project_archived: boolean; wallets: PartyWallet[] };
 
-const sum = (list: PartyWallet[], f: (w: PartyWallet) => number | null) =>
-  list.filter((w) => w.enabled).reduce((a, w) => a + (f(w) ?? 0), 0);
-
 // 侧栏「供应商」：汇总所有项目的供应商，以及我们在各供应商站点（new-api / sub2api）的余额、倍率、累计消费
 export default function SuppliersPage() {
   const { openPartyNew } = useLedger();
@@ -52,9 +49,8 @@ export default function SuppliersPage() {
   const [showArchived, setShowArchived] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  // 每个供应商的累计消费（各 Key 的实际消费之和），用于排序
-  const usedOf = (s: SupplierRow) =>
-    s.wallets.filter((w) => w.enabled).reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
+  // 每个供应商的累计消费（账户级，已按站点去重），用于排序
+  const usedOf = (s: SupplierRow) => s.wallet?.used ?? 0;
   const rows = useMemo(() => {
     const kw = q.trim().toLowerCase();
     return (data ?? [])
@@ -72,12 +68,9 @@ export default function SuppliersPage() {
 
   const active = (data ?? []).filter((s) => !s.archived && !s.project_archived);
   const wallets = active.flatMap((s) => s.wallets).filter((w) => w.enabled);
-  const totalActual = active
-    .filter((s) => s.settle_type !== "credit")
-    .flatMap((s) => s.wallets)
-    .filter((w) => w.enabled)
-    .reduce((a, w) => a + (w.last_actual ?? 0), 0);
-  const totalUsed = sum(wallets, (w) => w.last_used_actual);
+  // 账户级合计（按站点去重，取自 s.wallet 汇总）；授信供应商不计入实际余额
+  const totalActual = active.filter((s) => s.settle_type !== "credit").reduce((a, s) => a + (s.wallet?.actual ?? 0), 0);
+  const totalUsed = active.reduce((a, s) => a + (s.wallet?.used ?? 0), 0);
   const rates = pd?.rates ?? { USD: 7.2, USDT: 7.2 };
   // 未结算折人民币粗略合计（USD×rates.USD、USDT×rates.USDT、CNY×1）
   const totalUnsettledCny = active.reduce((a, s) => {
@@ -208,7 +201,6 @@ export default function SuppliersPage() {
                   <TableRow>
                     <TableHead>供应商</TableHead>
                     <TableHead>Key（平台 · 倍率）</TableHead>
-                    <TableHead className="text-right">钱包余额</TableHead>
                     <TableHead className="text-right">实际余额</TableHead>
                     <TableHead className="text-right">累计消费</TableHead>
                     <TableHead className="text-right">已结算</TableHead>
@@ -285,25 +277,14 @@ export default function SuppliersPage() {
                               <span className="text-muted-foreground text-xs">未绑定 Key</span>
                             )}
                           </TableCell>
-                          <TableCell className="text-right text-xs tabular-nums">
-                            {ws.map((w) => (
-                              <div key={w.id} className={cn(!w.enabled && "opacity-50")}>
-                                {amt(w.last_wallet)}
-                              </div>
-                            ))}
-                          </TableCell>
                           <TableCell className="text-income text-right font-semibold tabular-nums">
                             {s.settle_type === "credit" ? (
                               <span className="text-muted-foreground font-normal">授信</span>
-                            ) : on.length ? (
-                              amt(sum(on, (w) => w.last_actual))
                             ) : (
-                              "-"
+                              amt(s.wallet?.actual)
                             )}
                           </TableCell>
-                          <TableCell className="text-expense text-right tabular-nums">
-                            {on.length ? amt(sum(on, (w) => w.last_used_actual)) : "-"}
-                          </TableCell>
+                          <TableCell className="text-expense text-right tabular-nums">{amt(s.wallet?.used)}</TableCell>
                           <TableCell className="text-income text-right tabular-nums">
                             {rc ? curf(rc.settled, rc.currency) : "-"}
                           </TableCell>
@@ -320,7 +301,7 @@ export default function SuppliersPage() {
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={8} className="text-muted-foreground py-10 text-center">
+                      <TableCell colSpan={7} className="text-muted-foreground py-10 text-center">
                         {data.length ? "没有符合条件的供应商" : "还没有供应商，点右上角「添加供应商」，选个项目开始"}
                       </TableCell>
                     </TableRow>

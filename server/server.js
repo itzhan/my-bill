@@ -2912,8 +2912,15 @@ app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
     if (e.type === 'income') income += inCur; else out += inCur;
     return { id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, rate: e.rate, cny: r2(entryBase(e, rates)), in_cur: r2(inCur), project_id: e.project_id, project_name: e.project_name, note: e.note, handler: e.handler_name };
   });
+  // 按站点去重：同一 base_url 是同一账户，分组 / 消耗完全一样，只取一把 Key 抓一次
   const wallets = [];
-  for (const w of partyWallets.listOf(pa.id)) wallets.push(await partyWallets.detailOf(w.id));
+  const seen = new Set();
+  for (const w of partyWallets.listOf(pa.id)) {
+    const site = String(w.base_url || '').replace(/\/+$/, '');
+    if (seen.has(site)) continue;
+    seen.add(site);
+    wallets.push(await partyWallets.detailOf(w.id));
+  }
   res.json({ party: partyView(pa), funds: { currency: cur, out: r2(out), income: r2(income), net: r2(out - income), entries }, wallets, rates });
 });
 app.delete('/api/party-records/:id', auth, (req, res) => { ops.deletePartyRecord(req.user, req.params.id); res.json({ ok: true }); });
