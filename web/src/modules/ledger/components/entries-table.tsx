@@ -92,6 +92,7 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                 <TableRow>
                   <TableHead>内容</TableHead>
                   <TableHead className="hidden sm:table-cell">经手人</TableHead>
+                  <TableHead className="hidden sm:table-cell">供应商</TableHead>
                   <TableHead className="hidden md:table-cell">时间</TableHead>
                   <TableHead className="text-right">金额</TableHead>
                   <TableHead className="w-10" />
@@ -104,7 +105,7 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                   return (
                     <Fragment key={k}>
                       <TableRow className="bg-muted/40 hover:bg-muted/40">
-                        <TableCell colSpan={5} className="py-1.5 text-xs font-medium">
+                        <TableCell colSpan={6} className="py-1.5 text-xs font-medium">
                           <div className="flex justify-between">
                             <span>{dayLabel(k)}</span>
                             <span className="space-x-3 tabular-nums">
@@ -137,18 +138,10 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                                     {e.images.length > 1 ? e.images.length : null}
                                   </span>
                                 ) : null}
-                                {e.party_name ? (
-                                  <Badge
-                                    variant="secondary"
-                                    className="shrink-0 font-normal"
-                                    title={`${e.type === "income" ? "退款 / 换钱" : "充值 / 结算"}：${e.party_name}`}
-                                  >
-                                    {e.type === "income" ? "退款" : "充值"} · {e.party_name}
-                                  </Badge>
-                                ) : null}
                               </div>
                               <div className="text-muted-foreground text-xs sm:hidden">
                                 {e.handler_name} {isExp ? "支付" : "收款"} · {fmtTime(e.created_at)}
+                                {e.party_name ? ` · ${isExp ? "充值" : "退款"} ${e.party_name}` : ""}
                               </div>
                             </TableCell>
                             <TableCell className="hidden sm:table-cell">
@@ -159,6 +152,19 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                                   <span className="text-muted-foreground text-xs">· {e.creator_name} 登记</span>
                                 ) : null}
                               </span>
+                            </TableCell>
+                            <TableCell className="hidden sm:table-cell">
+                              {e.party_name ? (
+                                <Badge
+                                  variant="secondary"
+                                  className="font-normal"
+                                  title={e.type === "income" ? "他退款 / 换钱" : "充值 / 结算"}
+                                >
+                                  {e.party_name}
+                                </Badge>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">未指定</span>
+                              )}
                             </TableCell>
                             <TableCell className="text-muted-foreground hidden tabular-nums md:table-cell">
                               {fmtTime(e.created_at)}
