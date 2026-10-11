@@ -800,7 +800,8 @@ function supplierSettlement(p) {
   const rates = getRates();
   const w = partyWallets ? partyWallets.summaryOf(p.id) : null;
   const payable = w && w.used != null ? r2(usdToCur(w.used, cur, rates)) : 0;
-  const balance = w && w.actual != null ? r2(usdToCur(w.actual, cur, rates)) : 0; // 实际余额（折结算币种）
+  // 授信（先用后付）没有预付余额，实际余额始终视为 0；预付才用站点钱包余额
+  const balance = p.settle_type === 'credit' ? 0 : w && w.actual != null ? r2(usdToCur(w.actual, cur, rates)) : 0;
   const entries = q.entriesOfParty.all(p.id);
   const incomes = q.incomesOfParty.all(p.id);
   // 币种相同直接用原值，否则按记账汇率折人民币再折结算币种（口径同往来 partySettle）
