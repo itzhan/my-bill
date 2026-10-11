@@ -2976,18 +2976,21 @@ app.get('/api/suppliers', auth, (req, res) => {
 });
 
 // 批量拉中转站用户余额（美元），id -> balance_usd
-async function relayBalances() {
-  const map = new Map();
-  if (!relayConfigured()) return map;
-  try {
-    for (let page = 1; page <= 20; page++) {
-      const d = await relayGet('/admin/users', { page, page_size: 100 });
-      const items = d.items || [];
-      for (const u of items) map.set(u.id, Number(u.balance || 0));
-      if (items.length < 100) break;
-    }
-  } catch { /* 拉不到余额不阻塞 */ }
-  return map;
+// 中转站全部用户余额：翻页实时拉取较慢，缓存 30 秒，避免客户页每次刷新都等一遍
+function relayBalances() {
+  if (!relayConfigured()) return Promise.resolve(new Map());
+  return relayCached('cust:balances', 30000, async () => {
+    const map = new Map();
+    try {
+      for (let page = 1; page <= 20; page++) {
+        const d = await relayGet('/admin/users', { page, page_size: 100 });
+        const items = d.items || [];
+        for (const u of items) map.set(u.id, Number(u.balance || 0));
+        if (items.length < 100) break;
+      }
+    } catch { /* 拉不到余额不阻塞 */ }
+    return map;
+  });
 }
 // 后付账期状态：到期日 = 起始日 + N 个账期；欠费 = settle.open
 function termStatus(v, todayS) {
