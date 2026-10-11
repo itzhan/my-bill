@@ -377,8 +377,16 @@ export function PartyWallets({ party }: { party: Party }) {
   };
 
   const list = data ?? [];
-  const total = list.filter((w) => w.enabled).reduce((a, w) => a + (w.last_actual ?? 0), 0);
-  const totalUsed = list.filter((w) => w.enabled).reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
+  // 合计按站点去重：同一 base_url 是同一账户，钱包/消费只算一次（多把 Key 只为各自追踪倍率）
+  const uniqSites = [
+    ...new Map(
+      list
+        .filter((w) => w.enabled)
+        .map((w) => [w.base_url.replace(/\/+$/, ""), w] as const),
+    ).values(),
+  ];
+  const total = uniqSites.reduce((a, w) => a + (w.last_actual ?? 0), 0);
+  const totalUsed = uniqSites.reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
   const r = party.recharge;
   return (
     <div className="space-y-3">
