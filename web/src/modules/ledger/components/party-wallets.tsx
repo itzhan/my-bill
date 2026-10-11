@@ -60,6 +60,7 @@ export type WalletDraft = {
   api_key: string;
   custom: boolean;
   custom_ratio: string;
+  consume_ratio: string;
   access_token: string;
   token_user_id: string;
   login_user: string;
@@ -73,6 +74,7 @@ export const EMPTY_WALLET: WalletDraft = {
   api_key: "",
   custom: false,
   custom_ratio: "",
+  consume_ratio: "",
   access_token: "",
   token_user_id: "",
   login_user: "",
@@ -84,7 +86,8 @@ export const EMPTY_WALLET: WalletDraft = {
 export function walletDraftError(v: WalletDraft, requireKey: boolean) {
   if (!/^https?:\/\//i.test(v.base_url.trim())) return "站点地址需以 http:// 或 https:// 开头";
   if (requireKey && !v.api_key.trim()) return "API Key 必填";
-  if (v.custom && !(Number(v.custom_ratio) > 0)) return "自定义倍率必须大于 0";
+  if (v.custom && !(Number(v.custom_ratio) > 0)) return "充值倍率必须大于 0";
+  if (v.custom && v.consume_ratio.trim() && !(Number(v.consume_ratio) > 0)) return "消耗倍率必须大于 0";
   return null;
 }
 export const walletBody = (v: WalletDraft) => ({
@@ -93,6 +96,8 @@ export const walletBody = (v: WalletDraft) => ({
   base_url: v.base_url.trim(),
   custom: v.custom,
   custom_ratio: v.custom ? Number(v.custom_ratio) : null,
+  // 消耗倍率：自定义且填了就用，没填默认 1
+  consume_ratio: v.custom ? (Number(v.consume_ratio) > 0 ? Number(v.consume_ratio) : 1) : null,
   insecure: v.insecure,
   login_user: v.login_user.trim(),
   token_user_id: v.token_user_id.trim(),
@@ -157,27 +162,53 @@ export function WalletFields({
           <span>
             <span className="font-medium">自定义倍率</span>
             <span className="text-muted-foreground block text-xs">
-              供应商倍率始终显示 1、充值时按倍率折算额度（如充 9000、3 倍率 → 给 3000 额度）时打开：不抓倍率，实际余额 =
-              钱包额度 × 自定义倍率
+              供应商站点倍率始终显示 1 时打开：不抓倍率，分别用下面两个倍率折算余额和消费
             </span>
           </span>
           <Switch checked={v.custom} onCheckedChange={(x) => setV({ ...v, custom: x })} />
         </label>
         {v.custom ? (
-          <div className="flex items-center gap-2">
-            <Label className="shrink-0">倍率</Label>
-            <Input
-              inputMode="decimal"
-              className="w-28"
-              placeholder="如 3"
-              value={v.custom_ratio}
-              onChange={(e) => setV({ ...v, custom_ratio: e.target.value })}
-            />
-            {Number(v.custom_ratio) > 0 ? (
-              <span className="text-muted-foreground text-xs">
-                钱包 3,000 → 实际余额 {amt(3000 * Number(v.custom_ratio))}
-              </span>
-            ) : null}
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Label className="w-20 shrink-0">充值倍率</Label>
+                <Input
+                  inputMode="decimal"
+                  className="w-28"
+                  placeholder="如 3"
+                  value={v.custom_ratio}
+                  onChange={(e) => setV({ ...v, custom_ratio: e.target.value })}
+                />
+                {Number(v.custom_ratio) > 0 ? (
+                  <span className="text-muted-foreground text-xs">
+                    钱包 3,000 → 实际余额 {amt(3000 * Number(v.custom_ratio))}
+                  </span>
+                ) : null}
+              </div>
+              <p className="text-muted-foreground pl-[5.5rem] text-xs">
+                充值按倍率折算额度（充 9000、3 倍率 → 给 3000 额度）；实际余额 = 钱包额度 × 充值倍率
+              </p>
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Label className="w-20 shrink-0">消耗倍率</Label>
+                <Input
+                  inputMode="decimal"
+                  className="w-28"
+                  placeholder="默认 1，如 0.45"
+                  value={v.consume_ratio}
+                  onChange={(e) => setV({ ...v, consume_ratio: e.target.value })}
+                />
+                {Number(v.consume_ratio) > 0 ? (
+                  <span className="text-muted-foreground text-xs">
+                    站点消费 1,000 → 实际消费 {amt(1000 * Number(v.consume_ratio))}
+                  </span>
+                ) : null}
+              </div>
+              <p className="text-muted-foreground pl-[5.5rem] text-xs">
+                实际消费 = 站点消费 × 消耗倍率；不填默认 1（按站点消费原样计）
+              </p>
+            </div>
           </div>
         ) : null}
       </div>
@@ -247,6 +278,7 @@ function WalletDialog({
             api_key: "",
             custom: wallet.custom,
             custom_ratio: wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
+            consume_ratio: wallet.consume_ratio == null ? "" : String(wallet.consume_ratio),
             access_token: "",
             token_user_id: wallet.token_user_id ?? "",
             login_user: wallet.login_user ?? "",
@@ -467,9 +499,18 @@ export function PartyWallets({ party }: { party: Party }) {
                     <div className="text-muted-foreground truncate text-xs" title={ratioSource(w)}>
                       倍率{w.custom ? "（自定义）" : ""}
                     </div>
-                    <div className="font-semibold tabular-nums">
-                      {w.last_ratio == null ? "-" : `× ${+w.last_ratio.toFixed(4)}`}
-                    </div>
+                    {w.custom ? (
+                      <div className="text-sm font-semibold tabular-nums">
+                        充 × {w.custom_ratio == null ? "-" : +w.custom_ratio.toFixed(4)}
+                        <span className="text-muted-foreground font-normal">
+                          {" · "}耗 × {w.consume_ratio == null ? 1 : +w.consume_ratio.toFixed(4)}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="font-semibold tabular-nums">
+                        {w.last_ratio == null ? "-" : `× ${+w.last_ratio.toFixed(4)}`}
+                      </div>
+                    )}
                   </div>
                   <div className="bg-muted/50 rounded-md p-2">
                     <div className="text-muted-foreground text-xs">实际总消费{w.custom ? "（× 倍率）" : ""}</div>

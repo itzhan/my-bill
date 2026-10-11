@@ -397,14 +397,17 @@ async function fetchWallet(w) {
     w.platform === "sub2api"
       ? await fetchSub2api(base, w.api_key, wantRatio, insecure)
       : await fetchNewapi(base, w.api_key, wantRatio, login, insecure, token);
+  // 自定义：充值倍率（custom_ratio）算实际余额；消耗倍率（consume_ratio，默认 1）算实际消费
   const ratio = w.custom ? num(w.custom_ratio) : r.ratio ?? null;
+  const consumeRatio = w.custom ? (num(w.consume_ratio) ?? 1) : null;
   const wallet = r.wallet === null ? null : round(r.wallet, 4);
-  // 自定义倍率：实际余额 = 钱包 × 倍率；普通模式：实际余额 = 钱包
+  // 自定义：实际余额 = 钱包 × 充值倍率；普通模式：实际余额 = 钱包
   const actual = wallet === null ? null : w.custom ? (ratio === null ? null : round(wallet * ratio, 4)) : wallet;
   const used = r.used === null || r.used === undefined ? null : round(r.used, 4);
-  const usedActual = used === null ? null : w.custom ? (ratio === null ? null : round(used * ratio, 4)) : used;
+  // 自定义：实际消费 = 站点消费 × 消耗倍率；普通模式：实际消费 = 站点消费
+  const usedActual = used === null ? null : w.custom ? (consumeRatio === null ? null : round(used * consumeRatio, 4)) : used;
   const today = r.today === null || r.today === undefined ? null : round(r.today, 4);
-  const todayActual = today === null ? null : w.custom ? (ratio === null ? null : round(today * ratio, 4)) : today;
+  const todayActual = today === null ? null : w.custom ? (consumeRatio === null ? null : round(today * consumeRatio, 4)) : today;
   return { wallet, kind: r.kind, ratio, source: w.custom ? "custom" : r.source || "", actual, used, usedActual, today, todayActual, warning: r.warning || "", loginUsed: r.loginUsed || null };
 }
 
@@ -433,8 +436,8 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     );
     CREATE INDEX IF NOT EXISTS idx_party_wallets_party ON party_wallets(party_id);
   `);
-  // 迁移：累计消费（这把 Key 在供应商站点总共用了多少；自定义倍率时另存 × 倍率后的实际消费）+ 今日消费
-  for (const col of ['last_used', 'last_used_actual', 'last_today', 'last_today_actual']) {
+  // 迁移：累计消费（这把 Key 在供应商站点总共用了多少；自定义倍率时另存 × 倍率后的实际消费）+ 今日消费 + 消耗倍率
+  for (const col of ['last_used', 'last_used_actual', 'last_today', 'last_today_actual', 'consume_ratio']) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} REAL`);
   }
   // 迁移：new-api 账号密码登录（读账户钱包与总消费，用户视角）、跳过证书校验
@@ -475,6 +478,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     }
     if (!partial || 'custom' in b) out.custom = b.custom ? 1 : 0;
     if (!partial || 'custom_ratio' in b) out.custom_ratio = num(b.custom_ratio);
+    if (!partial || 'consume_ratio' in b) out.consume_ratio = num(b.consume_ratio);
     if (!partial || 'enabled' in b) out.enabled = b.enabled === false ? 0 : 1;
     if (!partial || 'insecure' in b) out.insecure = b.insecure ? 1 : 0;
     if (!partial || 'login_user' in b) out.login_user = str(b.login_user, 120);

@@ -169,6 +169,7 @@ export type PartyWallet = {
   base_url: string;
   custom: boolean;
   custom_ratio: number | null;
+  consume_ratio: number | null;
   enabled: boolean;
   has_key: boolean;
   key_masked: string;
