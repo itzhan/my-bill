@@ -2821,7 +2821,18 @@ app.get('/api/projects', auth, (req, res) => {
   const rates = getRates();
   const byProject = new Map();
   for (const e of q.allEntries.all()) { if (!byProject.has(e.project_id)) byProject.set(e.project_id, []); byProject.get(e.project_id).push(e); }
-  const list = q.projects.all().map((p) => ({ ...p, summary: summarize(byProject.get(p.id) || [], rates) }));
+  // 每个项目的客户应收合计（折人民币）：中转站消耗已自动按天挂成应收，open_cny = 应收 − 实收
+  const custOpen = new Map();
+  for (const pa of db.prepare("SELECT * FROM parties WHERE kind = 'customer'").all()) {
+    const st = partySettle(q.recordsOfParty.all(pa.id), pa.currency || 'CNY');
+    custOpen.set(pa.project_id, r2((custOpen.get(pa.project_id) || 0) + (st.open_cny || 0)));
+  }
+  const list = q.projects.all().map((p) => {
+    const summary = summarize(byProject.get(p.id) || [], rates);
+    const customer_open_cny = r2(custOpen.get(p.id) || 0);
+    // 预估利润 = 当前利润 + 客户应打款（应收未收）
+    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny) };
+  });
   list.sort((a, b) => (a.archived - b.archived) || String(b.summary.last_at || b.created_at).localeCompare(String(a.summary.last_at || a.created_at)));
   const activeEntries = list.filter((p) => !p.archived).flatMap((p) => byProject.get(p.id) || []);
   res.json({ projects: list, totals: summarize(activeEntries, rates), funds: memberFunds(null), rates, version: dataVersion });

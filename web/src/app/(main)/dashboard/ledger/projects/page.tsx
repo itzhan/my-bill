@@ -75,6 +75,18 @@ const columns: ColumnDef<Row>[] = [
     header: ({ column }) => <DataTableColumnHeader column={column} title="创建者" />,
     cell: ({ row }) => <span className="text-muted-foreground">{row.original.creator_name}</span>,
   },
+  {
+    accessorKey: "est_profit",
+    header: ({ column }) => <DataTableColumnHeader column={column} title="预估利润" />,
+    cell: ({ row }) => (
+      <span
+        className={cn("tabular-nums font-semibold", (row.original.est_profit ?? 0) < 0 && "text-expense")}
+        title={`当前利润 ${signed(row.original.profit)} + 客户应打款 ${money(row.original.customer_open_cny ?? 0)}`}
+      >
+        {signed(row.original.est_profit ?? row.original.profit)}
+      </span>
+    ),
+  },
 ];
 
 export default function ProjectsPage() {

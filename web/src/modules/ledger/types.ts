@@ -45,7 +45,11 @@ export type Project = {
   created_at: string;
   creator_name: string;
 };
-export type ProjectWithSummary = Project & { summary: Summary };
+export type ProjectWithSummary = Project & {
+  summary: Summary;
+  customer_open_cny?: number;
+  est_profit?: number;
+};
 
 type CurTriple = { CNY: number; USDT: number; USD: number };
 export type FundMember = {
