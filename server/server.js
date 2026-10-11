@@ -3092,7 +3092,8 @@ app.get('/api/customers/:id/detail', auth, async (req, res) => {
   const todayS = todayKey();
   const bal = await relayBalances();
   const siblings = custSiblings(pa);
-  const projects = siblings.map((s) => { const v = partyView(s); return { party_id: s.id, project_id: s.project_id, project_name: s.project_name, project_type: s.project_type || 'relay', settle_type: v.settle_type, relay_id: s.relay_id || null, balance_usd: s.relay_id != null ? (bal.has(s.relay_id) ? bal.get(s.relay_id) : null) : null, ratio: v.ratio, currency: v.currency, settle: v.settle }; });
+  const entriesOfProj = db.prepare('SELECT * FROM entries WHERE project_id = ?');
+  const projects = siblings.map((s) => { const v = partyView(s); const isShort = (s.project_type || 'relay') === 'short'; return { party_id: s.id, project_id: s.project_id, project_name: s.project_name, project_type: s.project_type || 'relay', settle_type: v.settle_type, relay_id: s.relay_id || null, relay_ref: s.relay_ref || '', balance_usd: s.relay_id != null ? (bal.has(s.relay_id) ? bal.get(s.relay_id) : null) : null, ratio: v.ratio, currency: v.currency, settle: v.settle, summary: isShort ? summarize(entriesOfProj.all(s.project_id), rates) : null }; });
   const records = siblings.flatMap((s) => q.recordsWithCreator.all(s.id).map((r) => ({ ...recordView(r), project_name: s.project_name }))).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
   const contracts = siblings.flatMap((s) => qContractsOf.all(s.id).map((r) => ({ ...contractView(r), project_name: s.project_name })));
   // 实时：取第一个绑定了中转站的 party

@@ -370,10 +370,13 @@ export type CustomerProject = {
   project_type: "relay" | "short";
   settle_type?: "prepaid" | "credit";
   relay_id?: number | null;
+  relay_ref?: string;
   balance_usd?: number | null;
   ratio: number;
   currency: Currency;
   settle: Settle;
+  // 项目制项目：直接按项目流水的收入 / 支出 / 利润统计（不走中转挂账）
+  summary?: { income: { base: number }; expense: { base: number }; profit: number } | null;
 };
 export type CustomerLive = {
   user?: { balance_usd?: number; status?: string };

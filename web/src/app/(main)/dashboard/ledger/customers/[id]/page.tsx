@@ -403,7 +403,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
       <Card>
         <CardHeader>
           <CardTitle className="text-base">合作项目（{projects.length}）</CardTitle>
-          <CardDescription>该客户在各项目的消费与结算（折人民币）</CardDescription>
+          <CardDescription>中转项目按消费 / 结算；项目制项目按项目实际收入 − 支出（折人民币）</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto rounded-md border">
@@ -412,10 +412,11 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                 <TableRow>
                   <TableHead>项目</TableHead>
                   <TableHead>类型</TableHead>
+                  <TableHead>中转客户</TableHead>
                   <TableHead className="text-right">折扣</TableHead>
-                  <TableHead className="text-right">累计消费</TableHead>
-                  <TableHead className="text-right">已收</TableHead>
-                  <TableHead className="text-right">未收</TableHead>
+                  <TableHead className="text-right">累计消费 / 收入</TableHead>
+                  <TableHead className="text-right">已收 / 支出</TableHead>
+                  <TableHead className="text-right">未收 / 利润</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -432,18 +433,40 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                     <TableCell>
                       <Badge variant="outline">{p.project_type === "short" ? "项目制" : "中转"}</Badge>
                     </TableCell>
+                    <TableCell className="text-muted-foreground text-sm">{p.relay_ref ? p.relay_ref : "—"}</TableCell>
                     <TableCell className="text-muted-foreground text-right tabular-nums">
-                      {+p.ratio.toFixed(4)}
+                      {p.project_type === "short" ? "—" : +p.ratio.toFixed(4)}
                     </TableCell>
-                    <TableCell className="text-right">
-                      <Amt cny={p.settle.due_cny} orig={p.settle.due} cur={p.currency} />
-                    </TableCell>
-                    <TableCell className="text-income text-right">
-                      <Amt cny={p.settle.paid_cny} orig={p.settle.paid} cur={p.currency} />
-                    </TableCell>
-                    <TableCell className={cn("text-right", p.settle.open_cny > 0 && "text-warning")}>
-                      <Amt cny={p.settle.open_cny} orig={p.settle.open} cur={p.currency} />
-                    </TableCell>
+                    {p.project_type === "short" ? (
+                      <>
+                        <TableCell className="text-income text-right tabular-nums">
+                          {money(p.summary?.income.base ?? 0)}
+                        </TableCell>
+                        <TableCell className="text-expense text-right tabular-nums">
+                          {money(p.summary?.expense.base ?? 0)}
+                        </TableCell>
+                        <TableCell
+                          className={cn(
+                            "text-right font-medium tabular-nums",
+                            (p.summary?.profit ?? 0) >= 0 ? "text-income" : "text-expense",
+                          )}
+                        >
+                          {money(p.summary?.profit ?? 0)}
+                        </TableCell>
+                      </>
+                    ) : (
+                      <>
+                        <TableCell className="text-right">
+                          <Amt cny={p.settle.due_cny} orig={p.settle.due} cur={p.currency} />
+                        </TableCell>
+                        <TableCell className="text-income text-right">
+                          <Amt cny={p.settle.paid_cny} orig={p.settle.paid} cur={p.currency} />
+                        </TableCell>
+                        <TableCell className={cn("text-right", p.settle.open_cny > 0 && "text-warning")}>
+                          <Amt cny={p.settle.open_cny} orig={p.settle.open} cur={p.currency} />
+                        </TableCell>
+                      </>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
