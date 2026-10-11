@@ -148,12 +148,14 @@ export type Party = {
   recharge?: {
     currency: Currency;
     payable: number;
+    balance?: number;
     settled: number;
     settled_base: number;
     from_entries: number;
     paid_out?: number;
     refunded?: number;
     entry_count: number;
+    diff?: number;
     unsettled: number;
   } | null;
 };

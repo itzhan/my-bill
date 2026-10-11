@@ -173,7 +173,7 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
     {
       label: "未结算",
       value: rc ? curf(Math.abs(rc.unsettled), rc.currency) : "-",
-      sub: "应付(消费) − 已结算(净充值)",
+      sub: "累计消费 − 已结算 + 实际余额，<0（我们多付）才显示",
       cls: rc && rc.unsettled > 0 ? "text-warning" : "",
     },
   ];

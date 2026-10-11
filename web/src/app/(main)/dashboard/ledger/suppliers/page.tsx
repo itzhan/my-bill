@@ -107,7 +107,7 @@ export default function SuppliersPage() {
     {
       label: "未结算合计",
       value: money(totalUnsettledCny),
-      sub: "应付(消费) − 已结算(充值)，折人民币",
+      sub: "累计消费 − 已结算 + 实际余额，<0 才计，折人民币",
       cls: totalUnsettledCny > 0 ? "text-warning" : "",
     },
     {

@@ -793,12 +793,14 @@ function partySettle(records, cur) {
 }
 // 供应商余额（new-api / sub2api 钱包额度 + 倍率），见 wallets.js；路由注册后才可用
 let partyWallets = null;
-// 供应商结算：应付 = 累计消费（折结算币种）；已结算 = 期初 + 记账时选了该供应商的充值支出；未结算 = 应付 − 已结算
+// 供应商结算：应付 = 累计消费（折结算币种）；已结算 = 期初 + 记账时选了该供应商的充值支出；
+// 未结算 = 累计消费 − 已结算 + 实际余额（预付还在钱包里的钱）：≥0 视为已结清显示 0，<0（我们多付）才显示差额
 function supplierSettlement(p) {
   const cur = p.currency || 'CNY';
   const rates = getRates();
   const w = partyWallets ? partyWallets.summaryOf(p.id) : null;
   const payable = w && w.used != null ? r2(usdToCur(w.used, cur, rates)) : 0;
+  const balance = w && w.actual != null ? r2(usdToCur(w.actual, cur, rates)) : 0; // 实际余额（折结算币种）
   const entries = q.entriesOfParty.all(p.id);
   const incomes = q.incomesOfParty.all(p.id);
   // 币种相同直接用原值，否则按记账汇率折人民币再折结算币种（口径同往来 partySettle）
@@ -813,7 +815,10 @@ function supplierSettlement(p) {
   const fromEntries = r2(paidOut - refunded);
   const base = r2(Number(p.settled_base) || 0);
   const settled = r2(base + fromEntries);
-  return { currency: cur, payable, settled, settled_base: base, from_entries: fromEntries, paid_out: paidOut, refunded, entry_count: entries.length + incomes.length, unsettled: r2(payable - settled) };
+  // 差额 = 累计消费 − 已结算 + 实际余额；≥0 说明账户里的价值够覆盖已结算，未结算记 0；<0 说明我们多付了，显示差额
+  const diff = r2(payable - settled + balance);
+  const unsettled = diff < 0 ? r2(-diff) : 0;
+  return { currency: cur, payable, balance, settled, settled_base: base, from_entries: fromEntries, paid_out: paidOut, refunded, entry_count: entries.length + incomes.length, diff, unsettled };
 }
 const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });

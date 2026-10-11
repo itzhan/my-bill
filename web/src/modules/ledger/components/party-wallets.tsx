@@ -411,7 +411,7 @@ export function PartyWallets({ party }: { party: Party }) {
           </div>
           <p className="text-muted-foreground text-xs">
             已结算 = 期初 {curf(r.settled_base, r.currency)} + 记账充值 {curf(r.from_entries, r.currency)}（
-            {r.entry_count} 笔）· 未结算 = 应付 − 已结算 · 期初可在「编辑」里改
+            {r.entry_count} 笔）· 未结算 = 累计消费 − 已结算 + 实际余额（&lt;0 才显示）· 期初可在「编辑」里改
           </p>
         </div>
       ) : null}
