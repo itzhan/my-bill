@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 
 import { useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
@@ -67,9 +66,14 @@ export default function ProfitPage() {
   });
 
   const today = todayStr();
-  // 今日各项目利润（有今天消耗的项目）
+  // 今日各项目利润（有今天消耗的项目）+ 今日各用户消耗
   const todayRows = (data?.projects ?? [])
-    .map((p) => ({ project_id: p.project_id, project_name: p.project_name, day: p.days.find((d) => d.date === today) }))
+    .map((p) => ({
+      project_id: p.project_id,
+      project_name: p.project_name,
+      day: p.days.find((d) => d.date === today),
+      customers: p.today_customers,
+    }))
     .filter((x) => x.day)
     .map((x) => ({ ...x, day: x.day! }))
     .sort((a, b) => b.day.profit - a.day.profit);
@@ -120,11 +124,7 @@ export default function ProfitPage() {
               {todayRows.length ? (
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {todayRows.map((x) => (
-                    <Link
-                      key={x.project_id}
-                      href={`/dashboard/ledger/projects/${x.project_id}`}
-                      className="bg-background hover:border-primary/40 flex flex-col gap-1 rounded-lg border p-3 transition-colors"
-                    >
+                    <div key={x.project_id} className="bg-background flex flex-col gap-2 rounded-lg border p-3">
                       <div className="truncate font-medium">{x.project_name}</div>
                       <div
                         className={cn(
@@ -137,7 +137,18 @@ export default function ProfitPage() {
                       <div className="text-muted-foreground text-xs tabular-nums">
                         客 {money(x.day.customer)} · 供 {money(x.day.supplier)}
                       </div>
-                    </Link>
+                      {x.customers.length ? (
+                        <div className="mt-1 space-y-1 border-t pt-2">
+                          <div className="text-muted-foreground text-xs">今日各用户消耗</div>
+                          {x.customers.map((c) => (
+                            <div key={c.name} className="flex items-center justify-between gap-2 text-xs">
+                              <span className="truncate">{c.name}</span>
+                              <span className="text-income shrink-0 tabular-nums">{money(c.cny)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                   ))}
                 </div>
               ) : (

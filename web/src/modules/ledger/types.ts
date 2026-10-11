@@ -264,6 +264,7 @@ export type ProfitProject = {
   customer: number;
   supplier: number;
   profit: number;
+  today_customers: { name: string; cny: number }[];
 };
 export type ProfitDaily = {
   projects: ProfitProject[];

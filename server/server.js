@@ -2960,16 +2960,35 @@ app.get('/api/members/:id/detail', auth, (req, res) => {
 app.get('/api/profit/daily', auth, async (req, res) => {
   const rates = getRates();
   const projName = new Map(q.projects.all().map((p) => [p.id, p.name]));
-  // 客户每日消耗（应收，中转站自动按天挂账，折人民币）：key = projectId|date
+  const errors = [];
+  // 客户每日消耗（中转站实时，每用户完整历史：cost_usd × 折扣 → 人民币）。从用户最早使用日算起，不受我们绑定日期限制
   const cust = new Map();
-  for (const r of q.allRecords.all()) {
-    if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
-    const k = `${r.project_id}|${r.date}`;
-    cust.set(k, r2((cust.get(k) || 0) + recBase(r)));
+  const todayCust = new Map(); // projectId -> [{name, cny}]：今日各用户消耗
+  const todayS = todayKey();
+  if (relayConfigured()) {
+    for (const c of db.prepare("SELECT * FROM parties WHERE kind = 'customer' AND relay_id IS NOT NULL AND archived = 0").all()) {
+      const ratio = Number(c.ratio) > 0 ? Number(c.ratio) : 1;
+      let series = [];
+      try {
+        const d = await relayGet('/admin/dashboard/trend', { granularity: 'day', days: 400, user_id: c.relay_id });
+        series = daySeries(d.trend);
+      } catch (e) { errors.push(`客户 ${c.name}：${(e.message || '消耗拉取失败').slice(0, 40)}`); continue; }
+      let todayCny = 0;
+      for (const x of series) {
+        const cny = r2(usdToCur(x.cost_usd * ratio, 'CNY', rates));
+        if (cny === 0) continue;
+        const k = `${c.project_id}|${x.date}`;
+        cust.set(k, r2((cust.get(k) || 0) + cny));
+        if (x.date === todayS) todayCny = cny;
+      }
+      if (todayCny > 0) {
+        if (!todayCust.has(c.project_id)) todayCust.set(c.project_id, []);
+        todayCust.get(c.project_id).push({ name: c.name, cny: todayCny });
+      }
+    }
   }
   // 供应商每日消耗（实际消费 = 站点每日消耗 × 消耗倍率，折人民币）：钱包 detail 的 daily，按 项目+站点 去重
   const sup = new Map();
-  const errors = [];
   const walletRows = db.prepare("SELECT w.id, w.base_url, p.project_id FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'").all();
   const seen = new Set();
   for (const w of walletRows) {
@@ -2996,7 +3015,7 @@ app.get('/api/profit/daily', auth, async (req, res) => {
     pe.days.push({ date, customer: r2(c), supplier: r2(s), profit: r2(c - s) });
     pe.customer = r2(pe.customer + c); pe.supplier = r2(pe.supplier + s); pe.profit = r2(pe.profit + (c - s));
   }
-  const projects = [...byProject.values()].map((pe) => ({ ...pe, days: pe.days.sort((a, b) => (a.date < b.date ? 1 : -1)) })).sort((a, b) => b.profit - a.profit);
+  const projects = [...byProject.values()].map((pe) => ({ ...pe, days: pe.days.sort((a, b) => (a.date < b.date ? 1 : -1)), today_customers: (todayCust.get(pe.project_id) || []).sort((a, b) => b.cny - a.cny) })).sort((a, b) => b.profit - a.profit);
   const byDate = new Map();
   for (const pe of projects) for (const d of pe.days) {
     const e = byDate.get(d.date) || { date: d.date, customer: 0, supplier: 0, profit: 0 };
