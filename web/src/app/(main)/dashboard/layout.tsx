@@ -52,6 +52,8 @@ export default async function Layout({ children }: Readonly<{ children: ReactNod
           <SidebarInset
             data-content-layout={contentLayout}
             className={cn(
+              // min-w-0：允许内容区在 flex 布局里收缩，宽表格在自身容器内横向滚动而不撑破整页
+              "min-w-0",
               // Adds right margin for inset sidebar up to certain breakpoints
               "max-[113rem]:peer-data-[variant=inset]:!mr-2 min-[101rem]:peer-data-[variant=inset]:peer-data-[state=collapsed]:!mr-auto",
             )}
@@ -77,7 +79,7 @@ export default async function Layout({ children }: Readonly<{ children: ReactNod
               </div>
             </header>
             <TabBar />
-            <div className="h-full p-4 md:p-6">{children}</div>
+            <div className="h-full min-w-0 p-4 md:p-6">{children}</div>
           </SidebarInset>
         </SidebarProvider>
         <AssistantFab />

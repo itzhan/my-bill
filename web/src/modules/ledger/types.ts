@@ -213,23 +213,11 @@ export type FundEntry = {
   handler: string;
   handler_id: number;
 };
-// 成员经手的流水（跨项目）
-export type MemberEntry = {
-  id: number;
-  time: string;
-  type: EntryType;
-  amount: number;
-  currency: Currency;
-  cny: number;
-  project_id: number;
-  project_name: string;
-  party_name: string;
-  note: string;
-};
+// 成员详情：资金汇总 + 经手的完整流水（跨项目）+ 转账
 export type MemberDetail = {
   member: { id: number; name: string };
   fund: FundMember;
-  entries: MemberEntry[];
+  entries: Entry[];
   transfers: Transfer[];
   rates: Rates;
 };

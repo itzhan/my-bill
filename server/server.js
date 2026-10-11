@@ -2948,7 +2948,8 @@ app.get('/api/members/:id/detail', auth, (req, res) => {
   if (!m) return fail(res, 404, '成员不存在');
   const rates = getRates();
   const rows = q.entriesByHandler.all(m.id);
-  const entries = rows.map((e) => ({ id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, cny: r2(entryBase(e, rates)), project_id: e.project_id, project_name: e.project_name, party_name: e.party_name || '', note: e.note }));
+  // 完整 Entry（含 created_by / images 等），方便前端查看并由登记人本人修改
+  const entries = rows.map((e) => ({ ...e, base: r2(entryBase(e, rates)), images: entryImages(e) }));
   // 资金汇总（总收 income / 总付 expense / 转入 in / 转出 out / 沉淀 balance）取自全局成员资金
   const funds = memberFunds(null, { includeZero: true });
   const fund = funds.members.find((x) => x.id === m.id) || { id: m.id, name: m.username, income: 0, expense: 0, in: 0, out: 0, balance: 0, entry_count: 0, transfer_count: 0, cur: null, last_at: null };

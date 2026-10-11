@@ -1,6 +1,6 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
 
 import Link from "next/link";
 
@@ -14,12 +14,20 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
+import { EntryDetailDialog } from "@/modules/ledger/components/entry-detail";
 import { MemberAvatar, Pager, usePaged } from "@/modules/ledger/components/shared";
-import { CUR, curf, fmt, money, signed } from "@/modules/ledger/format";
-import type { MemberDetail, MemberEntry } from "@/modules/ledger/types";
+import { CUR, curf, fmt, fmtTime, money, signed } from "@/modules/ledger/format";
+import { useMe } from "@/modules/ledger/hooks";
+import { useLedger } from "@/modules/ledger/provider";
+import type { Entry, MemberDetail } from "@/modules/ledger/types";
 
-function EntriesTab({ entries }: { entries: MemberEntry[] }) {
+function EntriesTab({ entries }: { entries: Entry[] }) {
   const { rows, pager } = usePaged(entries, "m-entries");
+  const { data: me } = useMe();
+  const { openEntry } = useLedger();
+  const [viewing, setViewing] = useState<Entry | null>(null);
+  // 登记人本人（created_by）可以修改
+  const canEdit = !!viewing && !!me && viewing.created_by === me.user.id;
   return (
     <div className="space-y-4">
       <div className="overflow-x-auto rounded-md border">
@@ -36,8 +44,15 @@ function EntriesTab({ entries }: { entries: MemberEntry[] }) {
           <TableBody>
             {entries.length ? (
               rows.map((e) => (
-                <TableRow key={e.id}>
-                  <TableCell className="text-muted-foreground text-xs whitespace-nowrap">{e.time}</TableCell>
+                <TableRow
+                  key={e.id}
+                  className="cursor-pointer"
+                  onClick={() => setViewing(e)}
+                  title="点击查看详情"
+                >
+                  <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
+                    {fmtTime(e.created_at)}
+                  </TableCell>
                   <TableCell>
                     <Badge
                       variant="outline"
@@ -57,6 +72,7 @@ function EntriesTab({ entries }: { entries: MemberEntry[] }) {
                   <TableCell>
                     <Link
                       href={`/dashboard/ledger/projects/${e.project_id}`}
+                      onClick={(ev) => ev.stopPropagation()}
                       className="text-primary text-xs hover:underline"
                     >
                       {e.project_name}
@@ -83,6 +99,15 @@ function EntriesTab({ entries }: { entries: MemberEntry[] }) {
         </Table>
       </div>
       <Pager {...pager} />
+      <EntryDetailDialog
+        entry={viewing}
+        canEdit={canEdit}
+        onOpenChange={(o) => !o && setViewing(null)}
+        onEdit={(e) => {
+          setViewing(null);
+          openEntry({ entry: e });
+        }}
+      />
     </div>
   );
 }
