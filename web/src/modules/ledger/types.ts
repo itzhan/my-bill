@@ -16,6 +16,16 @@ export type AiInfo = {
 };
 
 export type AutoExport = { enabled: boolean; time: string; scope: string; range: string };
+export type EmailReport = {
+  enabled: boolean;
+  base_url: string;
+  email: string;
+  account_id: number;
+  sender_name: string;
+  recipients: string[];
+  time: string;
+  has_password: boolean;
+};
 
 export type Me = {
   user: Member;
@@ -23,6 +33,7 @@ export type Me = {
   rates: Rates;
   ai: AiInfo;
   auto_export: AutoExport;
+  email_report: EmailReport;
   tz: string;
   integration_token: string;
 };

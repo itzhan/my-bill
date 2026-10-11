@@ -5,7 +5,7 @@ import { Suspense, useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Copy, LogOut, RotateCcw } from "lucide-react";
+import { Copy, LogOut, Plus, RotateCcw, Send, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -17,14 +17,21 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 import { post, put } from "@/modules/ledger/api";
 import { FormError, MemberAvatar, PageHeader, ResponsiveDialog, useConfirm } from "@/modules/ledger/components/shared";
 import { RANGES, maskPhone } from "@/modules/ledger/format";
 import { qk, useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
-import type { AiInfo, AutoExport, Rates } from "@/modules/ledger/types";
+import type { AiInfo, AutoExport, EmailReport, Rates } from "@/modules/ledger/types";
 
-type SettingsResp = { rates: Rates; ai: AiInfo; auto_export: AutoExport; integration_token: string };
+type SettingsResp = {
+  rates: Rates;
+  ai: AiInfo;
+  auto_export: AutoExport;
+  email_report?: EmailReport;
+  integration_token: string;
+};
 
 function useSaveSettings() {
   const qc = useQueryClient();
@@ -267,6 +274,170 @@ function AiTab() {
   );
 }
 
+function EmailTab() {
+  const { me } = useLedger();
+  const save = useSaveSettings();
+  const [cfg, setCfg] = useState<EmailReport>(me.email_report);
+  const [password, setPassword] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  useEffect(() => setCfg(me.email_report), [me.email_report]);
+
+  const addRecipient = () => {
+    const e = newEmail.trim();
+    if (!e) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return setError("收件邮箱格式不对");
+    if (cfg.recipients.includes(e)) return setNewEmail("");
+    setCfg({ ...cfg, recipients: [...cfg.recipients, e] });
+    setNewEmail("");
+    setError(null);
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const body: Record<string, unknown> = {
+        enabled: cfg.enabled,
+        base_url: cfg.base_url,
+        email: cfg.email,
+        account_id: cfg.account_id,
+        sender_name: cfg.sender_name,
+        recipients: cfg.recipients,
+        time: cfg.time,
+      };
+      if (password.trim()) body.password = password.trim();
+      const d = await save({ email_report: body });
+      setPassword("");
+      toast.success(d.email_report?.enabled ? `每天 ${d.email_report.time} 发送给 ${d.email_report.recipients.length} 人` : "已保存");
+    } catch (ex) {
+      setError((ex as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendNow = async () => {
+    setSending(true);
+    try {
+      const r = await post<{ recipients: string[] }>("/profit/email/send");
+      toast.success(`已发送给 ${r.recipients.join("、")}`);
+    } catch (ex) {
+      toast.error((ex as Error).message);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <Card className="max-w-xl">
+      <CardHeader>
+        <CardTitle>每日利润邮件</CardTitle>
+        <CardDescription>到点自动把今日利润（分项目、各用户、近 7 天趋势）发到团队邮箱。用 SkyMail 发信。</CardDescription>
+      </CardHeader>
+      <form onSubmit={submit}>
+        <CardContent className="space-y-5">
+          <label className="flex items-center gap-3 text-sm">
+            <Switch checked={cfg.enabled} onCheckedChange={(v) => setCfg({ ...cfg, enabled: v })} />
+            开启每日定时发送
+          </label>
+
+          <div className="space-y-3 rounded-lg border p-4">
+            <div className="text-sm font-medium">发件配置</div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>发件邮箱</Label>
+                <Input value={cfg.email} onChange={(e) => setCfg({ ...cfg, email: e.target.value })} placeholder="info@visionlabs.cc" />
+              </div>
+              <div className="space-y-2">
+                <Label>密码{cfg.has_password ? "（已设置，留空不改）" : ""}</Label>
+                <Input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={cfg.has_password ? "••••••" : "邮箱登录密码"} />
+              </div>
+              <div className="space-y-2">
+                <Label>发件人名称</Label>
+                <Input value={cfg.sender_name} onChange={(e) => setCfg({ ...cfg, sender_name: e.target.value })} placeholder="元启智能账单" />
+              </div>
+              <div className="space-y-2">
+                <Label>邮箱 accountId</Label>
+                <Input inputMode="numeric" value={String(cfg.account_id)} onChange={(e) => setCfg({ ...cfg, account_id: Number(e.target.value) || 1 })} />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>API 地址</Label>
+              <Input value={cfg.base_url} onChange={(e) => setCfg({ ...cfg, base_url: e.target.value })} placeholder="https://mail.visionlabs.cc/api" />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label>收件邮箱（可多个）</Label>
+            <div className="flex gap-2">
+              <Input
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addRecipient();
+                  }
+                }}
+                placeholder="输入邮箱后回车或点添加"
+              />
+              <Button type="button" variant="outline" onClick={addRecipient}>
+                <Plus />
+                添加
+              </Button>
+            </div>
+            {cfg.recipients.length ? (
+              <div className="flex flex-wrap gap-2 pt-1">
+                {cfg.recipients.map((r) => (
+                  <Badge key={r} variant="secondary" className="gap-1 py-1 font-normal">
+                    {r}
+                    <button
+                      type="button"
+                      onClick={() => setCfg({ ...cfg, recipients: cfg.recipients.filter((x) => x !== r) })}
+                      className="hover:text-destructive"
+                      aria-label="移除"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            ) : (
+              <p className="text-muted-foreground text-xs">还没有收件邮箱</p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="er-time">发送时间（每天，{me.tz || "Asia/Shanghai"}）</Label>
+            <Input
+              id="er-time"
+              type="time"
+              className="w-40"
+              value={cfg.time}
+              onChange={(e) => setCfg({ ...cfg, time: e.target.value })}
+            />
+          </div>
+
+          {error ? <FormError>{error}</FormError> : null}
+        </CardContent>
+        <CardFooter className="gap-2">
+          <Button type="submit" disabled={busy}>
+            {busy ? "保存中…" : "保存"}
+          </Button>
+          <Button type="button" variant="outline" onClick={sendNow} disabled={sending || !cfg.recipients.length || !cfg.email}>
+            <Send className={cn(sending && "animate-pulse")} />
+            {sending ? "发送中…" : "立即发送今日"}
+          </Button>
+        </CardFooter>
+      </form>
+    </Card>
+  );
+}
+
 function ExportTab() {
   const { me } = useLedger();
   const { data: pd } = useProjects();
@@ -436,6 +607,7 @@ function SettingsInner() {
           <TabsTrigger value="rates">汇率</TabsTrigger>
           <TabsTrigger value="ai">AI</TabsTrigger>
           <TabsTrigger value="export">自动导出</TabsTrigger>
+          <TabsTrigger value="email">邮件推送</TabsTrigger>
           <TabsTrigger value="integration">对外接口</TabsTrigger>
         </TabsList>
         <TabsContent value="account">
@@ -449,6 +621,9 @@ function SettingsInner() {
         </TabsContent>
         <TabsContent value="export">
           <ExportTab />
+        </TabsContent>
+        <TabsContent value="email">
+          <EmailTab />
         </TabsContent>
         <TabsContent value="integration">
           <IntegrationTab />

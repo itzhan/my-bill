@@ -381,7 +381,7 @@ function summarize(entries, rates) {
   return s;
 }
 function bootstrap(uid) {
-  return { user: q.userById.get(uid), members: q.members.all(), rates: getRates(), ai: aiInfo(), auto_export: getAutoExport(), tz: TZ, knowledge: kbInfo(), integration_token: integrationToken() };
+  return { user: q.userById.get(uid), members: q.members.all(), rates: getRates(), ai: aiInfo(), auto_export: getAutoExport(), email_report: emailReportView(), tz: TZ, knowledge: kbInfo(), integration_token: integrationToken() };
 }
 
 const attempts = new Map();
@@ -759,8 +759,30 @@ const ops = {
       broadcast('settings', { auto_export: cfg });
       changes.push(`每日自动导出：${cfg.enabled ? `每天 ${cfg.time}` : '关'}`);
     }
+    if (body.email_report !== undefined) {
+      const cur = getEmailReport(), a = body.email_report || {};
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      let recipients = a.recipients === undefined ? cur.recipients : (Array.isArray(a.recipients) ? a.recipients : []);
+      recipients = [...new Set(recipients.map((x) => String(x).trim()).filter(Boolean))];
+      for (const r of recipients) if (!emailRe.test(r)) throw new HttpError(400, `收件邮箱格式不对：${r}`);
+      const cfg = {
+        enabled: a.enabled === undefined ? cur.enabled : !!a.enabled,
+        base_url: a.base_url === undefined ? cur.base_url : String(a.base_url).trim() || EMAIL_DEFAULT.base_url,
+        email: a.email === undefined ? cur.email : String(a.email).trim(),
+        // 密码留空 = 保持原值；传了才更新
+        password: a.password ? String(a.password) : cur.password,
+        account_id: a.account_id === undefined ? cur.account_id : Number(a.account_id) || 1,
+        sender_name: a.sender_name === undefined ? cur.sender_name : String(a.sender_name).trim() || '元启智能账单',
+        recipients,
+        time: a.time === undefined ? cur.time : String(a.time),
+      };
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(cfg.time)) throw new HttpError(400, '发送时间格式为 HH:MM');
+      if (cfg.email && !emailRe.test(cfg.email)) throw new HttpError(400, '发件邮箱格式不对');
+      q.putSetting.run('email_report', JSON.stringify(cfg));
+      changes.push(`每日利润邮件：${cfg.enabled ? `每天 ${cfg.time} 发给 ${cfg.recipients.length} 人` : '关'}`);
+    }
     if (changes.length) dataChanged(user, `${via}更新了设置：${changes.join('；')}`);
-    return { rates: getRates(), ai: aiInfo(), auto_export: getAutoExport() };
+    return { rates: getRates(), ai: aiInfo(), auto_export: getAutoExport(), email_report: emailReportView() };
   },
 };
 
@@ -3033,6 +3055,87 @@ app.get('/api/profit/daily', auth, async (req, res) => {
   profitCache = { at: now(), data };
   res.json({ ...data, cached_at: profitCache.at });
 });
+
+// ---------- 每日利润邮件（SkyMail）----------
+const EMAIL_DEFAULT = { enabled: false, base_url: 'https://mail.visionlabs.cc/api', email: '', password: '', account_id: 1, sender_name: '元启智能账单', recipients: [], time: '09:00' };
+function getEmailReport() { let a = {}; try { a = JSON.parse(getSetting('email_report', '{}')); } catch {} return { ...EMAIL_DEFAULT, ...a }; }
+function emailReportView() { const c = getEmailReport(); return { enabled: !!c.enabled, base_url: c.base_url, email: c.email, account_id: c.account_id, sender_name: c.sender_name, recipients: Array.isArray(c.recipients) ? c.recipients : [], time: c.time, has_password: !!c.password }; }
+// 登录拿 token 再发信（token 会过期，每次登录最稳）
+async function skymailSend(cfg, { subject, html, text }) {
+  if (!cfg.email || !cfg.password) throw new HttpError(400, '还没配置发件邮箱和密码');
+  if (!cfg.recipients || !cfg.recipients.length) throw new HttpError(400, '还没配置收件邮箱');
+  const base = String(cfg.base_url || EMAIL_DEFAULT.base_url).replace(/\/+$/, '');
+  const lr = await fetch(`${base}/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: cfg.email, password: cfg.password }), signal: AbortSignal.timeout(15000) });
+  const lj = await lr.json().catch(() => null);
+  if (!lj || lj.code !== 200 || !lj.data || !lj.data.token) throw new HttpError(502, `邮箱登录失败：${(lj && lj.message) || 'HTTP ' + lr.status}`);
+  const sr = await fetch(`${base}/email/send`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: lj.data.token }, body: JSON.stringify({ accountId: Number(cfg.account_id) || 1, name: cfg.sender_name || '元启智能账单', receiveEmail: cfg.recipients, subject, content: html, text }), signal: AbortSignal.timeout(20000) });
+  const sj = await sr.json().catch(() => null);
+  if (!sj || sj.code !== 200) throw new HttpError(502, `发送失败：${(sj && sj.message) || 'HTTP ' + sr.status}`);
+  return sj;
+}
+const htmlEsc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmtY = (n) => '¥' + Number(n || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtY0 = (n) => (n < 0 ? '-' : '') + '¥' + Math.round(Math.abs(Number(n) || 0)).toLocaleString('zh-CN');
+// 现代简约风格邮件（内联样式，邮件客户端安全）
+function buildProfitEmail(d) {
+  const today = todayKey();
+  const dateLabel = today.replace(/-/g, ' / ');
+  const tp = d.projects.map((p) => ({ name: p.project_name, id: p.project_id, day: p.days.find((x) => x.date === today) })).filter((x) => x.day).sort((a, b) => b.day.profit - a.day.profit);
+  const tc = tp.reduce((a, x) => ({ c: a.c + x.day.customer, s: a.s + x.day.supplier, p: a.p + x.day.profit }), { c: 0, s: 0, p: 0 });
+  const margin = tc.c > 0 ? ((tc.p / tc.c) * 100).toFixed(1) : '0.0';
+  const recent = d.daily.slice(0, 7);
+  const maxP = Math.max(1, ...recent.map((x) => Math.abs(x.profit)));
+  const projBlocks = tp.map((x) => {
+    const users = (x.day.customers || []).map((c) => `<tr><td style="padding:9px 0;color:#4b5563;border-top:1px solid #f3f4f6;">${htmlEsc(c.name)}</td><td style="padding:9px 0;text-align:right;color:#111827;font-weight:500;border-top:1px solid #f3f4f6;">${fmtY(c.cny)}</td></tr>`).join('');
+    const pc = x.day.profit < 0 ? '#dc2626' : '#059669';
+    return `<tr><td style="padding:16px 38px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="vertical-align:baseline;"><span style="font-size:16px;font-weight:600;color:#111827;">${htmlEsc(x.name)}</span><span style="font-size:13px;color:#9ca3af;margin-left:10px;">客 ${fmtY0(x.day.customer)} · 供 ${fmtY0(x.day.supplier)}</span></td><td style="vertical-align:baseline;text-align:right;font-size:18px;font-weight:700;color:${pc};">${(x.day.profit < 0 ? '' : '+') + fmtY(x.day.profit)}</td></tr></table></td></tr>${users ? `<tr><td style="padding:14px 38px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size:13px;">${users}</table></td></tr>` : ''}`;
+  }).join('');
+  const recentRows = recent.map((x) => {
+    const w = Math.max(3, Math.round((Math.abs(x.profit) / maxP) * 100));
+    const bar = x.profit < 0 ? '#fca5a5' : '#34d399';
+    return `<tr><td style="padding:7px 0;width:54px;color:#9ca3af;">${x.date.slice(5)}</td><td style="padding:7px 10px;"><div style="height:6px;width:${w}%;background:${bar};border-radius:3px;"></div></td><td style="padding:7px 0;width:84px;text-align:right;color:#374151;font-weight:500;">${fmtY0(x.profit)}</td></tr>`;
+  }).join('');
+  const pColor = tc.p < 0 ? '#dc2626' : '#059669';
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Roboto,Helvetica,Arial,sans-serif;">
+<div style="width:100%;padding:32px 16px;box-sizing:border-box;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="width:560px;max-width:100%;margin:0 auto;background:#ffffff;border:1px solid #edeff2;border-radius:18px;">
+<tr><td style="padding:34px 38px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td><span style="display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;vertical-align:middle;margin-right:9px;"></span><span style="font-size:14px;font-weight:600;color:#111827;vertical-align:middle;">元启智能账单</span></td><td style="text-align:right;color:#9ca3af;font-size:13px;">${dateLabel}</td></tr></table></td></tr>
+<tr><td style="padding:30px 38px 30px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">今日利润</div><div style="color:${pColor};font-size:48px;font-weight:700;line-height:1.05;margin:10px 0 0;letter-spacing:-1px;">${(tc.p < 0 ? '' : '+') + fmtY(tc.p)}</div></td></tr>
+<tr><td style="padding:0 38px 32px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #edeff2;border-bottom:1px solid #edeff2;"><tr><td style="padding:18px 0;vertical-align:top;"><div style="font-size:11px;color:#9ca3af;">客户消耗</div><div style="font-size:19px;font-weight:600;color:#111827;margin-top:6px;">${fmtY0(tc.c)}</div></td><td style="width:1px;background:#edeff2;"></td><td style="padding:18px 0 18px 22px;vertical-align:top;"><div style="font-size:11px;color:#9ca3af;">供应商消耗</div><div style="font-size:19px;font-weight:600;color:#111827;margin-top:6px;">${fmtY0(tc.s)}</div></td><td style="width:1px;background:#edeff2;"></td><td style="padding:18px 0 18px 22px;vertical-align:top;"><div style="font-size:11px;color:#9ca3af;">利润率</div><div style="font-size:19px;font-weight:600;color:${pColor};margin-top:6px;">${margin}%</div></td></tr></table></td></tr>
+<tr><td style="padding:0 38px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">分项目</div></td></tr>
+${projBlocks || '<tr><td style="padding:16px 38px 0;color:#9ca3af;font-size:13px;">今天还没有有消耗的项目</td></tr>'}
+<tr><td style="padding:34px 38px 0;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">近 7 天利润</div></td></tr>
+<tr><td style="padding:16px 38px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size:13px;">${recentRows}</table></td></tr>
+<tr><td style="padding:36px 38px 34px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #edeff2;"><tr><td style="padding-top:22px;"><div style="font-size:12px;color:#b6bcc6;line-height:1.7;">利润 = 客户消耗（中转站消耗 × 折扣，折人民币）− 供应商消耗（钱包实际消费）<br>由「元启智能账单」每日 ${getEmailReport().time} 自动发送 · 内部数据，请勿外传</div></td></tr></table></td></tr>
+</table></div></body></html>`;
+  const text = `每日利润 ${today}\n今日利润 ${fmtY(tc.p)}（客户消耗 ${fmtY(tc.c)} − 供应商消耗 ${fmtY(tc.s)}，利润率 ${margin}%）\n` + tp.map((x) => `· ${x.name}：利润 ${fmtY(x.day.profit)}（客 ${fmtY(x.day.customer)} 供 ${fmtY(x.day.supplier)}）`).join('\n');
+  return { subject: `每日利润 ${today} · ${fmtY0(tc.p)}`, html, text };
+}
+async function sendProfitEmailNow() {
+  const cfg = getEmailReport();
+  const data = await computeProfitDaily();
+  profitCache = { at: now(), data };
+  const mail = buildProfitEmail(data);
+  await skymailSend(cfg, mail);
+  return { recipients: cfg.recipients, subject: mail.subject };
+}
+// 立即发送（测试 / 手动推送）
+app.post('/api/profit/email/send', auth, async (req, res) => {
+  const out = await sendProfitEmailNow();
+  dataChanged(req.user, `手动推送了每日利润邮件到 ${out.recipients.join('、')}`);
+  res.json({ ok: true, ...out });
+});
+// 每日定时发送
+async function checkEmailReport() {
+  const cfg = getEmailReport();
+  if (!cfg.enabled || !cfg.recipients.length) return;
+  const t = inTZ();
+  if (t.time !== cfg.time || getSetting('email_report_last', '') === t.date) return;
+  q.putSetting.run('email_report_last', t.date);
+  try { await sendProfitEmailNow(); console.log(`[email] 每日利润邮件已发送 ${t.date} ${t.time}`); }
+  catch (e) { console.error('[email] 每日利润邮件发送失败：', e.message); }
+}
+setInterval(checkEmailReport, 60 * 1000).unref();
 app.delete('/api/party-records/:id', auth, (req, res) => { ops.deletePartyRecord(req.user, req.params.id); res.json({ ok: true }); });
 
 // ---- 对外接口（外部系统实时同步应收 / 应付），用 X-API-Key 鉴权
