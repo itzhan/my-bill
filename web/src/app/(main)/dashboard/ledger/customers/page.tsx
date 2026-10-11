@@ -26,33 +26,28 @@ import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
 import { amt } from "@/modules/ledger/components/party-wallets";
 import { PageHeader, Pager, usePaged } from "@/modules/ledger/components/shared";
-import { money, relTime, usdf } from "@/modules/ledger/format";
+import { money, usdf } from "@/modules/ledger/format";
 import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { CustomerGroup, CustomersResponse } from "@/modules/ledger/types";
-
-// 折扣：中转消耗 × 折扣 = 应收，可能多个项目档位不同
-const ratioText = (rs: number[]) => (rs.length ? rs.map((r) => `×${r}`).join(" / ") : "—");
 
 function CustomerTable({
   title,
   description,
   customers,
   withBalance,
-  fetchedAt,
   resetKey,
 }: {
   title: string;
   description: string;
   customers: CustomerGroup[];
   withBalance: boolean;
-  fetchedAt: string;
   resetKey: string;
 }) {
   const router = useRouter();
   const { rows, pager } = usePaged(customers, resetKey);
   const open = (c: CustomerGroup) => router.push(`/dashboard/ledger/customers/${c.detail_party_id}`);
-  const cols = withBalance ? 7 : 5;
+  const cols = withBalance ? 5 : 4;
   return (
     <Card>
       <CardHeader>
@@ -65,12 +60,10 @@ function CustomerTable({
             <TableHeader>
               <TableRow>
                 <TableHead>客户</TableHead>
-                <TableHead>折扣</TableHead>
                 {withBalance ? <TableHead className="text-right">实际余额</TableHead> : null}
                 <TableHead className="text-right">累计消费</TableHead>
                 <TableHead className="text-right">已结算</TableHead>
                 <TableHead className="text-right">未结算</TableHead>
-                {withBalance ? <TableHead>最近抓取</TableHead> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -94,7 +87,6 @@ function CustomerTable({
                         {c.project_count} 个项目：{c.parties.map((p) => p.project_name).join("、")}
                       </div>
                     </TableCell>
-                    <TableCell className="whitespace-nowrap tabular-nums">{ratioText(c.ratios)}</TableCell>
                     {withBalance ? (
                       <TableCell className="text-right tabular-nums">
                         {c.settle_type === "credit" ? (
@@ -116,11 +108,6 @@ function CustomerTable({
                     >
                       {(c.open_cny < 0 ? "−" : "") + money(Math.abs(c.open_cny))}
                     </TableCell>
-                    {withBalance ? (
-                      <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
-                        {c.has_relay ? relTime(fetchedAt) : "-"}
-                      </TableCell>
-                    ) : null}
                   </TableRow>
                 ))
               ) : (
@@ -265,7 +252,6 @@ export default function CustomersPage() {
             description="有中转项目的客户，自动跟踪中转站余额、消费与应收（折扣 = 中转消耗 × 折扣）"
             customers={relay}
             withBalance
-            fetchedAt={data.fetched_at}
             resetKey={`relay|${q}|${showArchived}`}
           />
           <CustomerTable
@@ -273,7 +259,6 @@ export default function CustomersPage() {
             description="只有项目制项目的客户，按实际记账跟踪应收 / 已结算"
             customers={project}
             withBalance={false}
-            fetchedAt={data.fetched_at}
             resetKey={`proj|${q}|${showArchived}`}
           />
         </>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import Link from "next/link";
 
@@ -80,7 +80,7 @@ const columns: ColumnDef<Row>[] = [
     header: ({ column }) => <DataTableColumnHeader column={column} title="预估利润" />,
     cell: ({ row }) => (
       <span
-        className={cn("tabular-nums font-semibold", (row.original.est_profit ?? 0) < 0 && "text-expense")}
+        className={cn("font-semibold tabular-nums", (row.original.est_profit ?? 0) < 0 && "text-expense")}
         title={`当前利润 ${signed(row.original.profit)} + 客户应打款 ${money(row.original.customer_open_cny ?? 0)}`}
       >
         {signed(row.original.est_profit ?? row.original.profit)}
@@ -111,6 +111,10 @@ export default function ProjectsPage() {
 
   const table = useDataTableInstance({ data: rows, columns, enableRowSelection: false });
   const archivedCount = data?.projects.filter((p) => p.archived).length ?? 0;
+  // 切换「进行中 / 已归档 / 全部」时回到第一页，避免停在筛选后已不存在的分页显示空白
+  useEffect(() => {
+    table.setPageIndex(0);
+  }, [status, table]);
 
   return (
     <div className="flex flex-col gap-6">
