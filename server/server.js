@@ -2961,32 +2961,23 @@ app.get('/api/profit/daily', auth, async (req, res) => {
   const rates = getRates();
   const projName = new Map(q.projects.all().map((p) => [p.id, p.name]));
   const errors = [];
-  // 客户每日消耗（中转站实时，每用户完整历史：cost_usd × 折扣 → 人民币）。从用户最早使用日算起，不受我们绑定日期限制
+  // 客户每日消耗：用中转站自动挂账记录（每 30 分钟同步、按天按用户，稳定可靠）。key = projectId|date
   const cust = new Map();
-  const todayCust = new Map(); // projectId -> [{name, cny}]：今日各用户消耗
+  const todayMap = new Map(); // projectId -> Map(用户名 -> 今日 cny)
   const todayS = todayKey();
-  if (relayConfigured()) {
-    for (const c of db.prepare("SELECT * FROM parties WHERE kind = 'customer' AND relay_id IS NOT NULL AND archived = 0").all()) {
-      const ratio = Number(c.ratio) > 0 ? Number(c.ratio) : 1;
-      let series = [];
-      try {
-        const d = await relayGet('/admin/dashboard/trend', { granularity: 'day', days: 400, user_id: c.relay_id });
-        series = daySeries(d.trend);
-      } catch (e) { errors.push(`客户 ${c.name}：${(e.message || '消耗拉取失败').slice(0, 40)}`); continue; }
-      let todayCny = 0;
-      for (const x of series) {
-        const cny = r2(usdToCur(x.cost_usd * ratio, 'CNY', rates));
-        if (cny === 0) continue;
-        const k = `${c.project_id}|${x.date}`;
-        cust.set(k, r2((cust.get(k) || 0) + cny));
-        if (x.date === todayS) todayCny = cny;
-      }
-      if (todayCny > 0) {
-        if (!todayCust.has(c.project_id)) todayCust.set(c.project_id, []);
-        todayCust.get(c.project_id).push({ name: c.name, cny: todayCny });
-      }
+  for (const r of q.allRecords.all()) {
+    if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
+    const cny = recBase(r);
+    const k = `${r.project_id}|${r.date}`;
+    cust.set(k, r2((cust.get(k) || 0) + cny));
+    if (r.date === todayS && cny > 0) {
+      if (!todayMap.has(r.project_id)) todayMap.set(r.project_id, new Map());
+      const m = todayMap.get(r.project_id);
+      m.set(r.party_name, r2((m.get(r.party_name) || 0) + cny));
     }
   }
+  const todayCust = new Map();
+  for (const [pid, m] of todayMap) todayCust.set(pid, [...m.entries()].map(([name, cny]) => ({ name, cny })));
   // 供应商每日消耗（实际消费 = 站点每日消耗 × 消耗倍率，折人民币）：钱包 detail 的 daily，按 项目+站点 去重
   const sup = new Map();
   const walletRows = db.prepare("SELECT w.id, w.base_url, p.project_id FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'").all();
