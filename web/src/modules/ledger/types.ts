@@ -77,6 +77,7 @@ export type Project = {
   created_at: string;
   creator_name: string;
   ptype?: "relay" | "short";
+  category?: "customer" | "company";
 };
 export type ProjectWithSummary = Project & {
   summary: Summary;

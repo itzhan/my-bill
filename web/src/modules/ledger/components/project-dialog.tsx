@@ -37,6 +37,7 @@ export function ProjectDialog({
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [ptype, setPtype] = useState<"relay" | "short">("relay");
+  const [category, setCategory] = useState<"customer" | "company">("customer");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -45,6 +46,7 @@ export function ProjectDialog({
     setName(project?.name ?? "");
     setNote(project?.note ?? "");
     setPtype(project?.ptype === "short" ? "short" : "relay");
+    setCategory(project?.category === "company" ? "company" : "customer");
     setError(null);
   }, [open, project]);
 
@@ -55,12 +57,17 @@ export function ProjectDialog({
     setError(null);
     try {
       if (project) {
-        await patch(`/projects/${project.id}`, { name: name.trim(), note: note.trim(), ptype });
+        await patch(`/projects/${project.id}`, { name: name.trim(), note: note.trim(), ptype, category });
         toast.success("项目已更新");
         onOpenChange(false);
         refresh();
       } else {
-        const d = await post<{ project: Project }>("/projects", { name: name.trim(), note: note.trim(), ptype });
+        const d = await post<{ project: Project }>("/projects", {
+          name: name.trim(),
+          note: note.trim(),
+          ptype,
+          category,
+        });
         toast.success(`项目「${d.project.name}」已创建`);
         onOpenChange(false);
         refresh();
@@ -130,6 +137,28 @@ export function ProjectDialog({
           <div className="space-y-2">
             <Label htmlFor="project-name">项目名称</Label>
             <Input id="project-name" autoFocus maxLength={60} value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="space-y-2">
+            <Label>项目类别</Label>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              value={category}
+              onValueChange={(v) => v && setCategory(v as "customer" | "company")}
+              className="w-full"
+            >
+              <ToggleGroupItem value="customer" className="flex-1 data-[state=on]:font-semibold">
+                客户
+              </ToggleGroupItem>
+              <ToggleGroupItem value="company" className="flex-1 data-[state=on]:font-semibold">
+                公司日常
+              </ToggleGroupItem>
+            </ToggleGroup>
+            <p className="text-muted-foreground text-xs">
+              {category === "company"
+                ? "公司日常：公司内部开销，可上传合同供团队查看"
+                : "客户：对外客户项目，按客户维度结算"}
+            </p>
           </div>
           <div className="space-y-2">
             <Label>项目类型</Label>

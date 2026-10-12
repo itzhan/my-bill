@@ -37,6 +37,7 @@ const columns: ColumnDef<Row>[] = [
         className="flex items-center gap-2 font-medium hover:underline"
       >
         <span className="max-w-72 truncate">{row.original.name}</span>
+        {row.original.category === "company" ? <Badge variant="secondary">公司日常</Badge> : null}
         {row.original.archived ? <Badge variant="outline">已归档</Badge> : null}
       </Link>
     ),

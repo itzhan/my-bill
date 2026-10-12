@@ -5,6 +5,7 @@ import { use, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowLeftRight, ChartColumn, MessagesSquare, Pencil, Plus } from "lucide-react";
 import { toast } from "sonner";
 
@@ -12,21 +13,32 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { post } from "@/modules/ledger/api";
+import { get, post } from "@/modules/ledger/api";
 import { EntriesTable } from "@/modules/ledger/components/entries-table";
+import { FilesCard } from "@/modules/ledger/components/files-panel";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
 import { PartiesSection } from "@/modules/ledger/components/parties-section";
 import { KpiCards, PageHeader } from "@/modules/ledger/components/shared";
 import { useProject } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
+import type { PartyContract } from "@/modules/ledger/types";
 import { useTabTitle } from "@/stores/tabs/tab-store-provider";
 
 export default function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const id = Number(use(params).id);
   const router = useRouter();
   const { openEntry, openProject, openTransfer, openChat } = useLedger();
+  const qc = useQueryClient();
   const { data, error } = useProject(id);
   useTabTitle(data?.project.name);
+  // 公司日常项目：加载合同 / 发票
+  const isCompany = data?.project.category === "company";
+  const { data: filesData } = useQuery({
+    queryKey: ["ledger", "project-files", id],
+    queryFn: () => get<{ files: PartyContract[] }>(`/projects/${id}/files`),
+    enabled: isCompany,
+  });
+  const reloadFiles = () => qc.invalidateQueries({ queryKey: ["ledger", "project-files", id] });
 
   useEffect(() => {
     if (error) {
@@ -77,6 +89,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         title={
           <span className="flex items-center gap-2">
             {p.name}
+            {p.category === "company" ? <Badge variant="secondary">公司日常</Badge> : null}
             {p.archived ? <Badge variant="outline">已归档 · 仅可查看</Badge> : null}
           </span>
         }
@@ -126,6 +139,27 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           <FundsSection funds={data.funds} projectId={p.id} projectOwner={p.created_by} />
         </TabsContent>
       </Tabs>
+
+      {isCompany ? (
+        <>
+          <FilesCard
+            files={(filesData?.files ?? []).filter((f) => f.category !== "invoice")}
+            onReload={reloadFiles}
+            target={{ kind: "project", projectId: p.id }}
+            category="contract"
+            label="电子合同"
+            description="公司日常合同，团队可上传 / 预览 / 下载；到期前一个月起连续三天邮件提醒"
+          />
+          <FilesCard
+            files={(filesData?.files ?? []).filter((f) => f.category === "invoice")}
+            onReload={reloadFiles}
+            target={{ kind: "project", projectId: p.id }}
+            category="invoice"
+            label="发票"
+            description="公司日常发票，团队可上传 / 预览 / 下载"
+          />
+        </>
+      ) : null}
     </div>
   );
 }

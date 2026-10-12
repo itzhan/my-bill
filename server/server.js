@@ -199,6 +199,16 @@ for (const [col, ddl] of [
 if (!db.prepare("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'ptype'").get()) {
   db.exec("ALTER TABLE projects ADD COLUMN ptype TEXT NOT NULL DEFAULT 'relay'");
 }
+// 项目类别：customer 客户项目 / company 公司日常（公司日常也可上传合同给团队查看）
+try { db.exec("ALTER TABLE projects ADD COLUMN category TEXT NOT NULL DEFAULT 'customer'"); } catch { /* 已有该列 */ }
+// 公司日常项目的合同 / 发票（结构同 party_files）
+db.exec(`CREATE TABLE IF NOT EXISTS project_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  attachment_id INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'contract',
+  sign_date TEXT NOT NULL DEFAULT '', valid_years INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
+  reminded_count INTEGER NOT NULL DEFAULT 0, last_reminded TEXT NOT NULL DEFAULT '', created_by INTEGER, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_files_project ON project_files(project_id);`);
 
 const ENTRY_SELECT = `SELECT e.*, p.name AS project_name, p.archived AS project_archived,
                              h.username AS handler_name, c.username AS creator_name, sp.name AS party_name
@@ -564,12 +574,13 @@ const transferView = (t) => ({ id: t.id, time: fmtTZ(t.created_at), created_at: 
 // ---------------------------------------------------------------- 业务操作（页面接口与 AI 工具共用）
 const entryLine = (e) => `${e.type === 'income' ? '收入' : '支出'} ${e.amount.toLocaleString('zh-CN')} ${e.currency}${e.currency !== 'CNY' ? `（≈${cny(entryBase(e))}，汇率 ${e.rate}）` : ''} · ${e.project_name} · 经手人 ${e.handler_name}${e.note ? ` · ${e.note}` : ''} · ${fmtTZ(e.created_at)} · #${e.id}`;
 const ops = {
-  createProject(user, { name, note, ptype }, via = '') {
+  createProject(user, { name, note, ptype, category }, via = '') {
     name = String(name || '').trim(); note = String(note || '').trim().slice(0, 200);
     if (!name || name.length > 40) throw new HttpError(400, '项目名称为 1–40 个字符');
     const r = q.insertProject.run(name, note, user.id, now());
     const project = q.project.get(Number(r.lastInsertRowid));
     if (ptype === 'short') db.prepare("UPDATE projects SET ptype = 'short' WHERE id = ?").run(project.id);
+    if (category === 'company') db.prepare("UPDATE projects SET category = 'company' WHERE id = ?").run(project.id);
     dataChanged(user, `${via}创建了项目「${project.name}」`, `${via}创建了项目「${project.name}」${note ? `（${note}）` : ''} · #${project.id}`);
     return q.project.get(project.id);
   },
@@ -582,6 +593,7 @@ const ops = {
     if (!name || name.length > 40) throw new HttpError(400, '项目名称为 1–40 个字符');
     q.updateProject.run(name, note, archived, p.id);
     if (patch.ptype !== undefined) db.prepare('UPDATE projects SET ptype = ? WHERE id = ?').run(patch.ptype === 'short' ? 'short' : 'relay', p.id);
+    if (patch.category !== undefined) db.prepare('UPDATE projects SET category = ? WHERE id = ?').run(patch.category === 'company' ? 'company' : 'customer', p.id);
     const what = archived !== p.archived ? `${archived ? '归档' : '恢复'}了项目「${name}」` : `修改了项目「${p.name}」${name !== p.name ? ` → 「${name}」` : ''}${note !== p.note ? `，说明：${note}` : ''}`;
     dataChanged(user, `${via}${what}`);
     return q.project.get(p.id);
@@ -3058,6 +3070,44 @@ app.delete('/api/party-contracts/:id', auth, (req, res) => {
   if (a) { try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(a.file))); } catch {} db.prepare('DELETE FROM attachments WHERE id = ?').run(a.id); }
   res.json({ ok: true });
 });
+// 公司日常项目的合同 / 发票（结构同 party_files，但挂在项目上）
+const qProjectFilesOf = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.username AS creator_name FROM project_files pf JOIN attachments a ON a.id = pf.attachment_id LEFT JOIN users u ON u.id = pf.created_by WHERE pf.project_id = ? ORDER BY pf.id DESC`);
+const qProjectFileById = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.username AS creator_name FROM project_files pf JOIN attachments a ON a.id = pf.attachment_id LEFT JOIN users u ON u.id = pf.created_by WHERE pf.id = ?`);
+const projectFileView = (r) => ({ ...contractView(r), party_id: 0, project_id: r.project_id });
+app.get('/api/projects/:id/files', auth, (req, res) => {
+  const p = q.project.get(Number(req.params.id));
+  if (!p) return fail(res, 404, '项目不存在');
+  res.json({ files: qProjectFilesOf.all(p.id).map(projectFileView) });
+});
+app.post('/api/projects/:id/files', auth, (req, res) => {
+  const p = q.project.get(Number(req.params.id));
+  if (!p) return fail(res, 404, '项目不存在');
+  const body = req.body || {};
+  const name = String(body.name || 'file').replace(/[\\/]/g, '_').slice(0, 120);
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const mime = String(body.mime || MIME_BY_EXT[ext] || 'application/octet-stream');
+  const data = Buffer.from(String(body.data || ''), 'base64');
+  if (!data.length) return fail(res, 400, '文件为空');
+  if (data.length > 20 * 1024 * 1024) return fail(res, 400, '文件不能超过 20MB');
+  const file = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${safeName(name)}`;
+  fs.writeFileSync(path.join(UPLOAD_DIR, file), data);
+  const a = q.insertAttachment.run(file, name, mime, data.length, req.user.id, now());
+  const category = body.category === 'invoice' ? 'invoice' : 'contract';
+  const signDate = category === 'contract' && RE_DATE.test(String(body.sign_date || '')) ? String(body.sign_date) : '';
+  const validYears = category === 'contract' ? Math.max(0, Math.min(50, Math.round(Number(body.valid_years) || 0))) : 0;
+  const fileNote = String(body.note || '').slice(0, 500);
+  const r = db.prepare('INSERT INTO project_files (project_id, attachment_id, title, category, sign_date, valid_years, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(p.id, Number(a.lastInsertRowid), String(body.title || '').slice(0, 100), category, signDate, validYears, fileNote, req.user.id, now());
+  dataChanged(req.user, `给项目「${p.name}」上传了${category === 'invoice' ? '发票' : '合同'}「${body.title || name}」`);
+  res.json({ file: projectFileView(qProjectFileById.get(Number(r.lastInsertRowid))) });
+});
+app.delete('/api/project-files/:id', auth, (req, res) => {
+  const row = qProjectFileById.get(Number(req.params.id));
+  if (!row) return fail(res, 404, '文件不存在');
+  const a = q.attachment.get(row.attachment_id);
+  db.prepare('DELETE FROM project_files WHERE id = ?').run(row.id);
+  if (a) { try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(a.file))); } catch {} db.prepare('DELETE FROM attachments WHERE id = ?').run(a.id); }
+  res.json({ ok: true });
+});
 // 一个逻辑客户的归并键：手动分组优先，否则按 relay 账号，否则单独一个
 const custGroupKey = (r) => (r.customer_group || '').trim() || (r.relay_id != null ? `relay:${r.relay_id}` : `party:${r.id}`);
 function custSiblings(pa) {
@@ -3358,17 +3408,20 @@ async function sendContractReminders() {
   const cfg = getEmailReport();
   if (!cfg.recipients.length || !cfg.email || !cfg.password) return null;
   const today = inTZ().date;
-  const rows = db.prepare(`SELECT pf.*, pa.name AS party_name, p.name AS project_name FROM party_files pf JOIN parties pa ON pa.id = pf.party_id JOIN projects p ON p.id = pa.project_id WHERE pf.category = 'contract' AND pf.sign_date != '' AND pf.valid_years > 0 AND pf.reminded_count < 3`).all();
+  const partyRows = db.prepare(`SELECT pf.*, pa.name AS party_name, p.name AS project_name FROM party_files pf JOIN parties pa ON pa.id = pf.party_id JOIN projects p ON p.id = pa.project_id WHERE pf.category = 'contract' AND pf.sign_date != '' AND pf.valid_years > 0 AND pf.reminded_count < 3`).all();
+  const projRows = db.prepare(`SELECT pf.*, p.name AS project_name FROM project_files pf JOIN projects p ON p.id = pf.project_id WHERE pf.category = 'contract' AND pf.sign_date != '' AND pf.valid_years > 0 AND pf.reminded_count < 3`).all();
   const due = [];
-  for (const r of rows) {
+  const consider = (r, tbl, party, project) => {
     const expiry = contractExpiry(r);
     const remind = contractRemindDate(r);
-    if (!expiry || !remind) continue;
+    if (!expiry || !remind) return;
     if (today >= remind && r.last_reminded !== today) {
       const left = Math.round((Date.parse(expiry) - Date.parse(today)) / 86400000);
-      due.push({ id: r.id, title: r.title || r.name, party: r.party_name, project: r.all_projects ? '全部项目' : r.project_name, sign: r.sign_date, years: r.valid_years, note: r.note || '', expiry, left, nth: r.reminded_count + 1 });
+      due.push({ id: r.id, tbl, title: r.title || r.name, party, project, sign: r.sign_date, years: r.valid_years, note: r.note || '', expiry, left, nth: r.reminded_count + 1 });
     }
-  }
+  };
+  for (const r of partyRows) consider(r, 'party', r.party_name, r.all_projects ? '全部项目' : r.project_name);
+  for (const r of projRows) consider(r, 'project', r.project_name, '公司日常');
   if (!due.length) return null;
   const rowHtml = (d) => `<tr><td style="padding:12px 0;border-top:1px solid #f3f4f6;"><div style="font-weight:600;color:#111827;">${htmlEsc(d.title)}</div><div style="color:#9ca3af;font-size:12px;margin-top:2px;">${htmlEsc(d.party)} · ${htmlEsc(d.project)}${d.note ? ` · ${htmlEsc(d.note)}` : ''}</div></td><td style="padding:12px 0;border-top:1px solid #f3f4f6;text-align:right;white-space:nowrap;"><div style="color:#d97706;font-weight:700;">${d.expiry} 到期</div><div style="color:#9ca3af;font-size:12px;margin-top:2px;">${d.sign} 签 · ${d.years} 年 · 剩 ${d.left} 天</div></td></tr>`;
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif;"><div style="padding:32px 16px;box-sizing:border-box;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="width:520px;max-width:100%;margin:0 auto;background:#fff;border:1px solid #edeff2;border-radius:18px;">
@@ -3379,8 +3432,9 @@ async function sendContractReminders() {
 </table></div></body></html>`;
   const text = `合同到期提醒（${due.length} 份）：\n` + due.map((d) => `· ${d.title}（${d.party} · ${d.project}）${d.expiry} 到期，剩 ${d.left} 天`).join('\n');
   await skymailSend(cfg, { subject: `⏰ ${due.length} 份合同即将到期（${today}）`, html, text });
-  const upd = db.prepare('UPDATE party_files SET reminded_count = reminded_count + 1, last_reminded = ? WHERE id = ?');
-  for (const d of due) upd.run(today, d.id);
+  const updParty = db.prepare('UPDATE party_files SET reminded_count = reminded_count + 1, last_reminded = ? WHERE id = ?');
+  const updProj = db.prepare('UPDATE project_files SET reminded_count = reminded_count + 1, last_reminded = ? WHERE id = ?');
+  for (const d of due) (d.tbl === 'project' ? updProj : updParty).run(today, d.id);
   return due.length;
 }
 async function checkEmailReport() {
