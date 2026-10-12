@@ -3483,8 +3483,11 @@ app.post('/api/attachments', auth, (req, res) => {
 app.get('/api/attachments/:id', auth, (req, res) => {
   const a = q.attachment.get(Number(req.params.id));
   if (!a) return fail(res, 404, '附件不存在');
+  // 可在线预览的类型（图片 / PDF / 纯文本）用 inline 返回，便于 <img> / <iframe> 直接渲染；其余强制下载
+  const previewable = IMAGE_MIME.test(a.mime) || a.mime === 'application/pdf' || /^text\//.test(a.mime);
+  const inline = previewable && !req.query.download;
   res.setHeader('Content-Type', a.mime);
-  res.setHeader('Content-Disposition', `${IMAGE_MIME.test(a.mime) ? 'inline' : 'attachment'}; filename="file"; filename*=UTF-8''${encodeURIComponent(a.name)}`);
+  res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="file"; filename*=UTF-8''${encodeURIComponent(a.name)}`);
   res.sendFile(path.join(UPLOAD_DIR, path.basename(a.file)));
 });
 

@@ -5,7 +5,7 @@ import { use, useRef, useState } from "react";
 import Link from "next/link";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink, FileText, Pencil, Plus, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, Download, Eye, FileText, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -354,6 +354,43 @@ function RecordDialog({
   );
 }
 
+// 按 MIME / 后缀识别文件类型，决定预览方式
+function fileKind(c: PartyContract): "image" | "pdf" | "text" | "office" {
+  const m = (c.mime || "").toLowerCase();
+  const n = (c.name || "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
+  if (m.startsWith("text/") || /\.(txt|md|csv|json|log)$/.test(n)) return "text";
+  return "office"; // Word / Excel / PPT 等，浏览器无法内嵌渲染
+}
+
+// 预览：图片 <img>、PDF / 文本 <iframe>、Office 文档给下载入口
+function FilePreview({ file }: { file: PartyContract }) {
+  const src = apiUrl(file.url);
+  const kind = fileKind(file);
+  if (kind === "image")
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src={src} alt={file.title} className="mx-auto max-h-[72vh] w-auto rounded-md" />
+    );
+  if (kind === "pdf" || kind === "text")
+    return <iframe src={src} title={file.title} className="bg-muted h-[72vh] w-full rounded-md border" />;
+  return (
+    <div className="flex flex-col items-center gap-3 py-12 text-center">
+      <FileText className="text-muted-foreground size-10" />
+      <p className="text-muted-foreground text-sm">
+        该格式（Word / Excel / PPT 等）暂不支持在线预览，请下载后用本地软件查看
+      </p>
+      <Button asChild>
+        <a href={`${src}?download=1`}>
+          <Download />
+          下载查看
+        </a>
+      </Button>
+    </div>
+  );
+}
+
 function FilesCard({
   customerId,
   files,
@@ -371,6 +408,7 @@ function FilesCard({
 }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState<PartyContract | null>(null);
   const [confirm, confirmEl] = useConfirm();
   const reload = () => qc.invalidateQueries({ queryKey: ["ledger", "customer-detail", customerId] });
 
@@ -405,16 +443,24 @@ function FilesCard({
             {files.map((c) => (
               <div key={c.id} className="flex items-center gap-3 p-3">
                 <FileText className="text-muted-foreground size-4 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">{c.title}</div>
+                <button
+                  type="button"
+                  onClick={() => setPreview(c)}
+                  className="min-w-0 flex-1 cursor-pointer text-left"
+                  title="点击预览"
+                >
+                  <div className="truncate text-sm font-medium hover:underline">{c.title}</div>
                   <div className="text-muted-foreground text-xs">
                     {c.project_name ? `${c.project_name} · ` : ""}
                     {fmtSize(c.size)} · {c.creator_name} · {new Date(c.created_at).toLocaleDateString("zh-CN")}
                   </div>
-                </div>
-                <Button variant="ghost" size="icon-sm" title="查看 / 下载" asChild>
-                  <a href={apiUrl(c.url)} target="_blank" rel="noreferrer">
-                    <ExternalLink />
+                </button>
+                <Button variant="ghost" size="icon-sm" title="预览" onClick={() => setPreview(c)}>
+                  <Eye />
+                </Button>
+                <Button variant="ghost" size="icon-sm" title="下载" asChild>
+                  <a href={`${apiUrl(c.url)}?download=1`}>
+                    <Download />
                   </a>
                 </Button>
                 <Button variant="ghost" size="icon-sm" title="删除" onClick={() => remove(c)}>
@@ -437,6 +483,15 @@ function FilesCard({
         category={category}
         label={label}
       />
+      <ResponsiveDialog
+        open={!!preview}
+        onOpenChange={(o) => !o && setPreview(null)}
+        title={preview?.title ?? "预览"}
+        description={preview ? `${preview.name} · ${fmtSize(preview.size)}` : undefined}
+        className="sm:max-w-4xl"
+      >
+        {preview ? <FilePreview file={preview} /> : null}
+      </ResponsiveDialog>
       {confirmEl}
     </Card>
   );
