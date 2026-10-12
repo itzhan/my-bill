@@ -92,17 +92,21 @@ function RecordsTab({ records }: { records: CustomerDetail["records"] }) {
   );
 }
 
-// 上传合同：弹窗里命名 + 选项目（一个客户可有多个项目）
-function UploadContractDialog({
+// 上传合同 / 发票：弹窗里命名 + 选项目（一个客户可有多个项目）
+function UploadFileDialog({
   open,
   onOpenChange,
   projects,
   onDone,
+  category,
+  label,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   projects: CustomerProject[];
   onDone: () => void;
+  category: "contract" | "invoice";
+  label: string;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -119,7 +123,7 @@ function UploadContractDialog({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file) return setError("请选择合同文件");
+    if (!file) return setError(`请选择${label}文件`);
     if (!partyId) return setError("请选择项目");
     if (file.size > 20 * 1024 * 1024) return setError("文件不能超过 20MB");
     setBusy(true);
@@ -136,8 +140,9 @@ function UploadContractDialog({
         mime: file.type,
         data,
         title: title.trim() || file.name,
+        category,
       });
-      toast.success("合同已上传");
+      toast.success(`${label}已上传`);
       setFile(null);
       setTitle("");
       onOpenChange(false);
@@ -150,10 +155,10 @@ function UploadContractDialog({
   };
 
   return (
-    <ResponsiveDialog open={open} onOpenChange={onOpenChange} title="上传电子合同">
+    <ResponsiveDialog open={open} onOpenChange={onOpenChange} title={`上传${label}`}>
       <form onSubmit={submit} className="space-y-4">
         <div className="space-y-2">
-          <Label>合同文件（PDF / 图片 / Word 等，≤ 20MB）</Label>
+          <Label>{label}文件（PDF / 图片 / Word 等，≤ 20MB）</Label>
           <input ref={fileRef} type="file" hidden onChange={(e) => pick(e.target.files?.[0] ?? null)} />
           <div
             role="button"
@@ -186,11 +191,11 @@ function UploadContractDialog({
           </div>
         </div>
         <div className="space-y-2">
-          <Label htmlFor="ct-title">合同名称</Label>
+          <Label htmlFor="ct-title">{label}名称</Label>
           <Input
             id="ct-title"
             maxLength={100}
-            placeholder="如 2026 年度服务合同"
+            placeholder={category === "invoice" ? "如 2026 年 1 月发票" : "如 2026 年度服务合同"}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
           />
@@ -349,14 +354,20 @@ function RecordDialog({
   );
 }
 
-function ContractsCard({
+function FilesCard({
   customerId,
-  contracts,
+  files,
   projects,
+  category,
+  label,
+  description,
 }: {
   customerId: number;
-  contracts: PartyContract[];
+  files: PartyContract[];
   projects: CustomerProject[];
+  category: "contract" | "invoice";
+  label: string;
+  description: string;
 }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -364,7 +375,7 @@ function ContractsCard({
   const reload = () => qc.invalidateQueries({ queryKey: ["ledger", "customer-detail", customerId] });
 
   const remove = async (c: PartyContract) => {
-    if (!(await confirm({ title: `删除合同「${c.title}」？`, destructive: true, confirmText: "删除" }))) return;
+    if (!(await confirm({ title: `删除${label}「${c.title}」？`, destructive: true, confirmText: "删除" }))) return;
     try {
       await del(`/party-contracts/${c.id}`);
       toast.success("已删除");
@@ -378,18 +389,20 @@ function ContractsCard({
     <Card>
       <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
         <div className="space-y-1">
-          <CardTitle className="text-base">电子合同（{contracts.length}）</CardTitle>
-          <CardDescription>与该客户所有项目的电子合同 · 可命名并归属到具体项目</CardDescription>
+          <CardTitle className="text-base">
+            {label}（{files.length}）
+          </CardTitle>
+          <CardDescription>{description}</CardDescription>
         </div>
         <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
           <Upload />
-          上传合同
+          上传{label}
         </Button>
       </CardHeader>
       <CardContent>
-        {contracts.length ? (
+        {files.length ? (
           <div className="divide-y rounded-md border">
-            {contracts.map((c) => (
+            {files.map((c) => (
               <div key={c.id} className="flex items-center gap-3 p-3">
                 <FileText className="text-muted-foreground size-4 shrink-0" />
                 <div className="min-w-0 flex-1">
@@ -411,10 +424,19 @@ function ContractsCard({
             ))}
           </div>
         ) : (
-          <p className="text-muted-foreground text-sm">还没有合同，点「上传合同」添加</p>
+          <p className="text-muted-foreground text-sm">
+            还没有{label}，点「上传{label}」添加
+          </p>
         )}
       </CardContent>
-      <UploadContractDialog open={open} onOpenChange={setOpen} projects={projects} onDone={reload} />
+      <UploadFileDialog
+        open={open}
+        onOpenChange={setOpen}
+        projects={projects}
+        onDone={reload}
+        category={category}
+        label={label}
+      />
       {confirmEl}
     </Card>
   );
@@ -462,9 +484,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-semibold">{c.name}</h1>
-            <Badge variant="outline">{credit ? "后付" : "预付"}</Badge>
             {c.archived ? <Badge variant="outline">归档</Badge> : null}
-            <span className="text-muted-foreground text-sm">折扣 {+c.ratio.toFixed(4)}</span>
           </div>
           <div className="flex items-center gap-2">
             <Button onClick={() => setRecOpen(true)}>
@@ -572,12 +592,17 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                     return (
                       <TableRow key={p.party_id}>
                         <TableCell>
-                          <Link
-                            href={`/dashboard/ledger/projects/${p.project_id}`}
-                            className="text-primary hover:underline"
-                          >
-                            {p.project_name}
-                          </Link>
+                          <div className="flex items-center gap-1.5">
+                            <Link
+                              href={`/dashboard/ledger/projects/${p.project_id}`}
+                              className="text-primary hover:underline"
+                            >
+                              {p.project_name}
+                            </Link>
+                            <Badge variant="outline" className="font-normal">
+                              {p.settle_type === "credit" ? "后付" : "预付"}
+                            </Badge>
+                          </div>
                         </TableCell>
                         <TableCell className="text-muted-foreground text-sm">
                           {p.relay_ref ? p.relay_ref : "—"}
@@ -633,12 +658,17 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                   {shortProjects.map((p) => (
                     <TableRow key={p.party_id}>
                       <TableCell>
-                        <Link
-                          href={`/dashboard/ledger/projects/${p.project_id}`}
-                          className="text-primary hover:underline"
-                        >
-                          {p.project_name}
-                        </Link>
+                        <div className="flex items-center gap-1.5">
+                          <Link
+                            href={`/dashboard/ledger/projects/${p.project_id}`}
+                            className="text-primary hover:underline"
+                          >
+                            {p.project_name}
+                          </Link>
+                          <Badge variant="outline" className="font-normal">
+                            {p.settle_type === "credit" ? "后付" : "预付"}
+                          </Badge>
+                        </div>
                       </TableCell>
                       <TableCell className="text-income text-right tabular-nums">
                         {money(p.summary?.income.base ?? 0)}
@@ -666,7 +696,23 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
 
       <RecordDialog open={recOpen} onOpenChange={setRecOpen} projects={projects} onDone={reloadDetail} />
 
-      <ContractsCard customerId={cid} contracts={contracts} projects={projects} />
+      <FilesCard
+        customerId={cid}
+        files={contracts.filter((f) => f.category !== "invoice")}
+        projects={projects}
+        category="contract"
+        label="电子合同"
+        description="与该客户所有项目的电子合同 · 可命名并归属到具体项目"
+      />
+
+      <FilesCard
+        customerId={cid}
+        files={contracts.filter((f) => f.category === "invoice")}
+        projects={projects}
+        category="invoice"
+        label="发票"
+        description="与该客户所有项目的发票 · 可命名并归属到具体项目"
+      />
 
       <Card>
         <CardHeader>

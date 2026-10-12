@@ -77,9 +77,6 @@ function CustomerTable({
                     <TableCell>
                       <div className="flex items-center gap-1.5 font-medium">
                         {c.name}
-                        <Badge variant="outline" className="font-normal">
-                          {c.settle_type === "credit" ? "后付" : "预付"}
-                        </Badge>
                         {c.low_balance ? <Badge variant="destructive">余额不足</Badge> : null}
                         {c.overdue ? <Badge variant="destructive">逾期</Badge> : null}
                       </div>

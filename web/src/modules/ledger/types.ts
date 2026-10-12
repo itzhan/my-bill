@@ -30,6 +30,7 @@ export type EmailReport = {
 export type PartyContract = {
   id: number;
   party_id: number;
+  category: "contract" | "invoice";
   title: string;
   name: string;
   mime: string;

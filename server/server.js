@@ -183,6 +183,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS party_files (
   attachment_id INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '', created_by INTEGER, created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_party_files_party ON party_files(party_id);`);
+// 文件分类：contract 电子合同 / invoice 发票
+try { db.exec("ALTER TABLE party_files ADD COLUMN category TEXT NOT NULL DEFAULT 'contract'"); } catch { /* 已有该列 */ }
 // 项目类型：relay 中转（自动跟踪供应商/客户消耗）/ short 短期（按记账收支算利润）
 if (!db.prepare("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'ptype'").get()) {
   db.exec("ALTER TABLE projects ADD COLUMN ptype TEXT NOT NULL DEFAULT 'relay'");
@@ -3005,7 +3007,7 @@ function termStatus(v, todayS) {
 // 往来单位的电子合同
 const qContractsOf = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.username AS creator_name FROM party_files pf JOIN attachments a ON a.id = pf.attachment_id LEFT JOIN users u ON u.id = pf.created_by WHERE pf.party_id = ? ORDER BY pf.id DESC`);
 const qContractById = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.username AS creator_name FROM party_files pf JOIN attachments a ON a.id = pf.attachment_id LEFT JOIN users u ON u.id = pf.created_by WHERE pf.id = ?`);
-const contractView = (r) => ({ id: r.id, party_id: r.party_id, title: r.title || r.name, name: r.name, mime: r.mime, size: r.size, url: `/api/attachments/${r.attachment_id}`, image: IMAGE_MIME.test(r.mime), created_at: r.created_at, creator_name: r.creator_name || '' });
+const contractView = (r) => ({ id: r.id, party_id: r.party_id, category: r.category || 'contract', title: r.title || r.name, name: r.name, mime: r.mime, size: r.size, url: `/api/attachments/${r.attachment_id}`, image: IMAGE_MIME.test(r.mime), created_at: r.created_at, creator_name: r.creator_name || '' });
 app.get('/api/parties/:id/contracts', auth, (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa) return fail(res, 404, '往来单位不存在');
@@ -3024,8 +3026,9 @@ app.post('/api/parties/:id/contracts', auth, (req, res) => {
   const file = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${safeName(name)}`;
   fs.writeFileSync(path.join(UPLOAD_DIR, file), data);
   const a = q.insertAttachment.run(file, name, mime, data.length, req.user.id, now());
-  const r = db.prepare('INSERT INTO party_files (party_id, attachment_id, title, created_by, created_at) VALUES (?, ?, ?, ?, ?)').run(pa.id, Number(a.lastInsertRowid), String(body.title || '').slice(0, 100), req.user.id, now());
-  dataChanged(req.user, `给${PARTY_LABEL[pa.kind].name}「${pa.name}」上传了合同「${body.title || name}」`);
+  const category = body.category === 'invoice' ? 'invoice' : 'contract';
+  const r = db.prepare('INSERT INTO party_files (party_id, attachment_id, title, category, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(pa.id, Number(a.lastInsertRowid), String(body.title || '').slice(0, 100), category, req.user.id, now());
+  dataChanged(req.user, `给${PARTY_LABEL[pa.kind].name}「${pa.name}」上传了${category === 'invoice' ? '发票' : '合同'}「${body.title || name}」`);
   res.json({ contract: contractView(qContractById.get(Number(r.lastInsertRowid))) });
 });
 app.delete('/api/party-contracts/:id', auth, (req, res) => {
