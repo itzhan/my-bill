@@ -16,7 +16,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useDataTableInstance } from "@/hooks/use-data-table-instance";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/modules/ledger/components/shared";
@@ -135,23 +134,26 @@ export default function ProjectsPage() {
             <CardDescription>点击项目名查看流水、往来和成员资金</CardDescription>
           </div>
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-            <ToggleGroup
-              type="single"
-              variant="outline"
-              size="sm"
-              value={status}
-              onValueChange={(v) => v && setStatus(v)}
-            >
-              <ToggleGroupItem value="active" className="px-3">
-                进行中
-              </ToggleGroupItem>
-              <ToggleGroupItem value="archived" className="px-3">
-                已归档 {archivedCount ? archivedCount : ""}
-              </ToggleGroupItem>
-              <ToggleGroupItem value="all" className="px-3">
-                全部
-              </ToggleGroupItem>
-            </ToggleGroup>
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  ["active", "进行中"],
+                  ["archived", `已归档${archivedCount ? ` ${archivedCount}` : ""}`],
+                  ["all", "全部"],
+                ] as const
+              ).map(([v, label]) => (
+                <Button
+                  key={v}
+                  type="button"
+                  variant={status === v ? "default" : "outline"}
+                  size="sm"
+                  className="px-3"
+                  onClick={() => setStatus(v)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
             <div className="relative w-full sm:w-[200px]">
               <Search className="text-muted-foreground absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2" />
               <Input
@@ -168,7 +170,7 @@ export default function ProjectsPage() {
           {data ? (
             <>
               <div className="overflow-hidden rounded-md border">
-                <DataTable table={table} columns={columns} />
+                <DataTable key={status} table={table} columns={columns} />
               </div>
               <DataTablePagination table={table} />
             </>
