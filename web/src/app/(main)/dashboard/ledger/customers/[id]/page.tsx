@@ -442,12 +442,12 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const thrCny = c.balance_threshold != null ? c.balance_threshold * usdRate : null;
   // 金额换算说明用：标准消耗美金（应收 ÷ 折扣 ÷ 汇率，各中转项目相加）、已收/未收折美金
   const usd = (n: number) => `$${n.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
-  const consUsd = projects
-    .filter((p) => p.project_type !== "short")
-    .reduce((a, p) => {
-      const dueUsd = p.currency === "USD" ? p.settle.due : p.settle.due_cny / usdRate;
-      return a + (p.ratio > 0 ? dueUsd / p.ratio : dueUsd);
-    }, 0);
+  const relayProjects = projects.filter((p) => p.project_type !== "short");
+  const shortProjects = projects.filter((p) => p.project_type === "short");
+  const consUsd = relayProjects.reduce((a, p) => {
+    const dueUsd = p.currency === "USD" ? p.settle.due : p.settle.due_cny / usdRate;
+    return a + (p.ratio > 0 ? dueUsd / p.ratio : dueUsd);
+  }, 0);
   const paidUsd = c.settle.paid_cny / usdRate;
 
   return (
@@ -546,98 +546,123 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         ) : null}
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">合作项目（{projects.length}）</CardTitle>
-          <CardDescription>中转项目按消费 / 结算；项目制项目按项目实际收入 − 支出（折人民币）</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>项目</TableHead>
-                  <TableHead>类型</TableHead>
-                  <TableHead>中转客户</TableHead>
-                  <TableHead className="text-right">折扣</TableHead>
-                  <TableHead className="text-right">累计消费</TableHead>
-                  <TableHead className="text-right">已收</TableHead>
-                  <TableHead className="text-right">未收</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {projects.map((p) => (
-                  <TableRow key={p.party_id}>
-                    <TableCell>
-                      <Link
-                        href={`/dashboard/ledger/projects/${p.project_id}`}
-                        className="text-primary hover:underline"
-                      >
-                        {p.project_name}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{p.project_type === "short" ? "项目制" : "中转"}</Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground text-sm">{p.relay_ref ? p.relay_ref : "—"}</TableCell>
-                    <TableCell className="text-muted-foreground text-right tabular-nums">
-                      {p.project_type === "short" ? "—" : +p.ratio.toFixed(4)}
-                    </TableCell>
-                    {p.project_type === "short" ? (
-                      <>
-                        <TableCell className="text-income text-right tabular-nums">
-                          <div>{money(p.summary?.income.base ?? 0)}</div>
-                          <div className="text-muted-foreground text-xs">项目收入</div>
+      {relayProjects.length ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">中转项目（{relayProjects.length}）</CardTitle>
+            <CardDescription>按中转站消耗 × 折扣结算（折人民币）</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>项目</TableHead>
+                    <TableHead>中转客户</TableHead>
+                    <TableHead className="text-right">折扣</TableHead>
+                    <TableHead className="text-right">累计消费</TableHead>
+                    <TableHead className="text-right">已收</TableHead>
+                    <TableHead className="text-right">未收</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {relayProjects.map((p) => {
+                    const dueUsd = p.currency === "USD" ? p.settle.due : p.settle.due_cny / usdRate;
+                    const consUsdP = p.ratio > 0 ? dueUsd / p.ratio : dueUsd;
+                    return (
+                      <TableRow key={p.party_id}>
+                        <TableCell>
+                          <Link
+                            href={`/dashboard/ledger/projects/${p.project_id}`}
+                            className="text-primary hover:underline"
+                          >
+                            {p.project_name}
+                          </Link>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground text-sm">
+                          {p.relay_ref ? p.relay_ref : "—"}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground text-right tabular-nums">
+                          {+p.ratio.toFixed(4)}
                         </TableCell>
                         <TableCell className="text-expense text-right tabular-nums">
-                          <div>{money(p.summary?.expense.base ?? 0)}</div>
-                          <div className="text-muted-foreground text-xs">项目支出</div>
+                          <div>{money(p.settle.due_cny)}</div>
+                          <div className="text-muted-foreground text-xs">
+                            {usd(consUsdP)} × {+p.ratio.toFixed(4)} × {usdRate}
+                          </div>
                         </TableCell>
-                        <TableCell
-                          className={cn(
-                            "text-right font-medium tabular-nums",
-                            (p.summary?.profit ?? 0) >= 0 ? "text-income" : "text-expense",
-                          )}
-                        >
-                          <div>{money(p.summary?.profit ?? 0)}</div>
-                          <div className="text-muted-foreground text-xs font-normal">收入 − 支出</div>
+                        <TableCell className="text-income text-right tabular-nums">
+                          <div>{money(p.settle.paid_cny)}</div>
+                          <div className="text-muted-foreground text-xs">
+                            {usd(p.settle.paid_cny / usdRate)} × {usdRate}
+                          </div>
                         </TableCell>
-                      </>
-                    ) : (
-                      (() => {
-                        const dueUsd = p.currency === "USD" ? p.settle.due : p.settle.due_cny / usdRate;
-                        const consUsdP = p.ratio > 0 ? dueUsd / p.ratio : dueUsd;
-                        return (
-                          <>
-                            <TableCell className="text-expense text-right tabular-nums">
-                              <div>{money(p.settle.due_cny)}</div>
-                              <div className="text-muted-foreground text-xs">
-                                {usd(consUsdP)} × {+p.ratio.toFixed(4)} × {usdRate}
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-income text-right tabular-nums">
-                              <div>{money(p.settle.paid_cny)}</div>
-                              <div className="text-muted-foreground text-xs">
-                                {usd(p.settle.paid_cny / usdRate)} × {usdRate}
-                              </div>
-                            </TableCell>
-                            <TableCell
-                              className={cn("text-right tabular-nums", p.settle.open_cny > 0 && "text-warning")}
-                            >
-                              <div>{money(p.settle.open_cny)}</div>
-                              <div className="text-muted-foreground text-xs font-normal">累计消费 − 已收</div>
-                            </TableCell>
-                          </>
-                        );
-                      })()
-                    )}
+                        <TableCell className={cn("text-right tabular-nums", p.settle.open_cny > 0 && "text-warning")}>
+                          <div>{money(p.settle.open_cny)}</div>
+                          <div className="text-muted-foreground text-xs font-normal">累计消费 − 已收</div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {shortProjects.length ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">项目制项目（{shortProjects.length}）</CardTitle>
+            <CardDescription>按项目实际流水统计：收入 − 支出 = 利润（折人民币）</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>项目</TableHead>
+                    <TableHead className="text-right">收入</TableHead>
+                    <TableHead className="text-right">支出</TableHead>
+                    <TableHead className="text-right">利润</TableHead>
+                    <TableHead className="text-right">已收</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </CardContent>
-      </Card>
+                </TableHeader>
+                <TableBody>
+                  {shortProjects.map((p) => (
+                    <TableRow key={p.party_id}>
+                      <TableCell>
+                        <Link
+                          href={`/dashboard/ledger/projects/${p.project_id}`}
+                          className="text-primary hover:underline"
+                        >
+                          {p.project_name}
+                        </Link>
+                      </TableCell>
+                      <TableCell className="text-income text-right tabular-nums">
+                        {money(p.summary?.income.base ?? 0)}
+                      </TableCell>
+                      <TableCell className="text-expense text-right tabular-nums">
+                        {money(p.summary?.expense.base ?? 0)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right font-medium tabular-nums",
+                          (p.summary?.profit ?? 0) >= 0 ? "text-income" : "text-expense",
+                        )}
+                      >
+                        {money(p.summary?.profit ?? 0)}
+                      </TableCell>
+                      <TableCell className="text-income text-right tabular-nums">{money(p.settle.paid_cny)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <RecordDialog open={recOpen} onOpenChange={setRecOpen} projects={projects} onDone={reloadDetail} />
 
