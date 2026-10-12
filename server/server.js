@@ -191,6 +191,7 @@ for (const [col, ddl] of [
   ['note', "TEXT NOT NULL DEFAULT ''"],
   ['reminded_count', 'INTEGER NOT NULL DEFAULT 0'],
   ['last_reminded', "TEXT NOT NULL DEFAULT ''"],
+  ['all_projects', 'INTEGER NOT NULL DEFAULT 0'],
 ]) {
   try { db.exec(`ALTER TABLE party_files ADD COLUMN ${col} ${ddl}`); } catch { /* 已有该列 */ }
 }
@@ -3020,7 +3021,7 @@ const qContractById = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.usernam
 const addYMD = (key, dy, dm) => { const [y, m, d] = key.split('-').map(Number); return new Date(Date.UTC(y + dy, m - 1 + dm, d)).toISOString().slice(0, 10); };
 const contractExpiry = (r) => (r.sign_date && Number(r.valid_years) > 0 ? addYMD(r.sign_date, Number(r.valid_years), 0) : '');
 const contractRemindDate = (r) => { const e = contractExpiry(r); return e ? addYMD(e, 0, -1) : ''; };
-const contractView = (r) => ({ id: r.id, party_id: r.party_id, category: r.category || 'contract', title: r.title || r.name, name: r.name, mime: r.mime, size: r.size, url: `/api/attachments/${r.attachment_id}`, image: IMAGE_MIME.test(r.mime), sign_date: r.sign_date || '', valid_years: Number(r.valid_years) || 0, note: r.note || '', expiry: contractExpiry(r), remind_date: contractRemindDate(r), created_at: r.created_at, creator_name: r.creator_name || '' });
+const contractView = (r) => ({ id: r.id, party_id: r.party_id, category: r.category || 'contract', all_projects: !!r.all_projects, title: r.title || r.name, name: r.name, mime: r.mime, size: r.size, url: `/api/attachments/${r.attachment_id}`, image: IMAGE_MIME.test(r.mime), sign_date: r.sign_date || '', valid_years: Number(r.valid_years) || 0, note: r.note || '', expiry: contractExpiry(r), remind_date: contractRemindDate(r), created_at: r.created_at, creator_name: r.creator_name || '' });
 app.get('/api/parties/:id/contracts', auth, (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa) return fail(res, 404, '往来单位不存在');
@@ -3044,7 +3045,8 @@ app.post('/api/parties/:id/contracts', auth, (req, res) => {
   const signDate = category === 'contract' && RE_DATE.test(String(body.sign_date || '')) ? String(body.sign_date) : '';
   const validYears = category === 'contract' ? Math.max(0, Math.min(50, Math.round(Number(body.valid_years) || 0))) : 0;
   const fileNote = String(body.note || '').slice(0, 500);
-  const r = db.prepare('INSERT INTO party_files (party_id, attachment_id, title, category, sign_date, valid_years, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(pa.id, Number(a.lastInsertRowid), String(body.title || '').slice(0, 100), category, signDate, validYears, fileNote, req.user.id, now());
+  const allProjects = body.all_projects ? 1 : 0;
+  const r = db.prepare('INSERT INTO party_files (party_id, attachment_id, title, category, sign_date, valid_years, note, all_projects, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(pa.id, Number(a.lastInsertRowid), String(body.title || '').slice(0, 100), category, signDate, validYears, fileNote, allProjects, req.user.id, now());
   dataChanged(req.user, `给${PARTY_LABEL[pa.kind].name}「${pa.name}」上传了${category === 'invoice' ? '发票' : '合同'}「${body.title || name}」`);
   res.json({ contract: contractView(qContractById.get(Number(r.lastInsertRowid))) });
 });
@@ -3364,7 +3366,7 @@ async function sendContractReminders() {
     if (!expiry || !remind) continue;
     if (today >= remind && r.last_reminded !== today) {
       const left = Math.round((Date.parse(expiry) - Date.parse(today)) / 86400000);
-      due.push({ id: r.id, title: r.title || r.name, party: r.party_name, project: r.project_name, sign: r.sign_date, years: r.valid_years, note: r.note || '', expiry, left, nth: r.reminded_count + 1 });
+      due.push({ id: r.id, title: r.title || r.name, party: r.party_name, project: r.all_projects ? '全部项目' : r.project_name, sign: r.sign_date, years: r.valid_years, note: r.note || '', expiry, left, nth: r.reminded_count + 1 });
     }
   }
   if (!due.length) return null;

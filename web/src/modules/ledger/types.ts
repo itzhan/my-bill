@@ -31,6 +31,7 @@ export type PartyContract = {
   id: number;
   party_id: number;
   category: "contract" | "invoice";
+  all_projects: boolean;
   title: string;
   name: string;
   mime: string;

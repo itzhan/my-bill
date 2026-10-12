@@ -111,7 +111,8 @@ function UploadFileDialog({
   const fileRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
-  const [partyId, setPartyId] = useState<string>(String(projects[0]?.party_id ?? ""));
+  // "all" = 默认，不归属具体项目，覆盖该客户全部项目
+  const [partyId, setPartyId] = useState<string>("all");
   const [signDate, setSignDate] = useState("");
   const [validYears, setValidYears] = useState("1");
   const [fileNote, setFileNote] = useState("");
@@ -136,7 +137,9 @@ function UploadFileDialog({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return setError(`请选择${label}文件`);
-    if (!partyId) return setError("请选择项目");
+    const allProjects = partyId === "all";
+    const targetId = allProjects ? projects[0]?.party_id : Number(partyId);
+    if (!targetId) return setError("请选择项目");
     if (file.size > 20 * 1024 * 1024) return setError("文件不能超过 20MB");
     setBusy(true);
     setError(null);
@@ -147,12 +150,13 @@ function UploadFileDialog({
         r.onerror = rej;
         r.readAsDataURL(file);
       });
-      await post(`/parties/${partyId}/contracts`, {
+      await post(`/parties/${targetId}/contracts`, {
         name: file.name,
         mime: file.type,
         data,
         title: title.trim() || file.name,
         category,
+        all_projects: allProjects,
         ...(category === "contract"
           ? { sign_date: signDate, valid_years: Number(validYears) || 0, note: fileNote.trim() }
           : {}),
@@ -223,6 +227,7 @@ function UploadFileDialog({
               <SelectValue placeholder="选择项目" />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="all">默认（覆盖全部项目 · 只归属该客户）</SelectItem>
               {projects.map((p) => (
                 <SelectItem key={p.party_id} value={String(p.party_id)}>
                   {p.project_name}
@@ -520,7 +525,7 @@ function FilesCard({
                     ) : null}
                   </div>
                   <div className="text-muted-foreground text-xs">
-                    {c.project_name ? `${c.project_name} · ` : ""}
+                    {c.all_projects ? "全部项目 · " : c.project_name ? `${c.project_name} · ` : ""}
                     {fmtSize(c.size)} · {c.creator_name} · {new Date(c.created_at).toLocaleDateString("zh-CN")}
                   </div>
                   {c.expiry ? (
