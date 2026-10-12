@@ -183,8 +183,17 @@ db.exec(`CREATE TABLE IF NOT EXISTS party_files (
   attachment_id INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '', created_by INTEGER, created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_party_files_party ON party_files(party_id);`);
-// 文件分类：contract 电子合同 / invoice 发票
-try { db.exec("ALTER TABLE party_files ADD COLUMN category TEXT NOT NULL DEFAULT 'contract'"); } catch { /* 已有该列 */ }
+// 文件分类：contract 电子合同 / invoice 发票；合同另记签注日期 / 有效期(年) / 备注 / 到期提醒已发次数
+for (const [col, ddl] of [
+  ['category', "TEXT NOT NULL DEFAULT 'contract'"],
+  ['sign_date', "TEXT NOT NULL DEFAULT ''"],
+  ['valid_years', 'INTEGER NOT NULL DEFAULT 0'],
+  ['note', "TEXT NOT NULL DEFAULT ''"],
+  ['reminded_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ['last_reminded', "TEXT NOT NULL DEFAULT ''"],
+]) {
+  try { db.exec(`ALTER TABLE party_files ADD COLUMN ${col} ${ddl}`); } catch { /* 已有该列 */ }
+}
 // 项目类型：relay 中转（自动跟踪供应商/客户消耗）/ short 短期（按记账收支算利润）
 if (!db.prepare("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'ptype'").get()) {
   db.exec("ALTER TABLE projects ADD COLUMN ptype TEXT NOT NULL DEFAULT 'relay'");
@@ -3007,7 +3016,11 @@ function termStatus(v, todayS) {
 // 往来单位的电子合同
 const qContractsOf = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.username AS creator_name FROM party_files pf JOIN attachments a ON a.id = pf.attachment_id LEFT JOIN users u ON u.id = pf.created_by WHERE pf.party_id = ? ORDER BY pf.id DESC`);
 const qContractById = db.prepare(`SELECT pf.*, a.name, a.mime, a.size, u.username AS creator_name FROM party_files pf JOIN attachments a ON a.id = pf.attachment_id LEFT JOIN users u ON u.id = pf.created_by WHERE pf.id = ?`);
-const contractView = (r) => ({ id: r.id, party_id: r.party_id, category: r.category || 'contract', title: r.title || r.name, name: r.name, mime: r.mime, size: r.size, url: `/api/attachments/${r.attachment_id}`, image: IMAGE_MIME.test(r.mime), created_at: r.created_at, creator_name: r.creator_name || '' });
+// 合同到期：签注日期 + 有效期(年) = 到期日；到期前一个月为提醒起始日
+const addYMD = (key, dy, dm) => { const [y, m, d] = key.split('-').map(Number); return new Date(Date.UTC(y + dy, m - 1 + dm, d)).toISOString().slice(0, 10); };
+const contractExpiry = (r) => (r.sign_date && Number(r.valid_years) > 0 ? addYMD(r.sign_date, Number(r.valid_years), 0) : '');
+const contractRemindDate = (r) => { const e = contractExpiry(r); return e ? addYMD(e, 0, -1) : ''; };
+const contractView = (r) => ({ id: r.id, party_id: r.party_id, category: r.category || 'contract', title: r.title || r.name, name: r.name, mime: r.mime, size: r.size, url: `/api/attachments/${r.attachment_id}`, image: IMAGE_MIME.test(r.mime), sign_date: r.sign_date || '', valid_years: Number(r.valid_years) || 0, note: r.note || '', expiry: contractExpiry(r), remind_date: contractRemindDate(r), created_at: r.created_at, creator_name: r.creator_name || '' });
 app.get('/api/parties/:id/contracts', auth, (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa) return fail(res, 404, '往来单位不存在');
@@ -3027,7 +3040,11 @@ app.post('/api/parties/:id/contracts', auth, (req, res) => {
   fs.writeFileSync(path.join(UPLOAD_DIR, file), data);
   const a = q.insertAttachment.run(file, name, mime, data.length, req.user.id, now());
   const category = body.category === 'invoice' ? 'invoice' : 'contract';
-  const r = db.prepare('INSERT INTO party_files (party_id, attachment_id, title, category, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(pa.id, Number(a.lastInsertRowid), String(body.title || '').slice(0, 100), category, req.user.id, now());
+  // 合同才记签注日期 / 有效期 / 备注
+  const signDate = category === 'contract' && RE_DATE.test(String(body.sign_date || '')) ? String(body.sign_date) : '';
+  const validYears = category === 'contract' ? Math.max(0, Math.min(50, Math.round(Number(body.valid_years) || 0))) : 0;
+  const fileNote = String(body.note || '').slice(0, 500);
+  const r = db.prepare('INSERT INTO party_files (party_id, attachment_id, title, category, sign_date, valid_years, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(pa.id, Number(a.lastInsertRowid), String(body.title || '').slice(0, 100), category, signDate, validYears, fileNote, req.user.id, now());
   dataChanged(req.user, `给${PARTY_LABEL[pa.kind].name}「${pa.name}」上传了${category === 'invoice' ? '发票' : '合同'}「${body.title || name}」`);
   res.json({ contract: contractView(qContractById.get(Number(r.lastInsertRowid))) });
 });
@@ -3334,6 +3351,36 @@ ${section('预付客户', custList)}${section('预付供应商', supList)}
   await skymailSend(cfg, { subject: `⚠ ${total} 项余额不足（客户 ${low.length} · 供应商 ${supLow.length}）`, html, text });
   return total;
 }
+// 合同到期提醒：到期前一个月起，连续三天各发一封提醒邮件
+async function sendContractReminders() {
+  const cfg = getEmailReport();
+  if (!cfg.recipients.length || !cfg.email || !cfg.password) return null;
+  const today = inTZ().date;
+  const rows = db.prepare(`SELECT pf.*, pa.name AS party_name, p.name AS project_name FROM party_files pf JOIN parties pa ON pa.id = pf.party_id JOIN projects p ON p.id = pa.project_id WHERE pf.category = 'contract' AND pf.sign_date != '' AND pf.valid_years > 0 AND pf.reminded_count < 3`).all();
+  const due = [];
+  for (const r of rows) {
+    const expiry = contractExpiry(r);
+    const remind = contractRemindDate(r);
+    if (!expiry || !remind) continue;
+    if (today >= remind && r.last_reminded !== today) {
+      const left = Math.round((Date.parse(expiry) - Date.parse(today)) / 86400000);
+      due.push({ id: r.id, title: r.title || r.name, party: r.party_name, project: r.project_name, sign: r.sign_date, years: r.valid_years, note: r.note || '', expiry, left, nth: r.reminded_count + 1 });
+    }
+  }
+  if (!due.length) return null;
+  const rowHtml = (d) => `<tr><td style="padding:12px 0;border-top:1px solid #f3f4f6;"><div style="font-weight:600;color:#111827;">${htmlEsc(d.title)}</div><div style="color:#9ca3af;font-size:12px;margin-top:2px;">${htmlEsc(d.party)} · ${htmlEsc(d.project)}${d.note ? ` · ${htmlEsc(d.note)}` : ''}</div></td><td style="padding:12px 0;border-top:1px solid #f3f4f6;text-align:right;white-space:nowrap;"><div style="color:#d97706;font-weight:700;">${d.expiry} 到期</div><div style="color:#9ca3af;font-size:12px;margin-top:2px;">${d.sign} 签 · ${d.years} 年 · 剩 ${d.left} 天</div></td></tr>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif;"><div style="padding:32px 16px;box-sizing:border-box;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="width:520px;max-width:100%;margin:0 auto;background:#fff;border:1px solid #edeff2;border-radius:18px;">
+<tr><td style="padding:34px 38px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td><span style="display:inline-block;width:8px;height:8px;background:#f59e0b;border-radius:50%;vertical-align:middle;margin-right:9px;"></span><span style="font-size:14px;font-weight:600;color:#111827;vertical-align:middle;">元启智能账单</span></td><td style="text-align:right;color:#9ca3af;font-size:13px;">${today}</td></tr></table></td></tr>
+<tr><td style="padding:28px 38px 6px;"><div style="font-size:11px;color:#9ca3af;letter-spacing:2px;">合同到期提醒</div><div style="color:#d97706;font-size:30px;font-weight:700;line-height:1.1;margin-top:10px;letter-spacing:-.5px;">${due.length} 份合同即将到期</div><div style="color:#9ca3af;font-size:13px;margin-top:8px;">到期前一个月提醒，连续三天各发一次，请及时续签</div></td></tr>
+<tr><td style="padding:16px 38px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size:14px;">${due.map(rowHtml).join('')}</table></td></tr>
+<tr><td style="padding:30px 38px 34px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #edeff2;"><tr><td style="padding-top:20px;"><div style="font-size:12px;color:#b6bcc6;line-height:1.7;">请及时与客户确认续签事宜<br>由「元启智能账单」在每日利润邮件时间一并发送 · 内部数据，请勿外传</div></td></tr></table></td></tr>
+</table></div></body></html>`;
+  const text = `合同到期提醒（${due.length} 份）：\n` + due.map((d) => `· ${d.title}（${d.party} · ${d.project}）${d.expiry} 到期，剩 ${d.left} 天`).join('\n');
+  await skymailSend(cfg, { subject: `⏰ ${due.length} 份合同即将到期（${today}）`, html, text });
+  const upd = db.prepare('UPDATE party_files SET reminded_count = reminded_count + 1, last_reminded = ? WHERE id = ?');
+  for (const d of due) upd.run(today, d.id);
+  return due.length;
+}
 async function checkEmailReport() {
   const cfg = getEmailReport();
   if (!cfg.recipients.length || !cfg.email || !cfg.password) return;
@@ -3346,6 +3393,8 @@ async function checkEmailReport() {
   }
   try { const n = await sendLowBalanceAlert(); if (n) console.log(`[email] 低余额提醒已发送（${n} 个客户）`); }
   catch (e) { console.error('[email] 低余额提醒失败：', e.message); }
+  try { const n = await sendContractReminders(); if (n) console.log(`[email] 合同到期提醒已发送（${n} 份）`); }
+  catch (e) { console.error('[email] 合同到期提醒失败：', e.message); }
 }
 setInterval(checkEmailReport, 60 * 1000).unref();
 // 立即检查并发送低余额提醒（手动）

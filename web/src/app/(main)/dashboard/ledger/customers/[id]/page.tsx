@@ -112,9 +112,21 @@ function UploadFileDialog({
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [partyId, setPartyId] = useState<string>(String(projects[0]?.party_id ?? ""));
+  const [signDate, setSignDate] = useState("");
+  const [validYears, setValidYears] = useState("1");
+  const [fileNote, setFileNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+
+  // 合同到期日预览：签注日期 + 有效期年
+  const expiry =
+    category === "contract" && signDate && Number(validYears) > 0
+      ? (() => {
+          const [y = 0, m = 1, d = 1] = signDate.split("-").map(Number);
+          return new Date(Date.UTC(y + Number(validYears), m - 1, d)).toISOString().slice(0, 10);
+        })()
+      : "";
 
   const pick = (f: File | null) => {
     setFile(f);
@@ -141,10 +153,14 @@ function UploadFileDialog({
         data,
         title: title.trim() || file.name,
         category,
+        ...(category === "contract"
+          ? { sign_date: signDate, valid_years: Number(validYears) || 0, note: fileNote.trim() }
+          : {}),
       });
       toast.success(`${label}已上传`);
       setFile(null);
       setTitle("");
+      setFileNote("");
       onOpenChange(false);
       onDone();
     } catch (ex) {
@@ -216,6 +232,47 @@ function UploadFileDialog({
             </SelectContent>
           </Select>
         </div>
+        {category === "contract" ? (
+          <>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="ct-sign">签注日期</Label>
+                <Input id="ct-sign" type="date" value={signDate} onChange={(e) => setSignDate(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>有效期</Label>
+                <Select value={validYears} onValueChange={setValidYears}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {[1, 2, 3, 4, 5, 10].map((y) => (
+                      <SelectItem key={y} value={String(y)}>
+                        {y} 年
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            {expiry ? (
+              <p className="text-muted-foreground text-xs">
+                到期日 <span className="text-foreground font-medium">{expiry}</span>
+                ，将在到期前一个月起连续三天发邮件提醒
+              </p>
+            ) : null}
+            <div className="space-y-2">
+              <Label htmlFor="ct-note">备注（可选）</Label>
+              <Input
+                id="ct-note"
+                maxLength={500}
+                placeholder="如 自动续约 / 每年调价"
+                value={fileNote}
+                onChange={(e) => setFileNote(e.target.value)}
+              />
+            </div>
+          </>
+        ) : null}
         {error ? <p className="text-destructive text-sm">{error}</p> : null}
         <Button type="submit" className="w-full" disabled={busy}>
           {busy ? "上传中…" : "上传"}
@@ -411,6 +468,7 @@ function FilesCard({
   const [preview, setPreview] = useState<PartyContract | null>(null);
   const [confirm, confirmEl] = useConfirm();
   const reload = () => qc.invalidateQueries({ queryKey: ["ledger", "customer-detail", customerId] });
+  const todayStr = new Date().toLocaleDateString("sv-SE");
 
   const remove = async (c: PartyContract) => {
     if (!(await confirm({ title: `删除${label}「${c.title}」？`, destructive: true, confirmText: "删除" }))) return;
@@ -449,11 +507,27 @@ function FilesCard({
                   className="min-w-0 flex-1 cursor-pointer text-left"
                   title="点击预览"
                 >
-                  <div className="truncate text-sm font-medium hover:underline">{c.title}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-sm font-medium hover:underline">{c.title}</span>
+                    {c.expiry ? (
+                      c.expiry < todayStr ? (
+                        <Badge variant="outline" className="text-muted-foreground font-normal">
+                          已过期
+                        </Badge>
+                      ) : c.remind_date && todayStr >= c.remind_date ? (
+                        <Badge variant="destructive">即将到期</Badge>
+                      ) : null
+                    ) : null}
+                  </div>
                   <div className="text-muted-foreground text-xs">
                     {c.project_name ? `${c.project_name} · ` : ""}
                     {fmtSize(c.size)} · {c.creator_name} · {new Date(c.created_at).toLocaleDateString("zh-CN")}
                   </div>
+                  {c.expiry ? (
+                    <div className="text-muted-foreground text-xs">
+                      {c.sign_date} 签 · {c.valid_years} 年 · {c.expiry} 到期{c.note ? ` · ${c.note}` : ""}
+                    </div>
+                  ) : null}
                 </button>
                 <Button variant="ghost" size="icon-sm" title="预览" onClick={() => setPreview(c)}>
                   <Eye />

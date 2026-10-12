@@ -37,6 +37,11 @@ export type PartyContract = {
   size: number;
   url: string;
   image: boolean;
+  sign_date: string;
+  valid_years: number;
+  note: string;
+  expiry: string;
+  remind_date: string;
   created_at: string;
   creator_name: string;
   project_name?: string;
