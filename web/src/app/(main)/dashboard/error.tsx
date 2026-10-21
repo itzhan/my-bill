@@ -8,9 +8,11 @@ import { AlertTriangle, RefreshCw, Home } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { reloadOnChunkError } from "@/lib/chunk-error";
 
 export default function DashboardError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
+    if (reloadOnChunkError(error)) return;
     console.error(error);
   }, [error]);
 

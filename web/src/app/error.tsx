@@ -7,9 +7,11 @@ import Link from "next/link";
 import { AlertTriangle, RefreshCw, Home } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { reloadOnChunkError } from "@/lib/chunk-error";
 
 export default function GlobalError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
+    if (reloadOnChunkError(error)) return;
     // 可以在这里记录错误到日志服务
     console.error(error);
   }, [error]);
