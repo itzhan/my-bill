@@ -137,9 +137,13 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addD
       const fetched = new Map(); // channel_id -> { item, prefix }（按前缀搜，名称再精确过滤）
       for (const k of prefixes) {
         for (const it of await searchChannels(s, k.prefix)) {
-          if (!String(it.name || '').startsWith(k.prefix)) continue;
+          // 台子上有的渠道名带首尾空格（如 " ls-0xma"），先去掉再匹配
+          it.name = String(it.name || '').trim();
+          if (!it.name.startsWith(k.prefix)) continue;
           const best = matchPrefix(it.name, prefixes);
-          if (best && !fetched.has(it.id)) fetched.set(it.id, { it, initialized: !!best.initialized });
+          // 前缀添加前就存在的渠道是历史存量（期初）；之后才创建的是新上的 key，额度记到当天
+          const fresh = !!best && !!best.initialized && Number(it.created_time) * 1000 >= Date.parse(best.created_at);
+          if (best && !fetched.has(it.id)) fetched.set(it.id, { it, initialized: fresh });
         }
       }
       const today = todayKey();
@@ -150,7 +154,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addD
           const used = Math.max(0, Math.round(Number(it.used_quota) || 0));
           const ex = q.channel.get(projectId, id);
           if (!ex) {
-            // 新渠道：前缀第一次抓取时是历史存量（期初），之后才出现的是当天新上的 key
+            // 新渠道：历史存量记期初，新上的 key 记当天
             if (initialized) { q.insChannel.run(projectId, id, it.name, str(it.group, 100), it.status ?? null, used, 0, '', stamp, stamp); if (used > 0) q.addUsage.run(projectId, id, today, used); }
             else q.insChannel.run(projectId, id, it.name, str(it.group, 100), it.status ?? null, used, used, used > 0 ? openingDate : '', stamp, stamp);
           } else {
