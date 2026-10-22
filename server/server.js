@@ -2995,7 +2995,7 @@ app.get('/api/relay/search', auth, async (req, res, next) => {
 app.delete('/api/parties/:id', auth, (req, res) => { ops.deleteParty(req.user, req.params.id); res.json({ ok: true }); });
 app.post('/api/parties/:id/records', auth, (req, res) => { const r = ops.addPartyRecord(req.user, req.params.id, req.body || {}); res.json({ record: recordView(r.record), duplicate: r.duplicate }); });
 partyWallets = setupPartyWallets({ app, db, auth, HttpError, onChanged: (user, text) => dataChanged(user, text) });
-setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addDays, onChanged: (user, text) => dataChanged(user, text), onAccrued: () => { dataVersion += 1; broadcast('changed', { version: dataVersion, byId: 0, by: '上 key 台子', text: '', at: now() }); } });
+setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayOf: (d) => dayFmt.format(d), addDays, onChanged: (user, text) => dataChanged(user, text), onAccrued: () => { dataVersion += 1; broadcast('changed', { version: dataVersion, byId: 0, by: '上 key 台子', text: '', at: now() }); } });
 // 侧栏「供应商」页：所有项目下的供应商 + 往来结算 + 供应商站点余额（每把 Key）
 app.get('/api/suppliers', auth, (req, res) => {
   const rows = db.prepare(`SELECT pa.*, p.name AS project_name, p.archived AS project_archived FROM parties pa JOIN projects p ON p.id = pa.project_id

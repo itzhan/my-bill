@@ -16,7 +16,7 @@ const str = (v, max = 500) => String(v ?? '').trim().slice(0, max);
 const r2 = (n) => Math.round(n * 100) / 100;
 const r4 = (n) => Math.round(n * 10000) / 10000;
 
-function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addDays, onChanged, onAccrued }) {
+function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayOf, addDays, onChanged, onAccrued }) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS key_sites (
       project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
@@ -127,7 +127,9 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addD
   };
 
   const syncing = new Set();
-  async function syncProject(projectId) {
+  // day：这次增量记到哪天。定时同步对齐整 5 分钟，传「本轮开始前 1 秒」所在日期——
+  // 00:00 那轮收的是 23:55–00:00 的量，记前一天；之后各轮记当天。即 今日消耗 = 现在累计 − 0 点快照
+  async function syncProject(projectId, day = todayKey()) {
     if (syncing.has(projectId)) return;
     syncing.add(projectId);
     const s = siteOf(projectId);
@@ -146,8 +148,8 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addD
           if (best && !fetched.has(it.id)) fetched.set(it.id, { it, initialized: fresh });
         }
       }
-      const today = todayKey();
-      const openingDate = addDays(today, -1);
+      const today = day;
+      const openingDate = addDays(todayKey(), -1);
       db.exec('BEGIN');
       try {
         for (const [id, { it, initialized }] of fetched) {
@@ -409,12 +411,15 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addD
     res.json(view(p.id));
   });
 
-  // 定时同步：每 5 分钟把所有进行中的上 key 项目抓一遍
+  // 定时同步：对齐整 5 分钟（00:00、00:05…，上海时区与 UTC 差整小时，同样对齐）把所有进行中的上 key 项目抓一遍
+  const untilTick = () => LOOP_MS - (Date.now() % LOOP_MS);
   const loop = async () => {
-    for (const { id } of q.keyProjects.all()) await syncProject(id).catch((e) => console.error('[key]', e.message));
-    setTimeout(loop, LOOP_MS).unref();
+    const tick = Math.round(Date.now() / LOOP_MS) * LOOP_MS;
+    const day = dayOf(new Date(tick - 1000));
+    for (const { id } of q.keyProjects.all()) await syncProject(id, day).catch((e) => console.error('[key]', e.message));
+    setTimeout(loop, untilTick()).unref();
   };
-  setTimeout(loop, 25_000).unref();
+  setTimeout(loop, untilTick()).unref();
 
   return { syncProject };
 }
