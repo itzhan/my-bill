@@ -311,7 +311,16 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
       <Card>
         <CardHeader>
           <CardTitle>甲方分组价格</CardTitle>
-          <CardDescription>应收 = 各分组消耗 × 甲方给的价格。只统计我们供应商前缀下的渠道</CardDescription>
+          <CardDescription>
+            应收 = 各分组消耗 × 甲方给的价格。只统计我们供应商前缀下的渠道
+            {s.customer_party_id ? null : (
+              <span className="text-expense block">
+                {customers.length
+                  ? "还没选甲方：点上方台子右边的齿轮，选择甲方后即可设置价格"
+                  : "还没有甲方：先在「往来」里添加客户"}
+              </span>
+            )}
+          </CardDescription>
           <CardAction>
             <Button
               variant="outline"

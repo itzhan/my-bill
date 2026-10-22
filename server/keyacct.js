@@ -80,7 +80,17 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addD
     delRecord: db.prepare('DELETE FROM party_records WHERE id = ?'),
   };
 
-  const siteOf = (projectId) => { q.ensureSite.run(projectId); return q.site.get(projectId); };
+  const custOfProject = db.prepare("SELECT id FROM parties WHERE project_id = ? AND kind = 'customer' AND archived = 0");
+  const siteOf = (projectId) => {
+    q.ensureSite.run(projectId);
+    const s = q.site.get(projectId);
+    // 还没选甲方、项目里正好只有一个客户：直接认定为甲方
+    if (!s.customer_party_id) {
+      const cs = custOfProject.all(projectId);
+      if (cs.length === 1) { db.prepare('UPDATE key_sites SET customer_party_id = ? WHERE project_id = ?').run(cs[0].id, projectId); s.customer_party_id = cs[0].id; accrue(projectId); }
+    }
+    return s;
+  };
   const cookieOf = (s) => s.cookie || process.env.KEY_NEWAPI_COOKIE || '';
   const baseOf = (s) => (s.base_url || process.env.KEY_NEWAPI_BASE || DEFAULT_BASE).replace(/\/+$/, '');
   const qpuOf = (s) => (Number(s.quota_per_usd) > 0 ? Number(s.quota_per_usd) : DEFAULT_QPU);
