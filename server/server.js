@@ -10,6 +10,7 @@ const { DatabaseSync } = require('node:sqlite');
 const ExcelJS = require('exceljs');
 const Anthropic = require('@anthropic-ai/sdk');
 const { setupPartyWallets } = require('./wallets');
+const { setupKeyAccounting } = require('./keyacct');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
@@ -195,7 +196,7 @@ for (const [col, ddl] of [
 ]) {
   try { db.exec(`ALTER TABLE party_files ADD COLUMN ${col} ${ddl}`); } catch { /* 已有该列 */ }
 }
-// 项目类型：relay 中转（自动跟踪供应商/客户消耗）/ short 短期（按记账收支算利润）
+// 项目类型：relay 中转（自动跟踪供应商/客户消耗）/ short 短期（按记账收支算利润）/ key 上 key（按前缀跟踪台子渠道消耗，见 keyacct.js）
 if (!db.prepare("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'ptype'").get()) {
   db.exec("ALTER TABLE projects ADD COLUMN ptype TEXT NOT NULL DEFAULT 'relay'");
 }
@@ -579,7 +580,7 @@ const ops = {
     if (!name || name.length > 40) throw new HttpError(400, '项目名称为 1–40 个字符');
     const r = q.insertProject.run(name, note, user.id, now());
     const project = q.project.get(Number(r.lastInsertRowid));
-    if (ptype === 'short') db.prepare("UPDATE projects SET ptype = 'short' WHERE id = ?").run(project.id);
+    if (ptype === 'short' || ptype === 'key') db.prepare('UPDATE projects SET ptype = ? WHERE id = ?').run(ptype, project.id);
     if (category === 'company') db.prepare("UPDATE projects SET category = 'company' WHERE id = ?").run(project.id);
     dataChanged(user, `${via}创建了项目「${project.name}」`, `${via}创建了项目「${project.name}」${note ? `（${note}）` : ''} · #${project.id}`);
     return q.project.get(project.id);
@@ -592,7 +593,7 @@ const ops = {
     const archived = patch.archived === undefined ? p.archived : (patch.archived ? 1 : 0);
     if (!name || name.length > 40) throw new HttpError(400, '项目名称为 1–40 个字符');
     q.updateProject.run(name, note, archived, p.id);
-    if (patch.ptype !== undefined) db.prepare('UPDATE projects SET ptype = ? WHERE id = ?').run(patch.ptype === 'short' ? 'short' : 'relay', p.id);
+    if (patch.ptype !== undefined) db.prepare('UPDATE projects SET ptype = ? WHERE id = ?').run(['short', 'key'].includes(patch.ptype) ? patch.ptype : 'relay', p.id);
     if (patch.category !== undefined) db.prepare('UPDATE projects SET category = ? WHERE id = ?').run(patch.category === 'company' ? 'company' : 'customer', p.id);
     const what = archived !== p.archived ? `${archived ? '归档' : '恢复'}了项目「${name}」` : `修改了项目「${p.name}」${name !== p.name ? ` → 「${name}」` : ''}${note !== p.note ? `，说明：${note}` : ''}`;
     dataChanged(user, `${via}${what}`);
@@ -1012,6 +1013,7 @@ Object.assign(ops, {
     const pa = q.party.get(rec.party_id);
     // 绑定期间的自动挂账记录由中转站消耗决定，删了下次刷新还会补回来；要改就改倍率 / 折扣或解绑
     if (rec.source === 'relay' && pa.relay_id) throw new HttpError(400, '这是中转站自动挂账记录，绑定期间不能手动删除；可调整倍率 / 折扣重算，或解绑后再删除');
+    if (rec.source === 'key') throw new HttpError(400, '这是上 key 台子自动挂账记录，不能手动删除；要调整请在项目的「上 key」里改价格或前缀');
     q.deleteRecord.run(rec.id);
     if (rec.entry_id) { const e = q.entry.get(rec.entry_id); if (e) { try { ops.deleteEntry(user, e.id, via); } catch {} } }
     const L = PARTY_LABEL[pa.kind];
@@ -1513,7 +1515,7 @@ async function buildWorkbook(report) {
       styledTable(pw, pr, [
         { header: '日期', key: 'date', width: 14 }, { header: '对象', key: 'party', width: 22 }, { header: '类型', key: 'type', width: 8, align: 'center' }, { header: '金额', key: 'amount', fmt: '#,##0.00', width: 14 },
         { header: '币种', key: 'currency', width: 7, align: 'center' }, { header: '折合（¥）', key: 'cny', fmt: MONEY, width: 15 }, { header: '备注 / 来源', key: 'note', width: 30, wrap: true },
-      ], recs.map((r) => ({ date: r.date, party: `${r.party_name}（${PARTY_LABEL[r.party_kind].name}）`, type: PARTY_LABEL[r.party_kind][r.kind], amount: r.amount, currency: r.currency, cny: r2(recBase(r)), note: [r.note, r.source === 'api' ? '接口同步' : r.source === 'ai' ? 'AI' : r.source === 'relay' ? '中转站自动' : ''].filter(Boolean).join(' · ') })), { freeze: false, filter: false });
+      ], recs.map((r) => ({ date: r.date, party: `${r.party_name}（${PARTY_LABEL[r.party_kind].name}）`, type: PARTY_LABEL[r.party_kind][r.kind], amount: r.amount, currency: r.currency, cny: r2(recBase(r)), note: [r.note, r.source === 'api' ? '接口同步' : r.source === 'ai' ? 'AI' : r.source === 'relay' ? '中转站自动' : r.source === 'key' ? '上 key 台子自动' : ''].filter(Boolean).join(' · ') })), { freeze: false, filter: false });
       pw.views = [{ showGridLines: false }];
     }
   }
@@ -2412,6 +2414,7 @@ const GATED_IMPL = {
       const rec = q.record.get(Number(input.record_id));
       if (!rec) throw new HttpError(404, `往来记录 #${input.record_id} 不存在`);
       if (rec.source === 'relay' && q.party.get(rec.party_id)?.relay_id) throw new HttpError(400, `往来记录 #${rec.id} 是中转站自动挂账，绑定期间不能删除；要调整请改倍率 / 折扣（update_party），或先解绑`);
+      if (rec.source === 'key') throw new HttpError(400, `往来记录 #${rec.id} 是上 key 台子自动挂账，不能删除；要调整请改上 key 项目的价格或前缀`);
       const L = PARTY_LABEL[rec.party_kind];
       return { resolved: { record_id: rec.id }, title: `删除往来记录 #${rec.id}`, detail: `${L.name}「${rec.party_name}」${L[rec.kind]} ${rec.amount.toLocaleString('zh-CN')} ${rec.currency}（${rec.date}）${rec.entry_id ? ` · 关联流水 #${rec.entry_id} 一并删除` : ''}` };
     },
@@ -2992,6 +2995,7 @@ app.get('/api/relay/search', auth, async (req, res, next) => {
 app.delete('/api/parties/:id', auth, (req, res) => { ops.deleteParty(req.user, req.params.id); res.json({ ok: true }); });
 app.post('/api/parties/:id/records', auth, (req, res) => { const r = ops.addPartyRecord(req.user, req.params.id, req.body || {}); res.json({ record: recordView(r.record), duplicate: r.duplicate }); });
 partyWallets = setupPartyWallets({ app, db, auth, HttpError, onChanged: (user, text) => dataChanged(user, text) });
+setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, addDays, onChanged: (user, text) => dataChanged(user, text), onAccrued: () => { dataVersion += 1; broadcast('changed', { version: dataVersion, byId: 0, by: '上 key 台子', text: '', at: now() }); } });
 // 侧栏「供应商」页：所有项目下的供应商 + 往来结算 + 供应商站点余额（每把 Key）
 app.get('/api/suppliers', auth, (req, res) => {
   const rows = db.prepare(`SELECT pa.*, p.name AS project_name, p.archived AS project_archived FROM parties pa JOIN projects p ON p.id = pa.project_id
@@ -3138,7 +3142,7 @@ app.get('/api/customers', auth, async (req, res) => {
       key: g.key, group: g.group, detail_party_id: ps[0].party_id,
       name: g.group || ps[0].name,
       parties: ps,
-      has_relay: ps.some((p) => p.project_type === 'relay'),
+      has_relay: ps.some((p) => p.project_type === 'relay' || p.project_type === 'key'),
       settle_type: ps.every((p) => p.settle_type === 'credit') ? 'credit' : 'prepaid',
       balance_usd: ps.some((p) => p.balance_usd != null) ? r2(ps.reduce((a, p) => a + (p.balance_usd ?? 0), 0)) : null,
       // 余额 × 折扣（美金）：预付余额按折扣折算后的实收价
@@ -3229,7 +3233,7 @@ async function computeProfitDaily() {
   const cust = new Map();
   const custPDU = new Map(); // projectId|date -> Map(用户名 -> cny)：每天各用户消耗
   for (const r of q.allRecords.all()) {
-    if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
+    if (r.party_kind !== 'customer' || r.kind !== 'due' || (r.source !== 'relay' && r.source !== 'key')) continue;
     const cny = recBase(r);
     const k = `${r.project_id}|${r.date}`;
     cust.set(k, r2((cust.get(k) || 0) + cny));
@@ -3251,6 +3255,12 @@ async function computeProfitDaily() {
     if (!d || !d.ok) { if (d) errors.push(`${d.name}：${(d.error || '').slice(0, 50)}`); continue; }
     const cr = d.consume_ratio || 1;
     for (const x of d.daily || []) sup.set(`${w.project_id}|${x.date}`, r2((sup.get(`${w.project_id}|${x.date}`) || 0) + (x.usd || 0) * cr));
+  }
+  // 上 key 项目的供应商应付（台子渠道消耗 × 前缀价格，已按天挂账）
+  for (const r of q.allRecords.all()) {
+    if (r.party_kind !== 'supplier' || r.kind !== 'due' || r.source !== 'key') continue;
+    const k = `${r.project_id}|${r.date}`;
+    sup.set(k, r2((sup.get(k) || 0) + recBase(r)));
   }
   // 每个项目「客户最早使用日」：从这天开始算，客户上线前只有供应商消耗的日子不计入
   const firstCust = new Map();

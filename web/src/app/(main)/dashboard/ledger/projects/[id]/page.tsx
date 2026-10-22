@@ -17,6 +17,7 @@ import { get, post } from "@/modules/ledger/api";
 import { EntriesTable } from "@/modules/ledger/components/entries-table";
 import { FilesCard } from "@/modules/ledger/components/files-panel";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
+import { KeySection } from "@/modules/ledger/components/key-section";
 import { PartiesSection } from "@/modules/ledger/components/parties-section";
 import { KpiCards, PageHeader } from "@/modules/ledger/components/shared";
 import { useProject } from "@/modules/ledger/hooks";
@@ -90,6 +91,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           <span className="flex items-center gap-2">
             {p.name}
             {p.category === "company" ? <Badge variant="secondary">公司日常</Badge> : null}
+            {p.ptype === "key" ? <Badge variant="secondary">上key</Badge> : null}
             {p.archived ? <Badge variant="outline">已归档 · 仅可查看</Badge> : null}
           </span>
         }
@@ -123,12 +125,18 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
 
       <KpiCards summary={data.summary} />
 
-      <Tabs defaultValue="entries" className="gap-4">
+      <Tabs defaultValue={p.ptype === "key" ? "key" : "entries"} className="gap-4">
         <TabsList>
+          {p.ptype === "key" ? <TabsTrigger value="key">上key</TabsTrigger> : null}
           <TabsTrigger value="entries">流水 {data.entries.length}</TabsTrigger>
           <TabsTrigger value="parties">往来 {partyCount || ""}</TabsTrigger>
           <TabsTrigger value="funds">成员资金</TabsTrigger>
         </TabsList>
+        {p.ptype === "key" ? (
+          <TabsContent value="key">
+            <KeySection detail={data} />
+          </TabsContent>
+        ) : null}
         <TabsContent value="entries">
           <EntriesTable detail={data} />
         </TabsContent>

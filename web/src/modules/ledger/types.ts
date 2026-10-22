@@ -76,7 +76,7 @@ export type Project = {
   archived: number | boolean;
   created_at: string;
   creator_name: string;
-  ptype?: "relay" | "short";
+  ptype?: "relay" | "short" | "key";
   category?: "customer" | "company";
 };
 export type ProjectWithSummary = Project & {

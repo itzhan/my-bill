@@ -36,7 +36,7 @@ export function ProjectDialog({
   const [confirm, confirmEl] = useConfirm();
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
-  const [ptype, setPtype] = useState<"relay" | "short">("relay");
+  const [ptype, setPtype] = useState<"relay" | "short" | "key">("relay");
   const [category, setCategory] = useState<"customer" | "company">("customer");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -45,7 +45,7 @@ export function ProjectDialog({
     if (!open) return;
     setName(project?.name ?? "");
     setNote(project?.note ?? "");
-    setPtype(project?.ptype === "short" ? "short" : "relay");
+    setPtype(project?.ptype ?? "relay");
     setCategory(project?.category === "company" ? "company" : "customer");
     setError(null);
   }, [open, project]);
@@ -166,7 +166,7 @@ export function ProjectDialog({
               type="single"
               variant="outline"
               value={ptype}
-              onValueChange={(v) => v && setPtype(v as "relay" | "short")}
+              onValueChange={(v) => v && setPtype(v as "relay" | "short" | "key")}
               className="w-full"
             >
               <ToggleGroupItem value="relay" className="flex-1 data-[state=on]:font-semibold">
@@ -175,11 +175,16 @@ export function ProjectDialog({
               <ToggleGroupItem value="short" className="flex-1 data-[state=on]:font-semibold">
                 项目制
               </ToggleGroupItem>
+              <ToggleGroupItem value="key" className="flex-1 data-[state=on]:font-semibold">
+                上key
+              </ToggleGroupItem>
             </ToggleGroup>
             <p className="text-muted-foreground text-xs">
               {ptype === "relay"
                 ? "中转：自动跟踪供应商与客户消耗，计入每日利润报表"
-                : "项目制：按实际记账（收入 − 支出）算利润，不进每日利润报表"}
+                : ptype === "key"
+                  ? "上key：甲方给台子，按供应商前缀跟踪渠道额度，按价格自动算应付 / 应收，计入每日利润报表"
+                  : "项目制：按实际记账（收入 − 支出）算利润，不进每日利润报表"}
             </p>
           </div>
           <div className="space-y-2">
