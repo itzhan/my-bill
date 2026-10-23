@@ -3332,12 +3332,15 @@ const shiftDay = (key, delta) => { const [y, m, dd] = key.split('-').map(Number)
 // 现代简约风格邮件（内联样式，邮件客户端安全）。默认报告「昨日」（数据完整更准），targetDate 可指定某天
 function buildProfitEmail(d, targetDate) {
   const today = targetDate || shiftDay(todayKey(), -1);
-  const wk = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][new Date(`${today}T00:00:00+08:00`).getDay()];
+  // 按日期本身算星期（UTC 解析 + getUTCDay），不受服务器时区影响；之前容器是 UTC，周日会算成周六
+  const wkOf = (key) => ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][new Date(`${key}T00:00:00Z`).getUTCDay()];
+  const wk = wkOf(today);
   const dateLabel = today.replace(/-/g, ' / ') + '　' + wk;
   const tp = d.projects.map((p) => ({ name: p.project_name, id: p.project_id, day: p.days.find((x) => x.date === today) })).filter((x) => x.day).sort((a, b) => b.day.profit - a.day.profit);
   const tc = tp.reduce((a, x) => ({ c: a.c + x.day.customer, s: a.s + x.day.supplier, p: a.p + x.day.profit }), { c: 0, s: 0, p: 0 });
   const margin = tc.c > 0 ? ((tc.p / tc.c) * 100).toFixed(1) : '0.0';
-  const recent = d.daily.slice(0, 7);
+  // 近 7 天：截止到报告日（昨天），不含今天未完的数据
+  const recent = d.daily.filter((x) => x.date <= today).slice(0, 7);
   const maxP = Math.max(1, ...recent.map((x) => Math.abs(x.profit)));
   const projBlocks = tp.map((x) => {
     const users = (x.day.customers || []).map((c) => `<tr><td style="padding:9px 0;color:#4b5563;border-top:1px solid #f3f4f6;">${htmlEsc(c.name)}</td><td style="padding:9px 0;text-align:right;color:#111827;font-weight:500;border-top:1px solid #f3f4f6;">${fmtY(c.cny)}</td></tr>`).join('');
@@ -3347,7 +3350,7 @@ function buildProfitEmail(d, targetDate) {
   const recentRows = recent.map((x) => {
     const w = Math.max(3, Math.round((Math.abs(x.profit) / maxP) * 100));
     const bar = x.profit < 0 ? '#fca5a5' : '#34d399';
-    return `<tr><td style="padding:7px 0;width:54px;color:#9ca3af;">${x.date.slice(5)}</td><td style="padding:7px 10px;"><div style="height:6px;width:${w}%;background:${bar};border-radius:3px;"></div></td><td style="padding:7px 0;width:84px;text-align:right;color:#374151;font-weight:500;">${fmtY0(x.profit)}</td></tr>`;
+    return `<tr><td style="padding:7px 0;width:84px;color:#9ca3af;white-space:nowrap;">${x.date.slice(5)} ${wkOf(x.date)}</td><td style="padding:7px 10px;"><div style="height:6px;width:${w}%;background:${bar};border-radius:3px;"></div></td><td style="padding:7px 0;width:84px;text-align:right;color:#374151;font-weight:500;">${fmtY0(x.profit)}</td></tr>`;
   }).join('');
   const pColor = tc.p < 0 ? '#dc2626' : '#059669';
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Roboto,Helvetica,Arial,sans-serif;">
@@ -3379,7 +3382,6 @@ app.post('/api/profit/email/send', auth, async (req, res) => {
   dataChanged(req.user, `手动推送了每日利润邮件到 ${out.recipients.join('、')}`);
   res.json({ ok: true, ...out });
 });
-// 每日定时发送
 // 预付客户低余额提醒：把余额低于各自阈值的客户汇总成一封邮件发给团队
 async function sendLowBalanceAlert() {
   const cfg = getEmailReport();
@@ -3457,8 +3459,6 @@ async function checkEmailReport() {
     try { await sendProfitEmailNow(); console.log(`[email] 每日利润邮件已发送 ${t.date} ${t.time}`); }
     catch (e) { console.error('[email] 每日利润邮件发送失败：', e.message); }
   }
-  try { const n = await sendLowBalanceAlert(); if (n) console.log(`[email] 低余额提醒已发送（${n} 个客户）`); }
-  catch (e) { console.error('[email] 低余额提醒失败：', e.message); }
   try { const n = await sendContractReminders(); if (n) console.log(`[email] 合同到期提醒已发送（${n} 份）`); }
   catch (e) { console.error('[email] 合同到期提醒失败：', e.message); }
 }
