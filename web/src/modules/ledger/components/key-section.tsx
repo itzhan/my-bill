@@ -24,8 +24,9 @@ import type { ProjectDetail } from "../types";
 import { FormError, ResponsiveDialog, useConfirm } from "./shared";
 
 type PriceMode = "discount" | "cny";
-type Price = { grp: string; mode: PriceMode; value: number; label: string };
-type GroupPrice = { mode: PriceMode; value: number; label: string } | null;
+type Tier = { from: number; value: number };
+type Price = { grp: string; mode: PriceMode; value: number; tiers: Tier[]; label: string };
+type GroupPrice = { mode: PriceMode; value: number; tiers: Tier[]; label: string } | null;
 type Settle = { due_cny: number; paid_cny: number; open_cny: number; credit_cny: number };
 type KeyView = {
   site: {
@@ -671,7 +672,7 @@ function PrefixForm({
 }
 
 type PriceTarget = { prefixId: number; title: string; prices: Price[] };
-type PriceBody = { grp: string; mode: PriceMode; value: number | null };
+type PriceBody = { grp: string; mode: PriceMode; value: number | null; tiers?: Tier[] };
 // 价格：默认价（grp 为空，适用于没单独设价的分组）+ 各分组单独价；值留空即删除
 function PriceDialog({
   target,
@@ -696,7 +697,17 @@ function PriceDialog({
   );
 }
 
-type PriceRow = { grp: string; mode: PriceMode; value: string };
+type TierRow = { id: string; from: string; value: string };
+type PriceRow = { grp: string; mode: PriceMode; value: string; tiers: TierRow[] };
+const tierRow = (t?: Tier): TierRow => ({
+  id: crypto.randomUUID(),
+  from: t ? String(t.from) : "",
+  value: t ? String(t.value) : "",
+});
+const tiersKey = (ts: { from: string | number; value: string | number }[]) =>
+  ts.map((t) => `${Number(t.from)}:${Number(t.value)}`).join(",");
+
+// 供应商（prefixId ≠ 0）可设梯度：累计消耗超过门槛的部分按下一档价格计
 function PriceForm({
   target,
   groups,
@@ -708,27 +719,49 @@ function PriceForm({
   onSave: (body: PriceBody) => Promise<boolean>;
   onDone: () => void;
 }) {
+  const tiered = target.prefixId !== 0;
   const [rows, setRows] = useState<PriceRow[]>(() =>
     ["", ...new Set([...groups, ...target.prices.map((p) => p.grp)].filter(Boolean))].map((g) => {
       const p = target.prices.find((x) => x.grp === g);
-      return { grp: g, mode: p?.mode ?? "discount", value: p ? String(p.value) : "" };
+      return {
+        grp: g,
+        mode: p?.mode ?? "discount",
+        value: p ? String(p.value) : "",
+        tiers: (p?.tiers ?? []).map(tierRow),
+      };
     }),
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const set = (i: number, p: Partial<PriceRow>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...p } : r)));
+  const setTier = (i: number, id: string, p: Partial<TierRow>) =>
+    setRows((rs) =>
+      rs.map((r, j) => (j === i ? { ...r, tiers: r.tiers.map((t) => (t.id === id ? { ...t, ...p } : t)) } : r)),
+    );
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const filled = (r: PriceRow) => r.tiers.filter((t) => t.from.trim() || t.value.trim());
     const changed = rows.filter((r) => {
       const p = target.prices.find((x) => x.grp === r.grp);
-      return p ? p.mode !== r.mode || String(p.value) !== r.value.trim() : r.value.trim() !== "";
+      return p
+        ? p.mode !== r.mode || String(p.value) !== r.value.trim() || tiersKey(p.tiers) !== tiersKey(filled(r))
+        : r.value.trim() !== "";
     });
-    const bad = changed.find((r) => r.value.trim() && !(Number(r.value) > 0));
-    if (bad) return setError(`「${bad.grp || "默认"}」的价格要大于 0`);
+    for (const r of changed) {
+      const name = r.grp || "默认";
+      if (r.value.trim() && !(Number(r.value) > 0)) return setError(`「${name}」的价格要大于 0`);
+      if (!r.value.trim()) continue;
+      const nums = filled(r).map((t) => ({ from: Number(t.from), value: Number(t.value) }));
+      if (nums.some((t) => !(t.from > 0) || !(t.value > 0)))
+        return setError(`「${name}」的梯度要填门槛和价格，且都大于 0`);
+      if (nums.some((t, k) => k > 0 && t.from <= (nums[k - 1]?.from ?? 0)))
+        return setError(`「${name}」的梯度门槛要逐档递增`);
+    }
     setBusy(true);
     for (const r of changed) {
       const v = r.value.trim();
-      if (!(await onSave({ grp: r.grp, mode: r.mode, value: v ? Number(v) : null }))) return setBusy(false);
+      const tiers = filled(r).map((t) => ({ from: Number(t.from), value: Number(t.value) }));
+      if (!(await onSave({ grp: r.grp, mode: r.mode, value: v ? Number(v) : null, tiers }))) return setBusy(false);
     }
     setBusy(false);
     toast.success(changed.length ? "价格已保存，挂账已重算" : "没有改动");
@@ -737,28 +770,88 @@ function PriceForm({
   return (
     <form onSubmit={submit} className="space-y-3">
       {rows.map((r, i) => (
-        <div key={r.grp} className="grid grid-cols-[1fr_7rem_6rem] items-center gap-2">
-          <span className="truncate text-sm">
-            {r.grp ? r.grp : <span className="text-muted-foreground">默认（其余分组）</span>}
-          </span>
-          <Select value={r.mode} onValueChange={(v) => set(i, { mode: v as PriceMode })}>
-            <SelectTrigger size="sm" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="discount">折扣 ×</SelectItem>
-              <SelectItem value="cny">¥ / 刀</SelectItem>
-            </SelectContent>
-          </Select>
-          <Input
-            inputMode="decimal"
-            className="h-8"
-            value={r.value}
-            onChange={(e) => set(i, { value: e.target.value })}
-            placeholder={r.mode === "cny" ? "如 0.5" : "如 0.1"}
-          />
+        <div key={r.grp} className="space-y-2">
+          <div className="grid grid-cols-[1fr_7rem_6rem] items-center gap-2">
+            <span className="truncate text-sm">
+              {r.grp ? r.grp : <span className="text-muted-foreground">默认（其余分组）</span>}
+            </span>
+            <Select value={r.mode} onValueChange={(v) => set(i, { mode: v as PriceMode })}>
+              <SelectTrigger size="sm" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="discount">折扣 ×</SelectItem>
+                <SelectItem value="cny">¥ / 刀</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              inputMode="decimal"
+              className="h-8"
+              value={r.value}
+              onChange={(e) => set(i, { value: e.target.value })}
+              placeholder={r.mode === "cny" ? "如 0.5" : "如 0.1"}
+            />
+          </div>
+          {tiered ? (
+            <>
+              {r.tiers.map((t) => (
+                <div key={t.id} className="grid grid-cols-[1fr_7rem_6rem] items-center gap-2 pl-4">
+                  <span className="text-muted-foreground flex items-center gap-1 text-xs">
+                    累计超过 $
+                    <Input
+                      inputMode="decimal"
+                      className="h-7 w-24"
+                      value={t.from}
+                      onChange={(e) => setTier(i, t.id, { from: e.target.value })}
+                      placeholder="如 30000"
+                    />
+                    后
+                  </span>
+                  <span className="text-muted-foreground text-right text-xs">
+                    {r.mode === "cny" ? "¥ / 刀" : "折扣 ×"}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <Input
+                      inputMode="decimal"
+                      className="h-7"
+                      value={t.value}
+                      onChange={(e) => setTier(i, t.id, { value: e.target.value })}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      title="删除这一档"
+                      onClick={() => set(i, { tiers: r.tiers.filter((x) => x.id !== t.id) })}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+              {r.value.trim() ? (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  className="h-auto px-0 pl-4 text-xs"
+                  onClick={() => set(i, { tiers: [...r.tiers, tierRow()] })}
+                >
+                  <Plus className="size-3" />
+                  加一档梯度
+                </Button>
+              ) : null}
+            </>
+          ) : null}
         </div>
       ))}
+      {tiered ? (
+        <p className="text-muted-foreground text-xs">
+          梯度按累计消耗分段：例如基础价 ¥2.4、超过 $30000 后 ¥2.2，则前 $30000 按 ¥2.4，超出部分按
+          ¥2.2。不加梯度即一口价
+        </p>
+      ) : null}
       <FormError>{error}</FormError>
       <Button type="submit" className="w-full" disabled={busy}>
         保存

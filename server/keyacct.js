@@ -54,6 +54,9 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     );
   `);
 
+  // 梯度价：tiers = [{ from: 美金门槛, value }]，同一价格行内累计消耗超过门槛的部分按该档计价（计价方式同基础价）
+  try { db.exec("ALTER TABLE key_prices ADD COLUMN tiers TEXT NOT NULL DEFAULT ''"); } catch { /* 已有该列 */ }
+
   const q = {
     project: db.prepare('SELECT * FROM projects WHERE id = ?'),
     site: db.prepare('SELECT * FROM key_sites WHERE project_id = ?'),
@@ -62,7 +65,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     prefixes: db.prepare('SELECT k.*, pa.name AS party_name FROM key_prefixes k JOIN parties pa ON pa.id = k.party_id WHERE k.project_id = ? ORDER BY k.prefix'),
     prefix: db.prepare('SELECT * FROM key_prefixes WHERE id = ?'),
     prices: db.prepare('SELECT * FROM key_prices WHERE project_id = ?'),
-    putPrice: db.prepare('INSERT INTO key_prices (project_id, prefix_id, grp, mode, value) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id, prefix_id, grp) DO UPDATE SET mode = excluded.mode, value = excluded.value'),
+    putPrice: db.prepare('INSERT INTO key_prices (project_id, prefix_id, grp, mode, value, tiers) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, prefix_id, grp) DO UPDATE SET mode = excluded.mode, value = excluded.value, tiers = excluded.tiers'),
     delPrice: db.prepare('DELETE FROM key_prices WHERE project_id = ? AND prefix_id = ? AND grp = ?'),
     channels: db.prepare('SELECT * FROM key_channels WHERE project_id = ?'),
     channel: db.prepare('SELECT * FROM key_channels WHERE project_id = ? AND channel_id = ?'),
@@ -179,12 +182,40 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
   // ---------- 计价 ----------
   function priceBook(projectId) {
     const m = new Map();
-    for (const p of q.prices.all(projectId)) m.set(`${p.prefix_id}|${p.grp}`, p);
+    for (const p of q.prices.all(projectId)) m.set(`${p.prefix_id}|${p.grp}`, { ...p, tiers: tiersOf(p) });
     // 先找该分组的价，没有再用默认价（grp = ''）
     return (prefixId, grp) => m.get(`${prefixId}|${grp}`) || m.get(`${prefixId}|`) || null;
   }
+  const tiersOf = (p) => { try { const t = JSON.parse(p.tiers || '[]'); return Array.isArray(t) ? t : []; } catch { return []; } };
   const toCny = (usd, price, usdRate) => (!price ? 0 : price.mode === 'cny' ? usd * price.value : usd * price.value * usdRate);
-  const priceLabel = (p) => (!p ? '未定价' : p.mode === 'cny' ? `¥${p.value}/刀` : `折扣 ×${p.value}`);
+  const unitLabel = (mode, v) => (mode === 'cny' ? `¥${v}/刀` : `折扣 ×${v}`);
+  const priceLabel = (p) => (!p ? '未定价' : [unitLabel(p.mode, p.value), ...tiersOf(p).map((t) => `$${t.from.toLocaleString('en-US')} 起 ${unitLabel(p.mode, t.value)}`)].join('；'));
+  // 梯度计价：这一笔 usd 之前该价格行已累计 before 美金，按各档区间拆开计价
+  function tieredCny(usd, price, usdRate, before) {
+    const steps = [{ from: 0, value: price.value }, ...price.tiers];
+    let cny = 0;
+    for (let i = 0; i < steps.length; i++) {
+      const lo = Math.max(steps[i].from, before);
+      const hi = Math.min(i + 1 < steps.length ? steps[i + 1].from : Infinity, before + usd);
+      if (hi > lo) cny += toCny(hi - lo, { mode: price.mode, value: steps[i].value }, usdRate);
+    }
+    return cny;
+  }
+  // 供应商应付：按时间顺序（期初在前）逐桶累计，每个价格行（前缀 + 分组 / 默认）单独计梯度。返回 桶 → 人民币
+  function supplierCosts(bs, price, rateOf) {
+    const used = new Map();
+    const out = new Map();
+    const order = [...bs].sort((a, b) => (a.opening !== b.opening ? (a.opening ? -1 : 1) : a.date.localeCompare(b.date)));
+    for (const b of order) {
+      const pr = price(b.prefix.id, b.grp);
+      if (!pr) { out.set(b, 0); continue; }
+      const k = `${b.prefix.id}|${pr.grp}`;
+      const before = used.get(k) || 0;
+      out.set(b, tieredCny(b.usd, pr, rateOf(b.date), before));
+      used.set(k, before + b.usd);
+    }
+    return out;
+  }
 
   // 汇总成 桶 = (日期, 是否期初, 前缀, 分组) → 美金
   function buckets(projectId) {
@@ -219,10 +250,12 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
       w.cny += cny; w.usd += usd; want.set(ref, w);
     };
     const cust = s.customer_party_id ? q.party.get(s.customer_party_id) : null;
-    for (const b of buckets(projectId)) {
+    const bs = buckets(projectId);
+    const cost = supplierCosts(bs, price, rateOf);
+    for (const b of bs) {
       const tag = b.opening ? `opening:${b.date}` : b.date;
       const ur = rateOf(b.date);
-      put(`key:${projectId}:${b.prefix.party_id}:${tag}`, b.prefix.party_id, b.date, toCny(b.usd, price(b.prefix.id, b.grp), ur), b.usd, b.opening);
+      put(`key:${projectId}:${b.prefix.party_id}:${tag}`, b.prefix.party_id, b.date, cost.get(b), b.usd, b.opening);
       if (cust) put(`key:${projectId}:${cust.id}:${tag}`, cust.id, b.date, toCny(b.usd, price(0, b.grp), ur), b.usd, b.opening);
     }
     let changed = false;
@@ -281,9 +314,11 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     const groups = new Map(); // 甲方分组
     const daily = new Map();
     const totals = { usd: 0, today_usd: 0, payable: 0, receivable: 0 };
-    for (const b of buckets(p.id)) {
+    const bs = buckets(p.id);
+    const cost = supplierCosts(bs, price, rateOf);
+    for (const b of bs) {
       const ur = rateOf(b.date);
-      const pay = toCny(b.usd, price(b.prefix.id, b.grp), ur);
+      const pay = cost.get(b);
       const rec = s.customer_party_id ? toCny(b.usd, price(0, b.grp), ur) : 0;
       const isToday = !b.opening && b.date === today;
       const pg = perPrefix.get(b.prefix.id).groups;
@@ -298,7 +333,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     }
     const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === 'number' ? (k.endsWith('usd') ? r4(v) : r2(v)) : v]));
     const supplierIds = [...new Set(prefixes.map((k) => k.party_id))];
-    const priceView = (pr) => (pr ? { mode: pr.mode, value: pr.value, label: priceLabel(pr) } : null);
+    const priceView = (pr) => (pr ? { mode: pr.mode, value: pr.value, tiers: tiersOf(pr), label: priceLabel(pr) } : null);
     const cookie = cookieOf(s);
     return {
       site: {
@@ -310,13 +345,13 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
       groups_seen: [...groupSet].sort(),
       prefixes: prefixes.map((k) => {
         const x = perPrefix.get(k.id);
-        const own = q.prices.all(p.id).filter((pr) => pr.prefix_id === k.id).map((pr) => ({ grp: pr.grp, mode: pr.mode, value: pr.value, label: priceLabel(pr) }));
+        const own = q.prices.all(p.id).filter((pr) => pr.prefix_id === k.id).map((pr) => ({ grp: pr.grp, ...priceView(pr) }));
         const gs = [...x.groups.values()].map((g) => ({ ...round(g), price: priceView(price(k.id, g.grp)) })).sort((a, b) => b.usd - a.usd);
         return { id: k.id, prefix: k.prefix, party_id: k.party_id, party_name: k.party_name, note: k.note, channels: x.channels, active: x.active, missing: x.missing, prices: own, groups: gs, usd: r4(gs.reduce((a, g) => a + g.usd, 0)), today_usd: r4(gs.reduce((a, g) => a + g.today_usd, 0)), payable: r2(gs.reduce((a, g) => a + g.payable, 0)), unpriced: gs.some((g) => !g.price && g.usd > 0) };
       }),
       customer: {
         party_id: s.customer_party_id,
-        prices: q.prices.all(p.id).filter((pr) => pr.prefix_id === 0).map((pr) => ({ grp: pr.grp, mode: pr.mode, value: pr.value, label: priceLabel(pr) })),
+        prices: q.prices.all(p.id).filter((pr) => pr.prefix_id === 0).map((pr) => ({ grp: pr.grp, ...priceView(pr) })),
         groups: [...groups.values()].map((g) => ({ ...round(g), price: priceView(price(0, g.grp)) })).sort((a, b) => b.usd - a.usd),
         settle: s.customer_party_id ? settleOf(s.customer_party_id) : null,
       },
@@ -398,7 +433,14 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
       const mode = b.mode === 'cny' ? 'cny' : 'discount';
       const value = Number(b.value);
       if (!(value > 0) || value > 100) throw new HttpError(400, '价格必须是 0–100 之间的数字');
-      q.putPrice.run(p.id, prefixId, grp, mode, r4(value));
+      // 梯度：门槛（美金）递增、各档价格同样 0–100；不传或空数组即无梯度
+      const tiers = (Array.isArray(b.tiers) ? b.tiers : []).map((t) => ({ from: Math.round(Number(t.from) * 100) / 100, value: r4(Number(t.value)) }));
+      for (let i = 0; i < tiers.length; i++) {
+        const t = tiers[i];
+        if (!(t.from > 0) || (i && t.from <= tiers[i - 1].from)) throw new HttpError(400, '梯度门槛必须大于 0 且逐档递增');
+        if (!(t.value > 0) || t.value > 100) throw new HttpError(400, '梯度价格必须是 0–100 之间的数字');
+      }
+      q.putPrice.run(p.id, prefixId, grp, mode, r4(value), tiers.length ? JSON.stringify(tiers) : '');
     }
     accrue(p.id);
     const who = prefixId ? `前缀 ${q.prefix.get(prefixId).prefix}` : '甲方';
