@@ -699,8 +699,10 @@ function PriceDialog({
 
 type TierRow = { id: string; from: string; value: string };
 type PriceRow = { grp: string; mode: PriceMode; value: string; tiers: TierRow[] };
+// 行 id 用自增序号：crypto.randomUUID 只在 HTTPS / localhost 下可用，用 http://IP:3300 访问时会报错
+let tierSeq = 0;
 const tierRow = (t?: Tier): TierRow => ({
-  id: crypto.randomUUID(),
+  id: String(++tierSeq),
   from: t ? String(t.from) : "",
   value: t ? String(t.value) : "",
 });
