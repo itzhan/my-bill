@@ -61,7 +61,8 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     project: db.prepare('SELECT * FROM projects WHERE id = ?'),
     site: db.prepare('SELECT * FROM key_sites WHERE project_id = ?'),
     ensureSite: db.prepare('INSERT OR IGNORE INTO key_sites (project_id) VALUES (?)'),
-    keyProjects: db.prepare("SELECT id FROM projects WHERE ptype = 'key' AND archived = 0 ORDER BY id"),
+    // 已归档的上 key 项目照常同步（归档只是不能再记账）
+    keyProjects: db.prepare("SELECT id FROM projects WHERE ptype = 'key' ORDER BY id"),
     prefixes: db.prepare('SELECT k.*, pa.name AS party_name FROM key_prefixes k JOIN parties pa ON pa.id = k.party_id WHERE k.project_id = ? ORDER BY k.prefix'),
     prefix: db.prepare('SELECT * FROM key_prefixes WHERE id = ?'),
     prices: db.prepare('SELECT * FROM key_prices WHERE project_id = ?'),

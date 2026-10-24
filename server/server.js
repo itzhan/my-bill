@@ -242,7 +242,8 @@ const q = {
   allEntries: db.prepare('SELECT project_id, type, amount, currency, rate, created_at FROM entries'),
   projectEntries: db.prepare(`${ENTRY_SELECT} WHERE e.project_id = ? ORDER BY e.created_at DESC, e.id DESC`),
   entry: db.prepare(`${ENTRY_SELECT} WHERE e.id = ?`),
-  reportEntriesAll: db.prepare(`${ENTRY_SELECT} WHERE p.archived = 0 ORDER BY e.created_at DESC, e.id DESC`),
+  // 归档只是变只读，统计（成员资金沉淀、报表、AI 查询）照常包含已归档项目
+  reportEntriesAll: db.prepare(`${ENTRY_SELECT} ORDER BY e.created_at DESC, e.id DESC`),
   reportEntriesEvery: db.prepare(`${ENTRY_SELECT} ORDER BY e.created_at DESC, e.id DESC`),
   insertEntry: db.prepare(`INSERT INTO entries (project_id, type, amount, currency, rate, handler_id, created_by, note, created_at, images, party_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   updateEntry: db.prepare(`UPDATE entries SET project_id = ?, type = ?, amount = ?, currency = ?, rate = ?, handler_id = ?, note = ?, created_at = ?, images = ?, party_id = ? WHERE id = ?`),
@@ -534,8 +535,7 @@ const transferLine = (t) => `${t.from_name} → ${t.to_name} ${t.amount.toLocale
 function memberFunds(projectId = null, { includeZero = false } = {}) {
   const rates = getRates();
   const entries = projectId ? q.projectEntries.all(projectId) : q.reportEntriesAll.all();
-  const archived = new Set(q.projects.all().filter((x) => x.archived).map((x) => x.id));
-  const transfers = projectId ? q.transfersOfProject.all(projectId) : q.allTransfers.all().filter((t) => !archived.has(t.project_id));
+  const transfers = projectId ? q.transfersOfProject.all(projectId) : q.allTransfers.all();
   const blank = () => ({ CNY: 0, USDT: 0, USD: 0 });
   const map = new Map();
   const slot = (id, name) => {
@@ -2917,8 +2917,7 @@ app.get('/api/projects', auth, (req, res) => {
     return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny) };
   });
   list.sort((a, b) => (a.archived - b.archived) || String(b.summary.last_at || b.created_at).localeCompare(String(a.summary.last_at || a.created_at)));
-  const activeEntries = list.filter((p) => !p.archived).flatMap((p) => byProject.get(p.id) || []);
-  res.json({ projects: list, totals: summarize(activeEntries, rates), funds: memberFunds(null), rates, version: dataVersion });
+  res.json({ projects: list, totals: summarize(list.flatMap((p) => byProject.get(p.id) || []), rates), funds: memberFunds(null), rates, version: dataVersion });
 });
 app.post('/api/projects', auth, (req, res) => res.json({ project: ops.createProject(req.user, req.body || {}) }));
 app.patch('/api/projects/:id', auth, (req, res) => res.json({ project: ops.updateProject(req.user, req.params.id, req.body || {}) }));

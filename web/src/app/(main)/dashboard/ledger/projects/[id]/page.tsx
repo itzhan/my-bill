@@ -6,7 +6,16 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArchiveRestore, ArrowLeft, ArrowLeftRight, ChartColumn, MessagesSquare, Pencil, Plus } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  ArrowLeft,
+  ArrowLeftRight,
+  ChartColumn,
+  MessagesSquare,
+  Pencil,
+  Plus,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +28,7 @@ import { FilesCard } from "@/modules/ledger/components/files-panel";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
 import { KeySection } from "@/modules/ledger/components/key-section";
 import { PartiesSection } from "@/modules/ledger/components/parties-section";
-import { KpiCards, PageHeader } from "@/modules/ledger/components/shared";
+import { KpiCards, PageHeader, useConfirm } from "@/modules/ledger/components/shared";
 import { useProject } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { PartyContract } from "@/modules/ledger/types";
@@ -31,6 +40,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const { openEntry, openProject, openTransfer, openChat } = useLedger();
   const qc = useQueryClient();
   const { data, error } = useProject(id);
+  const [confirm, confirmEl] = useConfirm();
   useTabTitle(data?.project.name);
   // 公司日常项目：加载合同 / 发票
   const isCompany = data?.project.category === "company";
@@ -76,11 +86,20 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     }
   };
 
-  // 已归档的项目重新开放（恢复后可继续记账 / 处理往来）
-  const reopen = async () => {
+  // 归档 = 只读（不能再记账），成员资金沉淀、报表、利润、上 key 同步照常统计；可随时重新开放
+  const setArchived = async (archived: boolean) => {
+    if (
+      archived &&
+      !(await confirm({
+        title: `归档「${p.name}」？`,
+        description: "归档后不能再记账，成员资金沉淀、报表、利润等统计照常包含这个项目；之后可以随时重新开放。",
+        confirmText: "归档",
+      }))
+    )
+      return;
     try {
-      await patch(`/projects/${p.id}`, { archived: false });
-      toast.success("项目已重新开放");
+      await patch(`/projects/${p.id}`, { archived });
+      toast.success(archived ? "项目已归档" : "项目已重新开放");
       qc.invalidateQueries({ queryKey: ["ledger"] });
     } catch (ex) {
       toast.error((ex as Error).message);
@@ -124,8 +143,14 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
               <ArrowLeftRight />
               记转账
             </Button>
+            {p.archived ? null : (
+              <Button variant="outline" onClick={() => setArchived(true)}>
+                <Archive />
+                归档
+              </Button>
+            )}
             {p.archived ? (
-              <Button onClick={reopen}>
+              <Button onClick={() => setArchived(false)}>
                 <ArchiveRestore />
                 重新开放
               </Button>
@@ -184,6 +209,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           />
         </>
       ) : null}
+      {confirmEl}
     </div>
   );
 }
