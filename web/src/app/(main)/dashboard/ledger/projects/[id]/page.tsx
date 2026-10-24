@@ -6,14 +6,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ArrowLeftRight, ChartColumn, MessagesSquare, Pencil, Plus } from "lucide-react";
+import { ArchiveRestore, ArrowLeft, ArrowLeftRight, ChartColumn, MessagesSquare, Pencil, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { get, post } from "@/modules/ledger/api";
+import { get, patch, post } from "@/modules/ledger/api";
 import { EntriesTable } from "@/modules/ledger/components/entries-table";
 import { FilesCard } from "@/modules/ledger/components/files-panel";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
@@ -76,6 +76,17 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     }
   };
 
+  // 已归档的项目重新开放（恢复后可继续记账 / 处理往来）
+  const reopen = async () => {
+    try {
+      await patch(`/projects/${p.id}`, { archived: false });
+      toast.success("项目已重新开放");
+      qc.invalidateQueries({ queryKey: ["ledger"] });
+    } catch (ex) {
+      toast.error((ex as Error).message);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-6">
       <Link
@@ -113,7 +124,12 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
               <ArrowLeftRight />
               记转账
             </Button>
-            {p.archived ? null : (
+            {p.archived ? (
+              <Button onClick={reopen}>
+                <ArchiveRestore />
+                重新开放
+              </Button>
+            ) : (
               <Button onClick={() => openEntry({ projectId: p.id })}>
                 <Plus />
                 记一笔
