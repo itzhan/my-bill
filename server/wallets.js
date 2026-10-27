@@ -501,7 +501,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     if (!w) throw new HttpError(404, '余额监控不存在');
     const t = nowIso();
     try {
-      if (!w.api_key) throw new Error('还没有填 API Key');
+      if (!w.api_key && !(w.platform === 'newapi' && w.access_token)) throw new Error('还没有填 API Key');
       const r = await fetchWallet(w);
       db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_today = ?, last_today_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
         .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, r.usedActual, r.today, r.todayActual, r.warning, t, id);
