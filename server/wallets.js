@@ -520,7 +520,8 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     const pa = party.get(Number(req.params.id));
     if (!pa) throw new HttpError(404, '供应商不存在（只有供应商可以绑定余额）');
     const v = input(req.body || {}, false);
-    if (!v.api_key) throw new HttpError(400, 'API Key 必填');
+    // new-api 填了访问令牌就能按账户读余额 / 消耗，API Key 可不填
+    if (!v.api_key && !(v.platform === 'newapi' && v.access_token)) throw new HttpError(400, 'API Key 必填（new-api 填了访问令牌时可不填）');
     checkCustom(v);
     const t = nowIso();
     const cols = { party_id: pa.id, ...v, created_at: t, updated_at: t };

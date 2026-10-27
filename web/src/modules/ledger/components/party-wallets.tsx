@@ -85,7 +85,8 @@ export const EMPTY_WALLET: WalletDraft = {
 // 校验：返回错误文案，没问题返回 null
 export function walletDraftError(v: WalletDraft, requireKey: boolean) {
   if (!/^https?:\/\//i.test(v.base_url.trim())) return "站点地址需以 http:// 或 https:// 开头";
-  if (requireKey && !v.api_key.trim()) return "API Key 必填";
+  if (requireKey && !v.api_key.trim() && !(v.platform === "newapi" && v.access_token.trim()))
+    return "API Key 必填（new-api 填了访问令牌时可不填）";
   if (v.custom && !(Number(v.custom_ratio) > 0)) return "充值倍率必须大于 0";
   if (v.custom && v.consume_ratio.trim() && !(Number(v.consume_ratio) > 0)) return "消耗倍率必须大于 0";
   return null;
