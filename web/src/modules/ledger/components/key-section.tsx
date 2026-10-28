@@ -25,8 +25,9 @@ import { FormError, ResponsiveDialog, useConfirm } from "./shared";
 
 type PriceMode = "discount" | "cny";
 type Tier = { from: number; value: number };
-type Price = { grp: string; mode: PriceMode; value: number; tiers: Tier[]; label: string };
-type GroupPrice = { mode: PriceMode; value: number; tiers: Tier[]; label: string } | null;
+type DateTier = { from_date: string; value: number };
+type Price = { grp: string; mode: PriceMode; value: number; tiers: Tier[]; date_tiers: DateTier[]; label: string };
+type GroupPrice = { mode: PriceMode; value: number; tiers: Tier[]; date_tiers: DateTier[]; label: string } | null;
 type Settle = { due_cny: number; paid_cny: number; open_cny: number; credit_cny: number };
 type KeyView = {
   site: {
@@ -684,7 +685,7 @@ function PrefixForm({
 }
 
 type PriceTarget = { prefixId: number; title: string; prices: Price[] };
-type PriceBody = { grp: string; mode: PriceMode; value: number | null; tiers?: Tier[] };
+type PriceBody = { grp: string; mode: PriceMode; value: number | null; tiers?: Tier[]; date_tiers?: DateTier[] };
 // 价格：默认价（grp 为空，适用于没单独设价的分组）+ 各分组单独价；值留空即删除
 function PriceDialog({
   target,
@@ -713,15 +714,17 @@ type TierRow = { id: string; from: string; value: string };
 type PriceRow = { grp: string; mode: PriceMode; value: string; tiers: TierRow[] };
 // 行 id 用自增序号：crypto.randomUUID 只在 HTTPS / localhost 下可用，用 http://IP:3300 访问时会报错
 let tierSeq = 0;
-const tierRow = (t?: Tier): TierRow => ({
+const tierRow = (t?: { from: string | number; value: number }): TierRow => ({
   id: String(++tierSeq),
   from: t ? String(t.from) : "",
   value: t ? String(t.value) : "",
 });
 const tiersKey = (ts: { from: string | number; value: string | number }[]) =>
-  ts.map((t) => `${Number(t.from)}:${Number(t.value)}`).join(",");
+  ts.map((t) => `${String(t.from).trim()}:${Number(t.value)}`).join(",");
+const RE_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
-// 供应商（prefixId ≠ 0）可设梯度：累计消耗超过门槛的部分按下一档价格计
+// 供应商（prefixId ≠ 0）可设梯度：累计消耗超过门槛的部分按下一档价格计；
+// 甲方（prefixId = 0）可按日期调价：某日期及以后的消耗按新价计（tiers 行的 from 存日期）
 function PriceForm({
   target,
   groups,
@@ -741,7 +744,9 @@ function PriceForm({
         grp: g,
         mode: p?.mode ?? "discount",
         value: p ? String(p.value) : "",
-        tiers: (p?.tiers ?? []).map(tierRow),
+        tiers: tiered
+          ? (p?.tiers ?? []).map(tierRow)
+          : (p?.date_tiers ?? []).map((t) => tierRow({ from: t.from_date, value: t.value })),
       };
     }),
   );
@@ -758,13 +763,24 @@ function PriceForm({
     const changed = rows.filter((r) => {
       const p = target.prices.find((x) => x.grp === r.grp);
       return p
-        ? p.mode !== r.mode || String(p.value) !== r.value.trim() || tiersKey(p.tiers) !== tiersKey(filled(r))
+        ? p.mode !== r.mode ||
+            String(p.value) !== r.value.trim() ||
+            tiersKey(tiered ? p.tiers : p.date_tiers.map((t) => ({ from: t.from_date, value: t.value }))) !==
+              tiersKey(filled(r))
         : r.value.trim() !== "";
     });
     for (const r of changed) {
       const name = r.grp || "默认";
       if (r.value.trim() && !(Number(r.value) > 0)) return setError(`「${name}」的价格要大于 0`);
       if (!r.value.trim()) continue;
+      if (!tiered) {
+        const ds = filled(r).map((t) => ({ from: t.from.trim(), value: Number(t.value) }));
+        if (ds.some((t) => !RE_DAY.test(t.from) || !(t.value > 0)))
+          return setError(`「${name}」的调价要填日期和价格，价格大于 0`);
+        if (ds.some((t, k) => k > 0 && t.from <= (ds[k - 1]?.from ?? "")))
+          return setError(`「${name}」的调价日期要逐个往后`);
+        continue;
+      }
       const nums = filled(r).map((t) => ({ from: Number(t.from), value: Number(t.value) }));
       if (nums.some((t) => !(t.from > 0) || !(t.value > 0)))
         return setError(`「${name}」的梯度要填门槛和价格，且都大于 0`);
@@ -774,8 +790,10 @@ function PriceForm({
     setBusy(true);
     for (const r of changed) {
       const v = r.value.trim();
-      const tiers = filled(r).map((t) => ({ from: Number(t.from), value: Number(t.value) }));
-      if (!(await onSave({ grp: r.grp, mode: r.mode, value: v ? Number(v) : null, tiers }))) return setBusy(false);
+      const extra = tiered
+        ? { tiers: filled(r).map((t) => ({ from: Number(t.from), value: Number(t.value) })) }
+        : { date_tiers: filled(r).map((t) => ({ from_date: t.from.trim(), value: Number(t.value) })) };
+      if (!(await onSave({ grp: r.grp, mode: r.mode, value: v ? Number(v) : null, ...extra }))) return setBusy(false);
     }
     setBusy(false);
     toast.success(changed.length ? "价格已保存，挂账已重算" : "没有改动");
@@ -857,9 +875,64 @@ function PriceForm({
                 </Button>
               ) : null}
             </>
-          ) : null}
+          ) : (
+            <>
+              {r.tiers.map((t) => (
+                <div key={t.id} className="grid grid-cols-[1fr_7rem_6rem] items-center gap-2 pl-4">
+                  <span className="text-muted-foreground flex items-center gap-1 text-xs">
+                    从
+                    <Input
+                      type="date"
+                      className="h-7 w-36"
+                      value={t.from}
+                      onChange={(e) => setTier(i, t.id, { from: e.target.value })}
+                    />
+                    起
+                  </span>
+                  <span className="text-muted-foreground text-right text-xs">
+                    {r.mode === "cny" ? "¥ / 刀" : "折扣 ×"}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <Input
+                      inputMode="decimal"
+                      className="h-7"
+                      value={t.value}
+                      onChange={(e) => setTier(i, t.id, { value: e.target.value })}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      title="删除这次调价"
+                      onClick={() => set(i, { tiers: r.tiers.filter((x) => x.id !== t.id) })}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+              {r.value.trim() ? (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  className="h-auto px-0 pl-4 text-xs"
+                  onClick={() => set(i, { tiers: [...r.tiers, tierRow()] })}
+                >
+                  <Plus className="size-3" />
+                  加一个调价日期
+                </Button>
+              ) : null}
+            </>
+          )}
         </div>
       ))}
+      {!tiered ? (
+        <p className="text-muted-foreground text-xs">
+          按日期调价：例如基础价 0.45、从 2026-10-28 起 0.5，则 10-27 及以前的消耗按 0.45，10-28 及以后按 0.5
+        </p>
+      ) : null}
       {tiered ? (
         <p className="text-muted-foreground text-xs">
           梯度按累计消耗分段：例如基础价 ¥2.4、超过 $30000 后 ¥2.2，则前 $30000 按 ¥2.4，超出部分按
