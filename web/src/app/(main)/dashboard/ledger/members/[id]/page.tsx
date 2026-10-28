@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { get } from "@/modules/ledger/api";
 import { EntryDetailDialog } from "@/modules/ledger/components/entry-detail";
 import { MemberAvatar, Pager, usePaged } from "@/modules/ledger/components/shared";
-import { CUR, curf, fmt, fmtTime, money, signed } from "@/modules/ledger/format";
+import { CUR, curf, dayKey, fmt, fmtTime, money, signed } from "@/modules/ledger/format";
 import { useMe } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { Entry, MemberDetail } from "@/modules/ledger/types";
@@ -51,7 +51,7 @@ function EntriesTab({ entries }: { entries: Entry[] }) {
                   title="点击查看详情"
                 >
                   <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
-                    {fmtTime(e.created_at)}
+                    {dayKey(e.created_at)} {fmtTime(e.created_at)}
                   </TableCell>
                   <TableCell>
                     <Badge
