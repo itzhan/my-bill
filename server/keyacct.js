@@ -56,6 +56,8 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
 
   // 梯度价：tiers = [{ from: 美金门槛, value }]，同一价格行内累计消耗超过门槛的部分按该档计价（计价方式同基础价）
   try { db.exec("ALTER TABLE key_prices ADD COLUMN tiers TEXT NOT NULL DEFAULT ''"); } catch { /* 已有该列 */ }
+  // 只统计哪些分组（逗号分隔，空 = 全部）；按开头匹配，azure 也包含 azure_eus 等。用于 Azure / Vertex 项目各算各的
+  try { db.exec("ALTER TABLE key_sites ADD COLUMN groups TEXT NOT NULL DEFAULT ''"); } catch { /* 已有该列 */ }
 
   const q = {
     project: db.prepare('SELECT * FROM projects WHERE id = ?'),
@@ -218,12 +220,19 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     return out;
   }
 
+  const groupsOf = (s) => String(s.groups || '').split(',').map((g) => g.trim()).filter(Boolean);
+  // 本项目统计范围内的渠道（设了分组范围时，其他分组的渠道不计入）
+  const scopedChannels = (s) => {
+    const gs = groupsOf(s);
+    const all = q.channels.all(s.project_id);
+    return gs.length ? all.filter((c) => gs.some((g) => c.grp.startsWith(g))) : all;
+  };
   // 汇总成 桶 = (日期, 是否期初, 前缀, 分组) → 美金
   function buckets(projectId) {
     const s = siteOf(projectId);
     const qpu = qpuOf(s);
     const prefixes = q.prefixes.all(projectId);
-    const chans = new Map(q.channels.all(projectId).map((c) => [c.channel_id, c]));
+    const chans = new Map(scopedChannels(s).map((c) => [c.channel_id, c]));
     const out = new Map();
     const add = (date, opening, ch, quota) => {
       const k = matchPrefix(ch.name, prefixes);
@@ -301,7 +310,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     const dayRate = new Map(q.dayRates.all(p.id).map((r) => [r.date, r.usd_rate]));
     const usdRate = getRates().USD;
     const rateOf = (d) => dayRate.get(d) ?? usdRate;
-    const chans = q.channels.all(p.id);
+    const chans = scopedChannels(s);
     const perPrefix = new Map(prefixes.map((k) => [k.id, { channels: 0, active: 0, missing: 0, groups: new Map() }]));
     for (const c of chans) {
       const k = matchPrefix(c.name, prefixes);
@@ -338,7 +347,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     const cookie = cookieOf(s);
     return {
       site: {
-        base_url: s.base_url, effective_base: baseOf(s), user_id: s.user_id, quota_per_usd: qpuOf(s), customer_party_id: s.customer_party_id,
+        base_url: s.base_url, effective_base: baseOf(s), user_id: s.user_id, quota_per_usd: qpuOf(s), customer_party_id: s.customer_party_id, groups: s.groups || '',
         has_cookie: !!s.cookie, cookie_from_env: !s.cookie && !!cookie, cookie_masked: cookie ? `${cookie.slice(0, 10)}…（${cookie.length} 字符）` : '',
         last_sync_at: s.last_sync_at, last_error: s.last_error, interval_min: LOOP_MS / 60000,
       },
@@ -379,8 +388,9 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
       const pa = cust && q.party.get(cust);
       if (cust && (!pa || pa.project_id !== p.id || pa.kind !== 'customer')) throw new HttpError(400, '甲方必须是本项目的客户');
     }
-    db.prepare('UPDATE key_sites SET base_url = ?, cookie = ?, user_id = ?, quota_per_usd = ?, customer_party_id = ? WHERE project_id = ?')
-      .run(base, b.cookie === undefined ? s.cookie : str(b.cookie, 4000), b.user_id === undefined ? s.user_id : str(b.user_id, 20) || '2', qpu, cust, p.id);
+    const groups = b.groups === undefined ? s.groups : str(b.groups, 200).split(/[,，\s]+/).filter(Boolean).join(',');
+    db.prepare('UPDATE key_sites SET base_url = ?, cookie = ?, user_id = ?, quota_per_usd = ?, customer_party_id = ?, groups = ? WHERE project_id = ?')
+      .run(base, b.cookie === undefined ? s.cookie : str(b.cookie, 4000), b.user_id === undefined ? s.user_id : str(b.user_id, 20) || '2', qpu, cust, groups, p.id);
     accrue(p.id);
     onChanged(req.user, `修改了上 key 项目「${p.name}」的台子设置`);
     res.json(view(p.id));

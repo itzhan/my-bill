@@ -35,6 +35,7 @@ type KeyView = {
     user_id: string;
     quota_per_usd: number;
     customer_party_id: number | null;
+    groups: string;
     has_cookie: boolean;
     cookie_from_env: boolean;
     cookie_masked: string;
@@ -170,6 +171,7 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
           </CardTitle>
           <CardDescription>
             {s.last_sync_at ? `上次同步 ${relTime(s.last_sync_at)}` : "尚未同步"} · 每 {s.interval_min} 分钟自动同步 ·
+            {s.groups ? ` 只统计 ${s.groups} 分组 ·` : ""}
             甲方 {custName ?? <span className="text-expense">未设置</span>}
             {s.cookie_from_env ? " · Cookie 用服务器默认值" : s.has_cookie ? "" : " · 未配置 Cookie"}
             {s.last_error ? <span className="text-expense block">{s.last_error}</span> : null}
@@ -535,6 +537,7 @@ function SiteForm({
   const [cookie, setCookie] = useState("");
   const [user, setUser] = useState(site.user_id);
   const [qpu, setQpu] = useState(String(site.quota_per_usd));
+  const [groups, setGroups] = useState(site.groups);
   const [cust, setCust] = useState(site.customer_party_id ? String(site.customer_party_id) : "");
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -542,6 +545,7 @@ function SiteForm({
       base_url: base,
       user_id: user,
       quota_per_usd: Number(qpu),
+      groups,
       customer_party_id: cust ? Number(cust) : null,
     };
     if (cookie.trim()) body.cookie = cookie.trim();
@@ -563,6 +567,14 @@ function SiteForm({
             ))}
           </SelectContent>
         </Select>
+      </div>
+      <div className="space-y-2">
+        <Label>只统计这些分组</Label>
+        <Input value={groups} onChange={(e) => setGroups(e.target.value)} placeholder="留空 = 全部分组，例如 azure" />
+        <p className="text-muted-foreground text-xs">
+          多个用逗号隔开，按开头匹配（azure 也包含 azure_eus）。其他分组的渠道不计入本项目，适合 Azure / Vertex
+          分项目记账
+        </p>
       </div>
       <div className="space-y-2">
         <Label>台子地址</Label>
