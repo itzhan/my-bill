@@ -164,7 +164,7 @@ export type Settle = {
 };
 export type Party = {
   id: number;
-  project_id: number;
+  project_id: number | null;
   project_name?: string;
   kind: PartyKind;
   name: string;
@@ -210,6 +210,7 @@ export type Party = {
 export type PartyWallet = {
   id: number;
   party_id: number;
+  project_id: number | null;
   name: string;
   platform: "newapi" | "sub2api";
   base_url: string;

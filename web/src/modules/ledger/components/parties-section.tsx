@@ -137,7 +137,11 @@ function PartyColumn({
         </CardDescription>
         {detail.project.archived ? null : (
           <CardAction>
-            <Button variant="outline" size="sm" onClick={() => openPartyNew(detail.project.id, kind)}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => (kind === "supplier" ? openPartyNew(0, "supplier") : openPartyNew(detail.project.id, kind))}
+            >
               <Plus />
               {L.name}
             </Button>

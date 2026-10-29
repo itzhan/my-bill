@@ -2,7 +2,6 @@
 
 import { useMemo, useState } from "react";
 
-import Link from "next/link";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw, Search } from "lucide-react";
@@ -11,13 +10,6 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -32,7 +24,7 @@ import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { Party, PartyWallet } from "@/modules/ledger/types";
 
-type SupplierRow = Party & { project_archived: boolean; wallets: PartyWallet[] };
+type SupplierRow = Party & { wallets: PartyWallet[] };
 
 // 侧栏「供应商」：汇总所有项目的供应商，以及我们在各供应商站点（new-api / sub2api）的余额、倍率、累计消费
 export default function SuppliersPage() {
@@ -54,17 +46,16 @@ export default function SuppliersPage() {
     return (data ?? [])
       .filter(
         (s) =>
-          (showArchived || (!s.archived && !s.project_archived)) &&
+          (showArchived || !s.archived) &&
           (!kw ||
             s.name.toLowerCase().includes(kw) ||
-            (s.project_name ?? "").toLowerCase().includes(kw) ||
             s.wallets.some((w) => w.name.toLowerCase().includes(kw) || w.base_url.toLowerCase().includes(kw))),
       )
       .sort((a, b) => usedOf(b) - usedOf(a)); // 累计消费多的在前
   }, [data, q, showArchived]);
   const { rows: pageRows, pager } = usePaged(rows, `${q}|${showArchived}`);
 
-  const active = (data ?? []).filter((s) => !s.archived && !s.project_archived);
+  const active = (data ?? []).filter((s) => !s.archived);
   const wallets = active.flatMap((s) => s.wallets).filter((w) => w.enabled);
   // 账户级合计（按站点去重，取自 s.wallet 汇总）；授信供应商不计入实际余额
   const totalActual = active.filter((s) => s.settle_type !== "credit").reduce((a, s) => a + (s.wallet?.actual ?? 0), 0);
@@ -123,31 +114,17 @@ export default function SuppliersPage() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="供应商"
-        description="所有项目的供应商，以及我们在各供应商站点的余额、倍率与累计消费（每 30 分钟自动刷新）"
+        description="供应商全局一份，可同时服务多个项目。余额、倍率与累计消费每 30 分钟自动刷新"
         actions={
           <>
             <Button variant="outline" onClick={refreshAll} disabled={refreshing || !wallets.length}>
               <RefreshCw className={cn(refreshing && "animate-spin")} />
               {refreshing ? "抓取中…" : "全部刷新"}
             </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button>
-                  <Plus />
-                  添加供应商
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="max-h-80 w-56 overflow-y-auto">
-                <DropdownMenuLabel>加到哪个项目</DropdownMenuLabel>
-                {(pd?.projects ?? [])
-                  .filter((p) => !p.archived)
-                  .map((p) => (
-                    <DropdownMenuItem key={p.id} onClick={() => openPartyNew(p.id, "supplier")}>
-                      {p.name}
-                    </DropdownMenuItem>
-                  ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Button onClick={() => openPartyNew(0, "supplier")}>
+              <Plus />
+              添加供应商
+            </Button>
           </>
         }
       />
@@ -182,7 +159,7 @@ export default function SuppliersPage() {
             <div className="relative w-full sm:w-56">
               <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
               <Input
-                placeholder="搜索供应商 / 项目 / Key"
+                placeholder="搜索供应商 / Key"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 className="pl-9"
@@ -221,7 +198,7 @@ export default function SuppliersPage() {
                       return (
                         <TableRow
                           key={s.id}
-                          className={cn("cursor-pointer align-top", (s.archived || s.project_archived) && "opacity-60")}
+                          className={cn("cursor-pointer align-top", s.archived && "opacity-60")}
                           onClick={() => openParty(s.id)}
                         >
                           <TableCell>
@@ -230,15 +207,6 @@ export default function SuppliersPage() {
                               {s.settle_type === "credit" ? <Badge variant="outline">授信</Badge> : null}
                               {s.archived ? <Badge variant="outline">归档</Badge> : null}
                             </div>
-                            <Link
-                              prefetch={false}
-                              href={`/dashboard/ledger/projects/${s.project_id}`}
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-muted-foreground text-xs hover:underline"
-                            >
-                              {s.project_name}
-                              {s.project_archived ? "（项目已归档）" : ""}
-                            </Link>
                           </TableCell>
                           <TableCell className="hidden max-w-[16rem] lg:table-cell">
                             <span className="text-muted-foreground line-clamp-2 text-xs" title={s.profile || ""}>

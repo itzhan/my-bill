@@ -196,6 +196,8 @@ for (const [col, ddl] of [
 ]) {
   try { db.exec(`ALTER TABLE party_files ADD COLUMN ${col} ${ddl}`); } catch { /* 已有该列 */ }
 }
+// 供应商改为全局（不归属项目）：往来记录和余额监控各自记项目，供应商行的 project_id 置空
+try { db.exec('ALTER TABLE party_records ADD COLUMN project_id INTEGER REFERENCES projects(id)'); } catch { /* 已有该列 */ }
 // 项目类型：relay 中转（自动跟踪供应商/客户消耗）/ short 短期（按记账收支算利润）/ key 上 key（按前缀跟踪台子渠道消耗，见 keyacct.js）
 if (!db.prepare("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'ptype'").get()) {
   db.exec("ALTER TABLE projects ADD COLUMN ptype TEXT NOT NULL DEFAULT 'relay'");
@@ -267,12 +269,12 @@ const q = {
   deleteProject: db.prepare('DELETE FROM projects WHERE id = ?'),
   clearEntriesOfProject: db.prepare('DELETE FROM entries WHERE project_id = ?'),
   clearTransfersOfProject: db.prepare('DELETE FROM transfers WHERE project_id = ?'),
-  clearRecordsOfProject: db.prepare('DELETE FROM party_records WHERE party_id IN (SELECT id FROM parties WHERE project_id = ?)'),
-  clearPartiesOfProject: db.prepare('DELETE FROM parties WHERE project_id = ?'),
+  clearRecordsOfProject: db.prepare('DELETE FROM party_records WHERE project_id = ? OR party_id IN (SELECT id FROM parties WHERE project_id = ?)'),
+  clearPartiesOfProject: db.prepare("DELETE FROM parties WHERE project_id = ? AND kind = 'customer'"),
   channelsOfProject: db.prepare('SELECT * FROM channels WHERE project_id = ?'),
   deleteChannel: db.prepare('DELETE FROM channels WHERE key = ?'),
   countEntriesOfProject: db.prepare('SELECT COUNT(*) AS n FROM entries WHERE project_id = ?'),
-  countRecordsOfProject: db.prepare('SELECT COUNT(*) AS n FROM party_records WHERE party_id IN (SELECT id FROM parties WHERE project_id = ?)'),
+  countRecordsOfProject: db.prepare('SELECT COUNT(*) AS n FROM party_records WHERE project_id = ? OR party_id IN (SELECT id FROM parties WHERE project_id = ?)'),
   countTransfersOfProject: db.prepare('SELECT COUNT(*) AS n FROM transfers WHERE project_id = ?'),
   countPartiesOfProject: db.prepare('SELECT COUNT(*) AS n FROM parties WHERE project_id = ?'),
   deleteReportsOfScope: db.prepare('DELETE FROM reports WHERE scope = ?'),
@@ -316,7 +318,7 @@ const q = {
   pendingByTool: db.prepare("SELECT * FROM proposals WHERE status = 'pending' AND tool = ? LIMIT 1"),
 
   partiesOfProject: db.prepare('SELECT * FROM parties WHERE project_id = ? ORDER BY archived, kind, id'),
-  party: db.prepare(`SELECT pa.*, p.name AS project_name FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.id = ?`),
+  party: db.prepare(`SELECT pa.*, p.name AS project_name FROM parties pa LEFT JOIN projects p ON p.id = pa.project_id WHERE pa.id = ?`),
   partyByName: db.prepare('SELECT * FROM parties WHERE project_id = ? AND kind = ? AND (name = ? OR (external_id != \'\' AND external_id = ?))'),
   insertParty: db.prepare('INSERT INTO parties (project_id, kind, name, contact, note, currency, external_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'),
   updateParty: db.prepare('UPDATE parties SET name = ?, contact = ?, note = ?, currency = ?, external_id = ?, archived = ?, ratio = ? WHERE id = ?'),
@@ -324,11 +326,11 @@ const q = {
   recordsWithCreator: db.prepare(`SELECT r.*, u.username AS creator_name FROM party_records r LEFT JOIN users u ON u.id = r.created_by WHERE r.party_id = ? ORDER BY r.date DESC, r.id DESC`),
   deleteParty: db.prepare('DELETE FROM parties WHERE id = ?'),
   recordsOfParty: db.prepare('SELECT * FROM party_records WHERE party_id = ? ORDER BY date DESC, id DESC'),
-  recordsOfProject: db.prepare(`SELECT r.*, pa.kind AS party_kind, pa.name AS party_name FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE pa.project_id = ? ORDER BY r.date DESC, r.id DESC`),
-  allRecords: db.prepare(`SELECT r.*, pa.kind AS party_kind, pa.name AS party_name, pa.project_id FROM party_records r JOIN parties pa ON pa.id = r.party_id`),
-  record: db.prepare(`SELECT r.*, pa.kind AS party_kind, pa.name AS party_name, pa.project_id FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE r.id = ?`),
+  recordsOfProject: db.prepare(`SELECT r.*, pa.kind AS party_kind, pa.name AS party_name FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE COALESCE(r.project_id, pa.project_id) = ? ORDER BY r.date DESC, r.id DESC`),
+  allRecords: db.prepare(`SELECT r.*, pa.kind AS party_kind, pa.name AS party_name, COALESCE(r.project_id, pa.project_id) AS project_id FROM party_records r JOIN parties pa ON pa.id = r.party_id`),
+  record: db.prepare(`SELECT r.*, pa.kind AS party_kind, pa.name AS party_name, COALESCE(r.project_id, pa.project_id) AS project_id FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE r.id = ?`),
   recordByRef: db.prepare('SELECT * FROM party_records WHERE external_ref = ?'),
-  insertRecord: db.prepare('INSERT INTO party_records (party_id, kind, amount, currency, rate, date, note, source, external_ref, entry_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+  insertRecord: db.prepare('INSERT INTO party_records (party_id, kind, amount, currency, rate, date, note, source, external_ref, entry_id, created_by, created_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
   updateRecord: db.prepare('UPDATE party_records SET amount = ?, currency = ?, rate = ?, date = ?, note = ? WHERE id = ?'),
   deleteRecord: db.prepare('DELETE FROM party_records WHERE id = ?'),
   channels: db.prepare(`SELECT c.*, p.name AS project_name, p.archived AS project_archived FROM channels c LEFT JOIN projects p ON p.id = c.project_id ORDER BY c.rowid`),
@@ -639,7 +641,6 @@ const ops = {
       else {
         const pa = q.party.get(Number(body.party_id));
         if (!pa || pa.kind !== 'supplier') throw new HttpError(400, '供应商不存在');
-        if (pa.project_id !== p.id) throw new HttpError(400, '供应商不属于这个项目');
         partyId = pa.id;
       }
     }
@@ -664,7 +665,7 @@ const ops = {
     if (!ops.canManageProject(user, p)) throw new HttpError(403, `只有项目创建者（${q.userById.get(p.created_by)?.username || '创建者'}）可以清空这个项目`);
     const st = ops.projectStats(p.id);
     for (const pa of q.partiesOfProject.all(p.id)) q.putSetting.run(`relay_opening:${pa.id}`, '');   // 自动挂账重新来过
-    q.clearRecordsOfProject.run(p.id);
+    q.clearRecordsOfProject.run(p.id, p.id);
     q.clearTransfersOfProject.run(p.id);
     q.clearEntriesOfProject.run(p.id);
     q.deleteReportsOfScope.run(String(p.id));
@@ -680,7 +681,8 @@ const ops = {
     const st = ops.projectStats(p.id);
     for (const c of q.channelsOfProject.all(p.id)) { q.clearChannel.run(c.key); q.deleteChannel.run(c.key); }
     for (const pa of q.partiesOfProject.all(p.id)) q.dropSettingsLike.run(`relay_opening:${pa.id}`);
-    q.clearRecordsOfProject.run(p.id);
+    q.clearRecordsOfProject.run(p.id, p.id);
+    db.prepare('DELETE FROM party_wallets WHERE project_id = ?').run(p.id);
     q.clearPartiesOfProject.run(p.id);
     q.clearTransfersOfProject.run(p.id);
     q.clearEntriesOfProject.run(p.id);
@@ -889,6 +891,13 @@ const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWalle
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId) {
   const parties = q.partiesOfProject.all(projectId);
+  // 供应商是全局的：本项目出现过往来记录，或有余额监控算进本项目的，都算本项目的供应商
+  const supplierIds = new Set([
+    ...db.prepare("SELECT DISTINCT party_id FROM party_records WHERE project_id = ?").all(projectId).map((r) => r.party_id),
+    ...db.prepare('SELECT DISTINCT party_id FROM party_wallets WHERE project_id = ?').all(projectId).map((r) => r.party_id),
+    ...db.prepare('SELECT DISTINCT party_id FROM key_prefixes WHERE project_id = ?').all(projectId).map((r) => r.party_id),
+  ]);
+  for (const id of supplierIds) if (!parties.some((p) => p.id === id)) { const s = q.party.get(id); if (s) parties.push(s); }
   const records = q.recordsOfProject.all(projectId);
   const byParty = new Map();
   for (const r of records) { if (!byParty.has(r.party_id)) byParty.set(r.party_id, []); byParty.get(r.party_id).push(r); }
@@ -907,17 +916,20 @@ function projectPartiesSummary(projectId) {
 }
 Object.assign(ops, {
   addParty(user, projectId, body, via = '') {
-    const p = q.project.get(Number(projectId));
-    if (!p) throw new HttpError(404, '项目不存在');
     const kind = body.kind === 'customer' ? 'customer' : body.kind === 'supplier' ? 'supplier' : null;
     if (!kind) throw new HttpError(400, '类型只能是供应商或客户');
+    // 供应商全局唯一，不挂项目；客户仍归属项目
+    const p = kind === 'customer' ? q.project.get(Number(projectId)) : null;
+    if (kind === 'customer' && !p) throw new HttpError(404, '项目不存在');
     const name = String(body.name || '').trim();
     if (!name || name.length > 60) throw new HttpError(400, '名称为 1–60 个字符');
     const currency = String(body.currency || 'CNY').toUpperCase();
     if (!CURRENCIES.includes(currency)) throw new HttpError(400, '币种不正确');
-    const existing = q.partyByName.get(p.id, kind, name, String(body.external_id || '') || '\u0000');
-    if (existing) throw new HttpError(409, `该项目已有${PARTY_LABEL[kind].name}「${existing.name}」`);
-    const r = q.insertParty.run(p.id, kind, name, String(body.contact || '').trim().slice(0, 100), String(body.note || '').trim().slice(0, 200), currency, String(body.external_id || '').trim().slice(0, 100), user.id, now());
+    const existing = kind === 'supplier'
+      ? db.prepare("SELECT * FROM parties WHERE kind = 'supplier' AND trim(name) = ?").get(name)
+      : q.partyByName.get(p.id, kind, name, String(body.external_id || '') || '\u0000');
+    if (existing) throw new HttpError(409, kind === 'supplier' ? `已有供应商「${existing.name}」，直接选择即可` : `该项目已有${PARTY_LABEL[kind].name}「${existing.name}」`);
+    const r = q.insertParty.run(p ? p.id : null, kind, name, String(body.contact || '').trim().slice(0, 100), String(body.note || '').trim().slice(0, 200), currency, String(body.external_id || '').trim().slice(0, 100), user.id, now());
     const party = q.party.get(Number(r.lastInsertRowid));
     if (body.ratio !== undefined && body.ratio !== null && body.ratio !== '') { const ratio = Number(body.ratio); if (ratio > 0 && ratio <= 100) db.prepare('UPDATE parties SET ratio = ? WHERE id = ?').run(Math.round(ratio * 10000) / 10000, party.id); }
     if (body.settle_type === 'credit') db.prepare("UPDATE parties SET settle_type = 'credit' WHERE id = ?").run(party.id);
@@ -930,7 +942,7 @@ Object.assign(ops, {
       if (body.start_date) { sets.push('start_date = ?'); vals.push(String(body.start_date).slice(0, 10)); }
       if (sets.length) db.prepare(`UPDATE parties SET ${sets.join(', ')} WHERE id = ?`).run(...vals, party.id);
     }
-    dataChanged(user, `${via}在「${p.name}」添加了${PARTY_LABEL[kind].name}「${name}」`);
+    dataChanged(user, `${via}${p ? `在「${p.name}」` : ''}添加了${PARTY_LABEL[kind].name}「${name}」`);
     return party;
   },
   updateParty(user, id, patch, via = '') {
@@ -998,10 +1010,12 @@ Object.assign(ops, {
     const linkEntry = kind === 'paid' && body.link_entry !== false && body.link_entry !== 0 && body.link_entry !== '0';
     if (linkEntry) {
       const timeIso = body.time ? parseTime(body.time) : (date === todayKey() ? now() : parseTime(`${date}T12:00`));
-      const e = ops.addEntry(user, { project_id: pa.project_id, type: pa.kind === 'supplier' ? 'expense' : 'income', amount, currency, rate, handler_id: body.handler_id || user.id, note: note || (pa.kind === 'supplier' ? `付款给供应商 ${pa.name}` : `客户 ${pa.name} 回款`), time: timeIso }, via);
+        const recProject = pa.kind === 'supplier' ? Number(body.project_id) : pa.project_id;
+      if (pa.kind === 'supplier' && !q.project.get(recProject)) throw new HttpError(400, '请选择这笔账所属的项目');
+      const e = ops.addEntry(user, { project_id: recProject, type: pa.kind === 'supplier' ? 'expense' : 'income', amount, currency, rate, handler_id: body.handler_id || user.id, note: note || (pa.kind === 'supplier' ? `付款给供应商 ${pa.name}` : `客户 ${pa.name} 回款`), time: timeIso }, via);
       entryId = e.id;
     }
-    const r = q.insertRecord.run(pa.id, kind, amount, currency, rate, date, note, source, ref, entryId, user.id, now());
+    const r = q.insertRecord.run(pa.id, kind, amount, currency, rate, date, note, source, ref, entryId, user.id, now(), pa.kind === 'supplier' ? Number(body.project_id) || null : pa.project_id);
     const rec = q.record.get(Number(r.lastInsertRowid));
     const L = PARTY_LABEL[pa.kind];
     dataChanged(user, `${via}记了${L.name}「${pa.name}」${L[kind]} ${amount.toLocaleString('zh-CN')} ${currency}（${date}）· ${pa.project_name}`, `${via}记了${L.name}「${pa.name}」${L[kind]} ${amount.toLocaleString('zh-CN')} ${currency}${currency !== 'CNY' ? `（汇率 ${rate}）` : ''} · 日期 ${date}${note ? ` · ${note}` : ''}${entryId ? ` · 已同步记入流水 #${entryId}` : ''} · ${pa.project_name} · 来源 ${source}`);
@@ -1887,7 +1901,7 @@ function syncRelayAccrual(pa, live) {
     if (amount <= 0) return;
     const ex = q.recordByRef.get(ref);
     if (ex) { if (Math.abs(ex.amount - amount) >= 0.01 || ex.currency !== cur) qRelayRec.upd.run(amount, cur, rate, note, ex.id); return; }
-    q.insertRecord.run(pa.id, 'due', amount, cur, rate, date, note, 'relay', ref, null, null, now());
+    q.insertRecord.run(pa.id, 'due', amount, cur, rate, date, note, 'relay', ref, null, null, now(), pa.project_id);
     kbLog(`中转站自动挂账：${PARTY_LABEL[pa.kind].name}「${pa.name}」${PARTY_LABEL[pa.kind].due} ${amount.toLocaleString('zh-CN')} ${cur}（${date}，消耗 $${usd.toFixed(2)} × ${label} ${ratio}）· ${pa.project_name || ''}`);
     changed = true;
   };
@@ -2093,7 +2107,9 @@ const describeEntry = (n) => `${n.type === 'income' ? '收入' : '支出'} ${n.a
 
 function resolveParty(ref, project, kindHint) {
   const str = String(ref ?? '').trim();
-  const list = q.partiesOfProject.all(project.id).filter((x) => !kindHint || x.kind === kindHint);
+  const list = kindHint === 'supplier'
+    ? db.prepare("SELECT * FROM parties WHERE kind = 'supplier'").all()
+    : q.partiesOfProject.all(project.id).filter((x) => !kindHint || x.kind === kindHint);
   if (!str) throw new HttpError(400, '请说明是哪个供应商 / 客户');
   if (/^\d+$/.test(str)) { const p = list.find((x) => x.id === Number(str)); if (p) return p; }
   const lower = str.toLowerCase();
@@ -2109,7 +2125,9 @@ function resolvePartyAnywhere(input, ctx, kindHint) {
   const str = String(input.party ?? '').trim();
   if (!str) throw new HttpError(400, '请说明是哪个供应商 / 客户');
   const lower = str.toLowerCase();
-  const all = q.projects.all().flatMap((p) => q.partiesOfProject.all(p.id).filter((x) => !kindHint || x.kind === kindHint).map((x) => ({ ...x, project: p })));
+  const all = kindHint === 'supplier'
+    ? db.prepare("SELECT * FROM parties WHERE kind = 'supplier'").all().map((x) => ({ ...x, project: { id: null, name: '全局' } }))
+    : q.projects.all().flatMap((p) => q.partiesOfProject.all(p.id).filter((x) => !kindHint || x.kind === kindHint).map((x) => ({ ...x, project: p })));
   let hits = all.filter((x) => (/^\d+$/.test(str) && x.id === Number(str)) || x.name.toLowerCase() === lower);
   if (!hits.length) hits = all.filter((x) => x.name.toLowerCase().includes(lower) || lower.includes(x.name.toLowerCase()));
   const active = hits.filter((x) => !x.archived);
@@ -2313,7 +2331,7 @@ const GATED_IMPL = {
       const kind = input.kind === 'customer' ? 'customer' : 'supplier';
       const name = String(input.name || '').trim();
       if (!name) throw new HttpError(400, '请提供名称');
-      if (q.partyByName.get(p.id, kind, name, '\u0000')) throw new HttpError(409, `项目「${p.name}」已有${PARTY_LABEL[kind].name}「${name}」`);
+      if (kind === 'supplier' ? db.prepare("SELECT 1 FROM parties WHERE kind = 'supplier' AND trim(name) = ?").get(name) : q.partyByName.get(p.id, kind, name, '\u0000')) throw new HttpError(409, kind === 'supplier' ? `已有供应商「${name}」` : `项目「${p.name}」已有${PARTY_LABEL[kind].name}「${name}」`);
       return { resolved: { project_id: p.id, kind, name, contact: input.contact || '', note: input.note || '', currency: input.currency || 'CNY', ratio: input.ratio, relay_ref: input.relay_ref || '' }, title: `添加${PARTY_LABEL[kind].name}「${name}」`, detail: `项目 ${p.name}${input.contact ? ` · 联系方式 ${input.contact}` : ''}${input.note ? ` · ${input.note}` : ''} · 结算币种 ${input.currency || 'CNY'}${input.ratio ? ` · 倍率 ${input.ratio}` : ''}${input.relay_ref ? ` · 绑定中转站 ${input.relay_ref}` : ''}` };
     },
     async execute(resolved, ctx) {
@@ -2995,11 +3013,67 @@ app.delete('/api/parties/:id', auth, (req, res) => { ops.deleteParty(req.user, r
 app.post('/api/parties/:id/records', auth, (req, res) => { const r = ops.addPartyRecord(req.user, req.params.id, req.body || {}); res.json({ record: recordView(r.record), duplicate: r.duplicate }); });
 partyWallets = setupPartyWallets({ app, db, auth, HttpError, onChanged: (user, text) => dataChanged(user, text) });
 setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayOf: (d) => dayFmt.format(d), addDays, onChanged: (user, text) => dataChanged(user, text), onAccrued: () => { dataVersion += 1; broadcast('changed', { version: dataVersion, byId: 0, by: '上 key 台子', text: '', at: now() }); } });
-// 侧栏「供应商」页：所有项目下的供应商 + 往来结算 + 供应商站点余额（每把 Key）
+// 一次性：同名供应商合并成全局一条。流水和钱包记上原来的项目，上 key 挂账编号按新 id 重写
+if (!db.prepare("SELECT 1 FROM settings WHERE key = 'suppliers_global_v1'").get()) {
+  const groups = new Map();
+  for (const s of db.prepare("SELECT id, trim(name) AS name, project_id FROM parties WHERE kind = 'supplier' ORDER BY id").all()) {
+    if (!groups.has(s.name)) groups.set(s.name, []);
+    groups.get(s.name).push(s);
+  }
+  const repoint = db.transaction(() => {
+    for (const [name, rows] of groups) {
+      const keep = rows[0];
+      for (const row of rows) {
+        db.prepare('UPDATE party_records SET project_id = COALESCE(project_id, ?) WHERE party_id = ?').run(row.project_id, row.id);
+        db.prepare('UPDATE party_wallets SET project_id = COALESCE(project_id, ?) WHERE party_id = ?').run(row.project_id, row.id);
+        if (row.id === keep.id) continue;
+        for (const tbl of ['party_records', 'party_files', 'party_wallets', 'entries', 'key_prefixes']) db.prepare(`UPDATE ${tbl} SET party_id = ? WHERE party_id = ?`).run(keep.id, row.id);
+        db.prepare("UPDATE party_records SET external_ref = REPLACE(external_ref, ':' || ? || ':', ':' || ? || ':') WHERE source = 'key' AND external_ref LIKE '%:' || ? || ':%'").run(String(row.id), String(keep.id), String(row.id));
+        db.prepare('DELETE FROM parties WHERE id = ?').run(row.id);
+      }
+      if (rows.length > 1) console.log(`[供应商合并] ${name}：保留 #${keep.id}，合并 ${rows.slice(1).map((r) => `#${r.id}(项目${r.project_id})`).join('、')}`);
+    }
+  });
+  repoint();
+  // project_id 建表时是 NOT NULL，置空会被拒；重建表让供应商可以不挂项目，客户约束不变。
+  // 关外键才能 DROP 旧表而不级联清掉记录；但关外键时 SQLite 会把其他表的外键改写成旧表名，删完再改回来
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec('BEGIN');
+  try {
+    db.exec('ALTER TABLE parties RENAME TO parties_old');
+    db.exec(`CREATE TABLE parties (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('supplier', 'customer')), name TEXT NOT NULL, contact TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '', currency TEXT NOT NULL DEFAULT 'CNY', external_id TEXT NOT NULL DEFAULT '',
+      archived INTEGER NOT NULL DEFAULT 0, created_by INTEGER, created_at TEXT NOT NULL,
+      relay_id INTEGER, relay_ref TEXT NOT NULL DEFAULT '', ratio REAL NOT NULL DEFAULT 1, settled_base REAL NOT NULL DEFAULT 0,
+      settle_type TEXT NOT NULL DEFAULT 'prepaid', balance_threshold REAL, term_days INTEGER, start_date TEXT NOT NULL DEFAULT '',
+      profile TEXT NOT NULL DEFAULT '', customer_group TEXT NOT NULL DEFAULT '',
+      CHECK (kind = 'supplier' OR project_id IS NOT NULL))`);
+    const cols = db.prepare('PRAGMA table_info(parties_old)').all().map((c) => c.name).join(', ');
+    db.exec(`INSERT INTO parties (${cols}) SELECT ${cols} FROM parties_old`);
+    db.exec('DROP TABLE parties_old');
+    for (const t of db.prepare("SELECT name, sql FROM sqlite_master WHERE sql LIKE '%parties_old%'").all()) {
+      db.exec(`ALTER TABLE ${t.name} RENAME TO ${t.name}_fix`);
+      db.exec(t.sql.replace(/CREATE TABLE\s+\S+/, `CREATE TABLE ${t.name}`).replaceAll('"parties_old"', 'parties'));
+      const cs = db.prepare(`PRAGMA table_info(${t.name}_fix)`).all().map((c) => c.name).join(', ');
+      db.exec(`INSERT INTO ${t.name} (${cs}) SELECT ${cs} FROM ${t.name}_fix`);
+      db.exec(`DROP TABLE ${t.name}_fix`);
+    }
+    db.exec('CREATE INDEX idx_parties_project ON parties(project_id, kind)');
+    db.prepare("UPDATE parties SET project_id = NULL WHERE kind = 'supplier'").run();
+    db.prepare("INSERT INTO settings (key, value) VALUES ('suppliers_global_v1', '1')").run();
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  finally { db.exec('PRAGMA foreign_keys = ON'); }
+}
+// 侧栏「供应商」页：供应商全局一份，不挂项目
 app.get('/api/suppliers', auth, (req, res) => {
-  const rows = db.prepare(`SELECT pa.*, p.name AS project_name, p.archived AS project_archived FROM parties pa JOIN projects p ON p.id = pa.project_id
-                           WHERE pa.kind = 'supplier' ORDER BY pa.archived, p.archived, pa.id DESC`).all();
-  res.json({ suppliers: rows.map((r) => ({ ...partyView(r), project_archived: !!r.project_archived, wallets: partyWallets.listOf(r.id) })), rates: getRates() });
+  const rows = db.prepare("SELECT * FROM parties WHERE kind = 'supplier' ORDER BY archived, id DESC").all();
+  res.json({ suppliers: rows.map((r) => ({ ...partyView(r), wallets: partyWallets.listOf(r.id) })), rates: getRates() });
+});
+app.get('/api/suppliers/options', auth, (req, res) => {
+  res.json({ suppliers: db.prepare("SELECT id, name FROM parties WHERE kind = 'supplier' AND archived = 0 ORDER BY name").all() });
 });
 
 // 批量拉中转站用户余额（美元），id -> balance_usd
@@ -3244,9 +3318,10 @@ async function computeProfitDaily() {
   }
   // 供应商每日消耗（实际消费 = 站点每日消耗 × 消耗倍率，折人民币）：钱包 detail 的 daily，按 项目+站点 去重
   const sup = new Map();
-  const walletRows = db.prepare("SELECT w.id, w.base_url, p.project_id FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'").all();
+  const walletRows = db.prepare("SELECT w.id, w.base_url, w.project_id, w.name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'").all();
   const seen = new Set();
   for (const w of walletRows) {
+    if (!w.project_id) { errors.push(`${w.name}：没有选择所属项目，消耗未计入利润`); continue; }
     const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
     if (seen.has(site)) continue;
     seen.add(site);
@@ -3495,9 +3570,11 @@ app.post('/api/integrations/records', integrationAuth, (req, res) => {
       const kind = it.supplier ? 'supplier' : it.customer ? 'customer' : (it.party_kind === 'supplier' ? 'supplier' : 'customer');
       const nameRef = String(it.supplier || it.customer || it.party || '').trim();
       if (!nameRef) throw new HttpError(400, '缺少 customer / supplier 名称');
-      let pa = q.partyByName.get(p.id, kind, nameRef, nameRef);
+      let pa = kind === 'supplier'
+        ? db.prepare("SELECT * FROM parties WHERE kind = 'supplier' AND trim(name) = ?").get(nameRef)
+        : q.partyByName.get(p.id, kind, nameRef, nameRef);
       if (!pa) pa = q.party.get(ops.addParty(req.user, p.id, { kind, name: nameRef, external_id: it.external_id || '', currency: it.currency || 'CNY' }, '外部接口：').id);
-      const r = ops.addPartyRecord(req.user, pa.id, { ...it, source: 'api' }, '外部接口：');
+      const r = ops.addPartyRecord(req.user, pa.id, { ...it, project_id: p.id, source: 'api' }, '外部接口：');
       results.push({ ok: true, duplicate: r.duplicate, record: recordView(r.record), party: { id: pa.id, name: pa.name, kind } });
     } catch (e) { results.push({ ok: false, error: e instanceof HttpError ? e.message : (e.message || '失败'), input: it }); }
   }

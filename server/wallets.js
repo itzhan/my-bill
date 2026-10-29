@@ -444,6 +444,8 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   for (const [col, ddl] of [['login_user', "TEXT NOT NULL DEFAULT ''"], ['login_pass', "TEXT NOT NULL DEFAULT ''"], ['insecure', 'INTEGER NOT NULL DEFAULT 0'], ['access_token', "TEXT NOT NULL DEFAULT ''"], ['token_user_id', "TEXT NOT NULL DEFAULT ''"]]) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} ${ddl}`);
   }
+  // 供应商改为全局后，余额监控各自记消耗算进哪个项目
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = 'project_id'").get()) db.exec('ALTER TABLE party_wallets ADD COLUMN project_id INTEGER REFERENCES projects(id)');
   const getOne = db.prepare('SELECT * FROM party_wallets WHERE id = ?');
   const ofParty = db.prepare('SELECT * FROM party_wallets WHERE party_id = ? ORDER BY id');
   const party = db.prepare("SELECT * FROM parties WHERE id = ? AND kind = 'supplier'");
@@ -491,6 +493,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
       if (!out.access_token) out.token_user_id = '';
     }
     if (!partial || 'token_user_id' in b) out.token_user_id = str(b.token_user_id, 40);
+    if (!partial || 'project_id' in b) out.project_id = Number(b.project_id) > 0 ? Number(b.project_id) : null;
     if (str(b.api_key, 500)) out.api_key = str(b.api_key, 500); // 留空 = 保持原值
     return out;
   }

@@ -84,13 +84,12 @@ export function EntryDialog({
   const active = projects.filter((p) => !p.archived || (editing && p.id === editing.project_id));
   const rates = pd?.rates ?? me?.rates ?? { USD: 7.2, USDT: 7.2 };
 
-  // 充值 / 结算：支出可挂本项目的供应商
+  // 充值 / 结算：支出可挂全局供应商（供应商不归属项目）
   const isExpense = type === "expense";
   const { data: suppliers } = useQuery({
-    queryKey: ["ledger", "project-suppliers", project],
-    queryFn: () =>
-      get<{ suppliers: Party[] }>(`/projects/${project}/parties`).then((d) => d.suppliers.filter((s) => !s.archived)),
-    enabled: open && !!project,
+    queryKey: ["ledger", "supplier-options"],
+    queryFn: () => get<{ suppliers: { id: number; name: string }[] }>("/suppliers/options").then((d) => d.suppliers),
+    enabled: open,
   });
 
   // 每次打开时按「新建 / 编辑」初始化表单
@@ -303,10 +302,7 @@ export function EntryDialog({
               <Label>项目</Label>
               <Select
                 value={project ? String(project) : ""}
-                onValueChange={(v) => {
-                  setProject(Number(v));
-                  setSupplier(null); // 换项目后清掉供应商（供应商归属项目）
-                }}
+                onValueChange={(v) => setProject(Number(v))}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="选择项目" />
@@ -364,7 +360,6 @@ export function EntryDialog({
                 {(suppliers ?? []).map((s) => (
                   <SelectItem key={s.id} value={String(s.id)}>
                     {s.name}
-                    {s.currency !== "CNY" ? `（${s.currency} 结算）` : ""}
                   </SelectItem>
                 ))}
               </SelectContent>

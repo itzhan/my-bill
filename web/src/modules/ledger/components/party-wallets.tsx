@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 
 import { del, get, patch, post } from "../api";
 import { curf, relTime } from "../format";
-import { useLedgerRefresh } from "../hooks";
+import { useLedgerRefresh, useProjects } from "../hooks";
 import type { Party, PartyWallet } from "../types";
 
 import { FormError, ResponsiveDialog, useConfirm } from "./shared";
@@ -66,6 +66,7 @@ export type WalletDraft = {
   login_user: string;
   login_pass: string;
   insecure: boolean;
+  project_id: string;
 };
 export const EMPTY_WALLET: WalletDraft = {
   name: "",
@@ -80,6 +81,7 @@ export const EMPTY_WALLET: WalletDraft = {
   login_user: "",
   login_pass: "",
   insecure: false,
+  project_id: "",
 };
 
 // 校验：返回错误文案，没问题返回 null
@@ -102,6 +104,7 @@ export const walletBody = (v: WalletDraft) => ({
   insecure: v.insecure,
   login_user: v.login_user.trim(),
   token_user_id: v.token_user_id.trim(),
+  project_id: Number(v.project_id) > 0 ? Number(v.project_id) : null,
   ...(v.api_key.trim() ? { api_key: v.api_key.trim() } : {}),
   ...(v.login_pass.trim() ? { login_pass: v.login_pass.trim() } : {}),
   ...(v.access_token.trim() ? { access_token: v.access_token.trim() } : {}),
@@ -121,8 +124,27 @@ export function WalletFields({
   loginHint?: string;
   tokenHint?: string;
 }) {
+  const { data: pd } = useProjects();
   return (
     <>
+      <div className="space-y-2">
+        <Label>消耗算进哪个项目</Label>
+        <Select value={v.project_id || "none"} onValueChange={(x) => setV({ ...v, project_id: x === "none" ? "" : x })}>
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">不计入项目利润</SelectItem>
+            {(pd?.projects ?? [])
+              .filter((p) => !p.archived)
+              .map((p) => (
+                <SelectItem key={p.id} value={String(p.id)}>
+                  {p.name}
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </Select>
+      </div>
       <div className="grid gap-4 sm:grid-cols-[9rem_1fr]">
         <div className="space-y-2">
           <Label>平台 *</Label>
@@ -285,6 +307,7 @@ function WalletDialog({
             login_user: wallet.login_user ?? "",
             login_pass: "",
             insecure: wallet.insecure,
+            project_id: wallet.project_id ? String(wallet.project_id) : "",
           }
         : EMPTY_WALLET,
     );

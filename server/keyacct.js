@@ -80,10 +80,10 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     usage: db.prepare('SELECT * FROM key_usage WHERE project_id = ?'),
     dayRates: db.prepare('SELECT * FROM key_day_rates WHERE project_id = ?'),
     putDayRate: db.prepare('INSERT OR IGNORE INTO key_day_rates (project_id, date, usd_rate) VALUES (?, ?, ?)'),
-    keyRecords: db.prepare("SELECT r.* FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE pa.project_id = ? AND r.source = 'key'"),
+    keyRecords: db.prepare("SELECT * FROM party_records WHERE project_id = ? AND source = 'key'"),
     recordsOfParty: db.prepare('SELECT * FROM party_records WHERE party_id = ?'),
     party: db.prepare('SELECT * FROM parties WHERE id = ?'),
-    insRecord: db.prepare("INSERT INTO party_records (party_id, kind, amount, currency, rate, date, note, source, external_ref, created_at) VALUES (?, 'due', ?, ?, ?, ?, ?, 'key', ?, ?)"),
+    insRecord: db.prepare("INSERT INTO party_records (party_id, kind, amount, currency, rate, date, note, source, external_ref, created_at, project_id) VALUES (?, 'due', ?, ?, ?, ?, ?, 'key', ?, ?, ?)"),
     updRecord: db.prepare('UPDATE party_records SET amount = ?, currency = ?, rate = ?, date = ?, note = ? WHERE id = ?'),
     delRecord: db.prepare('DELETE FROM party_records WHERE id = ?'),
   };
@@ -292,7 +292,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
         const ex = existing.get(ref);
         existing.delete(ref);
         if (amount <= 0) { if (ex) { q.delRecord.run(ex.id); changed = true; } continue; }
-        if (!ex) { q.insRecord.run(pa.id, amount, cur, rate, w.date, note, ref, new Date().toISOString()); changed = true; }
+        if (!ex) { q.insRecord.run(pa.id, amount, cur, rate, w.date, note, ref, new Date().toISOString(), projectId); changed = true; }
         else if (Math.abs(ex.amount - amount) >= 0.01 || ex.currency !== cur || ex.note !== note) q.updRecord.run(amount, cur, rate, w.date, note, ex.id);
       }
       // 前缀删了 / 换了供应商 / 去掉了价格：多出来的旧挂账删掉
@@ -411,7 +411,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     const prefix = str(b.prefix, 60);
     if (!prefix) throw new HttpError(400, '请填写前缀');
     const pa = q.party.get(Number(b.party_id));
-    if (!pa || pa.project_id !== p.id || pa.kind !== 'supplier') throw new HttpError(400, '请选择本项目的供应商');
+    if (!pa || pa.kind !== 'supplier') throw new HttpError(400, '请选择供应商');
     if (db.prepare('SELECT 1 FROM key_prefixes WHERE project_id = ? AND prefix = ?').get(p.id, prefix)) throw new HttpError(409, `前缀「${prefix}」已存在`);
     db.prepare('INSERT INTO key_prefixes (project_id, party_id, prefix, note, created_at) VALUES (?, ?, ?, ?, ?)').run(p.id, pa.id, prefix, str(b.note, 200), new Date().toISOString());
     onChanged(req.user, `在上 key 项目「${p.name}」给供应商「${pa.name}」添加了前缀 ${prefix}`);
@@ -425,7 +425,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     let partyId = k.party_id;
     if (b.party_id !== undefined) {
       const pa = q.party.get(Number(b.party_id));
-      if (!pa || pa.project_id !== k.project_id || pa.kind !== 'supplier') throw new HttpError(400, '请选择本项目的供应商');
+      if (!pa || pa.kind !== 'supplier') throw new HttpError(400, '请选择供应商');
       partyId = pa.id;
     }
     db.prepare('UPDATE key_prefixes SET party_id = ?, note = ? WHERE id = ?').run(partyId, b.note === undefined ? k.note : str(b.note, 200), k.id);
