@@ -107,13 +107,14 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
     }
   };
 
-  if (!data) return <Skeleton className="h-80" />;
-  const s = data.site;
   const { data: supplierOptions } = useQuery({
     queryKey: ["ledger", "supplier-options"],
     queryFn: () => get<{ suppliers: { id: number; name: string }[] }>("/suppliers/options").then((d) => d.suppliers),
   });
   const suppliers = supplierOptions ?? [];
+
+  if (!data) return <Skeleton className="h-80" />;
+  const s = data.site;
   const customers = detail.parties.customers.filter((p) => !p.archived);
   const custName = customers.find((c) => c.id === s.customer_party_id)?.name;
 
