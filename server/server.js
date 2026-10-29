@@ -3020,7 +3020,8 @@ if (!db.prepare("SELECT 1 FROM settings WHERE key = 'suppliers_global_v1'").get(
     if (!groups.has(s.name)) groups.set(s.name, []);
     groups.get(s.name).push(s);
   }
-  const repoint = db.transaction(() => {
+  db.exec('BEGIN');
+  try {
     for (const [name, rows] of groups) {
       const keep = rows[0];
       for (const row of rows) {
@@ -3033,8 +3034,8 @@ if (!db.prepare("SELECT 1 FROM settings WHERE key = 'suppliers_global_v1'").get(
       }
       if (rows.length > 1) console.log(`[供应商合并] ${name}：保留 #${keep.id}，合并 ${rows.slice(1).map((r) => `#${r.id}(项目${r.project_id})`).join('、')}`);
     }
-  });
-  repoint();
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
   // project_id 建表时是 NOT NULL，置空会被拒；重建表让供应商可以不挂项目，客户约束不变。
   // 关外键才能 DROP 旧表而不级联清掉记录；但关外键时 SQLite 会把其他表的外键改写成旧表名，删完再改回来
   db.exec('PRAGMA foreign_keys = OFF');
