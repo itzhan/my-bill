@@ -3550,12 +3550,12 @@ async function refreshCustomerGaps() {
       const total = Number(live.total && live.total.cost_usd) || 0;
       // 已挂账的人民币 ÷（折扣 × 汇率）还原成美元消耗，和中转站累计比较，差额就是挂账前的历史
       const bookedCny = db.prepare("SELECT COALESCE(SUM(amount * CASE WHEN currency = 'CNY' THEN 1 ELSE rate END), 0) AS n FROM party_records WHERE party_id = ? AND source = 'relay' AND kind = 'due'").get(pa.id).n;
-      const ratio = Number(pa.ratio) > 0 ? Number(pa.ratio) : 1;
-      const perUsd = usdToCur(ratio, pa.currency || 'CNY', rates);
+      // 挂账金额已经是消耗 × 折扣，所以这里只按汇率还原美元，不能再乘折扣
+      const perUsd = usdToCur(1, pa.currency || 'CNY', rates);
       const gap = perUsd > 0 ? r2(total - bookedCny / perUsd) : 0;
       if (gap > 1) {
         const cur = pa.currency || 'CNY';
-        const cny = r2(usdToCur(gap * (Number(pa.ratio) > 0 ? Number(pa.ratio) : 1), cur, rates));
+        const cny = r2(usdToCur(gap * (Number(pa.ratio) > 0 ? Number(pa.ratio) : 1), pa.currency || 'CNY', rates));
         customerGapCache.set(pa.project_id, [...(customerGapCache.get(pa.project_id) || []), ['历史（挂账前）', cny]]);
       }
     } catch (e) { console.error(`[relay] 客户 ${pa.name} 历史消耗失败：${e.message}`); }
