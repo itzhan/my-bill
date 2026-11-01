@@ -78,11 +78,24 @@ export type Project = {
   creator_name: string;
   ptype?: "relay" | "short" | "key";
   category?: "customer" | "company";
+  station_id?: number | null;
 };
 export type ProjectWithSummary = Project & {
   summary: Summary;
   customer_open_cny?: number;
   est_profit?: number;
+  // 按消耗算的预估利润：中转制 = 分组应收 − key 成本，上 key = 甲方应收 − 供应商应付，项目制没有
+  forecast_profit?: number | null;
+};
+export type Station = {
+  id: number;
+  name: string;
+  type: "relay" | "key";
+  base_url: string;
+  user_id: string;
+  quota_per_usd: number;
+  has_credential: boolean;
+  projects: { id: number; name: string }[];
 };
 
 type CurTriple = { CNY: number; USDT: number; USD: number };
@@ -305,6 +318,7 @@ export type ProfitDay = {
   customer: number;
   supplier: number;
   profit: number;
+  forecast?: number;
   customers?: ProfitCustomer[];
 };
 export type ProfitProject = {
@@ -314,6 +328,7 @@ export type ProfitProject = {
   customer: number;
   supplier: number;
   profit: number;
+  forecast?: number | null;
   today_customers: ProfitCustomer[];
 };
 export type ProfitDaily = {

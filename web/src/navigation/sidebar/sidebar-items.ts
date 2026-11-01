@@ -9,6 +9,7 @@ import {
   Bot,
   BookOpen,
   Settings,
+  Server,
   type LucideIcon,
 } from "lucide-react";
 

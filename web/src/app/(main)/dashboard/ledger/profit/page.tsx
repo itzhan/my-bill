@@ -55,6 +55,7 @@ function DayDetailDialog({ date, data, onClose }: { date: string | null; data: P
             </div>
             <div className="text-muted-foreground mt-0.5 text-xs tabular-nums">
               客 {money(x.day.customer)} · 供 {money(x.day.supplier)}
+              {x.day.forecast !== undefined ? ` · 预估 ${signed(x.day.forecast)}` : ""}
             </div>
             <CustomerList customers={x.day.customers} />
           </div>
@@ -82,6 +83,7 @@ function DailySummary({ data }: { data: ProfitDaily }) {
                 <TableHead className="text-right">客户消耗</TableHead>
                 <TableHead className="text-right">供应商消耗</TableHead>
                 <TableHead className="text-right">利润</TableHead>
+                <TableHead className="text-right">预估利润</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -97,6 +99,11 @@ function DailySummary({ data }: { data: ProfitDaily }) {
                   <TableCell className="text-expense text-right tabular-nums">{money(d.supplier)}</TableCell>
                   <TableCell className={cn("text-right font-semibold tabular-nums", d.profit < 0 && "text-expense")}>
                     {signed(d.profit)}
+                  </TableCell>
+                  <TableCell
+                    className={cn("text-right tabular-nums", d.forecast !== undefined && d.forecast < 0 && "text-expense")}
+                  >
+                    {d.forecast === undefined ? "—" : signed(d.forecast)}
                   </TableCell>
                 </TableRow>
               ))}
@@ -200,6 +207,7 @@ export default function ProfitPage() {
                       </div>
                       <div className="text-muted-foreground text-xs tabular-nums">
                         客 {money(x.day.customer)} · 供 {money(x.day.supplier)}
+                        {x.day.forecast !== undefined ? ` · 预估 ${signed(x.day.forecast)}` : ""}
                       </div>
                       <CustomerList customers={x.customers} />
                     </div>

@@ -22,8 +22,27 @@ import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { ProjectWithSummary } from "@/modules/ledger/types";
 
+// 预估利润合计：只算有预估的项目（中转制、上 key），项目制不参与
+function ForecastTotal({ projects }: { projects: ProjectWithSummary[] }) {
+  const list = projects.filter((p) => !p.archived && p.forecast_profit != null);
+  if (!list.length) return null;
+  const total = list.reduce((a, p) => a + (p.forecast_profit || 0), 0);
+  return (
+    <Card className="gap-2">
+      <CardHeader>
+        <CardDescription>预估利润（中转制按分组收费 − 上游 key 成本，上 key 按甲方应收 − 供应商应付）</CardDescription>
+        <CardTitle className={cn("text-2xl font-semibold tabular-nums", total < 0 && "text-expense")}>
+          {signed(Math.round(total * 100) / 100)}
+        </CardTitle>
+      </CardHeader>
+      <CardFooter className="text-muted-foreground text-xs">{list.length} 个项目 · 与上面的记账利润并存，项目制不计入</CardFooter>
+    </Card>
+  );
+}
+
 function ProjectCard({ p }: { p: ProjectWithSummary }) {
   const s = p.summary;
+  const forecast = p.ptype === "short" ? null : p.forecast_profit;
   return (
     <Link href={`/dashboard/ledger/projects/${p.id}`} prefetch={false}>
       <Card className={cn("hover:border-primary/40 h-full gap-3 transition-colors", p.archived && "opacity-60")}>
@@ -35,6 +54,14 @@ function ProjectCard({ p }: { p: ProjectWithSummary }) {
           <CardDescription>利润</CardDescription>
           <div className={cn("text-2xl font-semibold tabular-nums", s.profit < 0 && "text-expense")}>
             {signed(s.profit)}
+          </div>
+          <div className="text-muted-foreground text-xs tabular-nums">
+            预估利润{" "}
+            {forecast == null ? (
+              "—"
+            ) : (
+              <span className={cn("text-foreground font-medium", forecast < 0 && "text-expense")}>{signed(forecast)}</span>
+            )}
           </div>
         </CardHeader>
         <CardContent className="flex gap-4 text-sm tabular-nums">
@@ -79,7 +106,10 @@ export default function LedgerOverviewPage() {
       />
 
       {data ? (
-        <KpiCards summary={data.totals} />
+        <>
+          <KpiCards summary={data.totals} />
+          <ForecastTotal projects={data.projects} />
+        </>
       ) : (
         <div className="grid gap-4 md:grid-cols-3">
           <Skeleton className="h-32" />

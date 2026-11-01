@@ -196,6 +196,34 @@ for (const [col, ddl] of [
 ]) {
   try { db.exec(`ALTER TABLE party_files ADD COLUMN ${col} ${ddl}`); } catch { /* 已有该列 */ }
 }
+// 台子：上 key 和中转站统一管理。credential 中转站存管理密钥、上 key 存 Cookie
+db.exec(`CREATE TABLE IF NOT EXISTS stations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL CHECK (type IN ('relay', 'key')),
+  base_url TEXT NOT NULL DEFAULT '', credential TEXT NOT NULL DEFAULT '', user_id TEXT NOT NULL DEFAULT '',
+  quota_per_usd REAL NOT NULL DEFAULT 500000, created_at TEXT NOT NULL
+)`);
+try { db.exec('ALTER TABLE projects ADD COLUMN station_id INTEGER REFERENCES stations(id)'); } catch { /* 已有该列 */ }
+// 中转制预估利润：客户按分组收费，上游按 key 计成本
+db.exec(`
+  CREATE TABLE IF NOT EXISTS relay_customer_groups (
+    party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE, station_id INTEGER NOT NULL REFERENCES stations(id),
+    group_name TEXT NOT NULL, price REAL NOT NULL DEFAULT 0, PRIMARY KEY (party_id, group_name)
+  );
+  CREATE TABLE IF NOT EXISTS relay_group_usage (
+    party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE, group_name TEXT NOT NULL, date TEXT NOT NULL,
+    usd REAL NOT NULL DEFAULT 0, PRIMARY KEY (party_id, group_name, date)
+  );
+  CREATE TABLE IF NOT EXISTS relay_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, station_id INTEGER NOT NULL REFERENCES stations(id),
+    party_id INTEGER NOT NULL REFERENCES parties(id), project_id INTEGER REFERENCES projects(id),
+    key_name TEXT NOT NULL DEFAULT '', group_name TEXT NOT NULL DEFAULT '', ratio REAL NOT NULL DEFAULT 1,
+    base_url TEXT NOT NULL DEFAULT '', token TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS relay_key_usage (
+    key_id INTEGER NOT NULL REFERENCES relay_keys(id) ON DELETE CASCADE, date TEXT NOT NULL,
+    usd REAL NOT NULL DEFAULT 0, PRIMARY KEY (key_id, date)
+  );
+`);
 // 供应商改为全局（不归属项目）：往来记录和余额监控各自记项目，供应商行的 project_id 置空
 try { db.exec('ALTER TABLE party_records ADD COLUMN project_id INTEGER REFERENCES projects(id)'); } catch { /* 已有该列 */ }
 // 项目类型：relay 中转（自动跟踪供应商/客户消耗）/ short 短期（按记账收支算利润）/ key 上 key（按前缀跟踪台子渠道消耗，见 keyacct.js）
@@ -577,13 +605,14 @@ const transferView = (t) => ({ id: t.id, time: fmtTZ(t.created_at), created_at: 
 // ---------------------------------------------------------------- 业务操作（页面接口与 AI 工具共用）
 const entryLine = (e) => `${e.type === 'income' ? '收入' : '支出'} ${e.amount.toLocaleString('zh-CN')} ${e.currency}${e.currency !== 'CNY' ? `（≈${cny(entryBase(e))}，汇率 ${e.rate}）` : ''} · ${e.project_name} · 经手人 ${e.handler_name}${e.note ? ` · ${e.note}` : ''} · ${fmtTZ(e.created_at)} · #${e.id}`;
 const ops = {
-  createProject(user, { name, note, ptype, category }, via = '') {
+  createProject(user, { name, note, ptype, category, station_id }, via = '') {
     name = String(name || '').trim(); note = String(note || '').trim().slice(0, 200);
     if (!name || name.length > 40) throw new HttpError(400, '项目名称为 1–40 个字符');
     const r = q.insertProject.run(name, note, user.id, now());
     const project = q.project.get(Number(r.lastInsertRowid));
     if (ptype === 'short' || ptype === 'key') db.prepare('UPDATE projects SET ptype = ? WHERE id = ?').run(ptype, project.id);
     if (category === 'company') db.prepare("UPDATE projects SET category = 'company' WHERE id = ?").run(project.id);
+    if (Number(station_id) > 0) db.prepare('UPDATE projects SET station_id = ? WHERE id = ?').run(Number(station_id), project.id);
     dataChanged(user, `${via}创建了项目「${project.name}」`, `${via}创建了项目「${project.name}」${note ? `（${note}）` : ''} · #${project.id}`);
     return q.project.get(project.id);
   },
@@ -597,6 +626,7 @@ const ops = {
     q.updateProject.run(name, note, archived, p.id);
     if (patch.ptype !== undefined) db.prepare('UPDATE projects SET ptype = ? WHERE id = ?').run(['short', 'key'].includes(patch.ptype) ? patch.ptype : 'relay', p.id);
     if (patch.category !== undefined) db.prepare('UPDATE projects SET category = ? WHERE id = ?').run(patch.category === 'company' ? 'company' : 'customer', p.id);
+    if (patch.station_id !== undefined) db.prepare('UPDATE projects SET station_id = ? WHERE id = ?').run(Number(patch.station_id) > 0 ? Number(patch.station_id) : null, p.id);
     const what = archived !== p.archived ? `${archived ? '归档' : '恢复'}了项目「${name}」` : `修改了项目「${p.name}」${name !== p.name ? ` → 「${name}」` : ''}${note !== p.note ? `，说明：${note}` : ''}`;
     dataChanged(user, `${via}${what}`);
     return q.project.get(p.id);
@@ -1678,16 +1708,18 @@ async function attachmentBlocks(a, full) {
 // ---------------------------------------------------------------- 中转站（Sub2API 管理接口）：客户消耗 / 余额 / 实时 RPM
 const RELAY = { base: (process.env.RELAY_BASE_URL || '').replace(/\/+$/, ''), key: process.env.RELAY_ADMIN_KEY || '', name: process.env.RELAY_NAME || '中转站' };
 const relayConfigured = () => !!(RELAY.base && RELAY.key);
-async function relayCall(method, path, { params = null, body = null } = {}) {
-  if (!relayConfigured()) throw new HttpError(400, '未配置中转站接口（RELAY_BASE_URL / RELAY_ADMIN_KEY）');
-  const url = new URL(`${RELAY.base}/api/v1${path}`);
+async function relayCall(method, path, { params = null, body = null, station = null } = {}) {
+  const base = station ? station.base_url : RELAY.base;
+  const key = station ? station.credential : RELAY.key;
+  if (!base || !key) throw new HttpError(400, '未配置中转站接口（RELAY_BASE_URL / RELAY_ADMIN_KEY）');
+  const url = new URL(`${base.replace(/\/+$/, '')}/api/v1${path}`);
   if (params) for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
   let lastErr;
   for (let attempt = 0; attempt < 3; attempt++) { // 网络抖动时重试两次
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 25 * 1000);
     try {
-      const res = await fetch(url, { method, headers: { 'X-API-Key': RELAY.key, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: ctrl.signal });
+      const res = await fetch(url, { method, headers: { 'X-API-Key': key, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: ctrl.signal });
       const text = await res.text();
       let data; try { data = JSON.parse(text); } catch { throw new HttpError(502, `中转站返回了非 JSON（HTTP ${res.status}）：${text.slice(0, 80)}`); }
       if (res.status === 401 || res.status === 403) throw new HttpError(502, '中转站管理密钥无效或已过期');
@@ -1701,7 +1733,7 @@ async function relayCall(method, path, { params = null, body = null } = {}) {
   }
   throw new HttpError(502, `连不上中转站：${lastErr && lastErr.name === 'AbortError' ? '超时' : (lastErr && lastErr.message) || '网络错误'}`);
 }
-const relayGet = (path, params) => relayCall('GET', path, { params });
+const relayGet = (path, params, station = null) => relayCall('GET', path, { params, station });
 const relayPost = (path, body) => relayCall('POST', path, { body });
 const usd = (n) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 function relayRange(range, from, to) {
@@ -1964,6 +1996,53 @@ async function relayAccrualSweep() {
 }
 setTimeout(relayAccrualSweep, 20 * 1000).unref();
 setInterval(relayAccrualSweep, 15 * 60 * 1000).unref();
+
+// 中转制预估利润的同步：客户按分组的消耗 + 上游每个 key 的消耗
+async function syncRelayEstimate() {
+  const today = dayFmt.format(new Date());
+  const start = dayFmt.format(new Date(Date.now() - 2 * 86400_000));
+  // 客户分组：一个客户勾了哪些分组，就按这些分组落每天的美元消耗
+  const groups = db.prepare("SELECT g.party_id, g.group_name, g.station_id, pa.relay_id FROM relay_customer_groups g JOIN parties pa ON pa.id = g.party_id WHERE pa.relay_id IS NOT NULL").all();
+  const byUser = new Map();
+  for (const g of groups) {
+    const k = `${g.station_id}|${g.relay_id}`;
+    if (!byUser.has(k)) byUser.set(k, []);
+    byUser.get(k).push(g);
+  }
+  for (const [, rows] of byUser) {
+    const station = db.prepare('SELECT * FROM stations WHERE id = ?').get(rows[0].station_id);
+    if (!station) continue;
+    const want = new Set(rows.map((r) => r.group_name));
+    for (let t = new Date(start + 'T00:00:00Z').getTime(); t <= new Date(today + 'T00:00:00Z').getTime(); t += 86400_000) {
+      const date = dayFmt.format(new Date(t));
+      try {
+        const d = await relayGet('/admin/dashboard/groups', { user_id: rows[0].relay_id, start_date: date, end_date: date }, station);
+        for (const g of (d && d.groups) || []) {
+          if (!want.has(g.group_name)) continue;
+          db.prepare('INSERT INTO relay_group_usage (party_id, group_name, date, usd) VALUES (?, ?, ?, ?) ON CONFLICT (party_id, group_name, date) DO UPDATE SET usd = excluded.usd').run(rows[0].party_id, g.group_name, date, Number(g.actual_cost) || 0);
+        }
+      } catch (e) { console.error(`[relay] 分组用量 ${rows[0].relay_id} ${date} 失败：${e.message}`); }
+    }
+  }
+  // 上游 key：每个 key 用自己的令牌读站点日志，按天记消耗
+  for (const k of db.prepare('SELECT * FROM relay_keys').all()) {
+    if (!k.base_url || !k.token) continue;
+    try {
+      const url = `${k.base_url.replace(/\/+$/, '')}/api/log/self?page_size=100`;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${k.token}` } });
+      const d = await res.json();
+      const byDay = new Map();
+      for (const row of (d.data && d.data.items) || []) {
+        const date = String(row.created_at || '').slice(0, 10);
+        if (!date) continue;
+        byDay.set(date, (byDay.get(date) || 0) + (Number(row.quota) || 0));
+      }
+      for (const [date, quota] of byDay) db.prepare('INSERT INTO relay_key_usage (key_id, date, usd) VALUES (?, ?, ?) ON CONFLICT (key_id, date) DO UPDATE SET usd = excluded.usd').run(k.id, date, quota / 500000);
+    } catch (e) { console.error(`[relay] key ${k.key_name} 失败：${e.message}`); }
+  }
+}
+setTimeout(syncRelayEstimate, 40 * 1000).unref();
+setInterval(syncRelayEstimate, 15 * 60 * 1000).unref();
 async function projectRelayLive(projectId) {
   const parties = q.partiesOfProject.all(projectId).filter((p) => p.relay_id && !p.archived);
   const out = {};
@@ -2931,8 +3010,20 @@ app.get('/api/projects', auth, (req, res) => {
   const list = q.projects.all().map((p) => {
     const summary = summarize(byProject.get(p.id) || [], rates);
     const customer_open_cny = r2(custOpen.get(p.id) || 0);
-    // 预估利润 = 当前利润 + 客户应打款（应收未收）
-    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny) };
+    // est_profit 保持原义（记账利润 + 应收未收）。forecast_profit 是按消耗算的预估利润：
+    // 中转制 = 客户分组收费 − 上游 key 成本；上 key = 甲方应收 − 供应商应付；项目制没有
+    let forecast = null;
+    if (p.ptype === 'relay') {
+      const income = db.prepare("SELECT COALESCE(SUM(u.usd * g.price), 0) AS n FROM relay_group_usage u JOIN relay_customer_groups g ON g.party_id = u.party_id AND g.group_name = u.group_name JOIN parties pa ON pa.id = u.party_id WHERE pa.project_id = ?").get(p.id).n;
+      const cost = db.prepare('SELECT COALESCE(SUM(u.usd * k.ratio), 0) AS n FROM relay_key_usage u JOIN relay_keys k ON k.id = u.key_id WHERE k.project_id = ?').get(p.id).n;
+      forecast = r2(income - cost);
+    } else if (p.ptype === 'key') {
+      const rows = db.prepare("SELECT pa.kind, COALESCE(SUM(r.amount * CASE WHEN r.currency = 'CNY' THEN 1 ELSE r.rate END), 0) AS n FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE r.project_id = ? AND r.source = 'key' AND r.kind = 'due' GROUP BY pa.kind").all(p.id);
+      const income = (rows.find((x) => x.kind === 'customer') || {}).n || 0;
+      const cost = (rows.find((x) => x.kind === 'supplier') || {}).n || 0;
+      forecast = r2(income - cost);
+    }
+    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny), forecast_profit: forecast };
   });
   list.sort((a, b) => (a.archived - b.archived) || String(b.summary.last_at || b.created_at).localeCompare(String(a.summary.last_at || a.created_at)));
   res.json({ projects: list, totals: summarize(list.flatMap((p) => byProject.get(p.id) || []), rates), funds: memberFunds(null), rates, version: dataVersion });
@@ -2972,6 +3063,73 @@ app.get('/api/funds', auth, (req, res) => {
 app.post('/api/transfers', auth, (req, res) => res.json({ transfer: transferView(ops.addTransfer(req.user, req.body || {})) }));
 app.patch('/api/transfers/:id', auth, (req, res) => res.json({ transfer: transferView(ops.updateTransfer(req.user, req.params.id, req.body || {})) }));
 app.delete('/api/transfers/:id', auth, (req, res) => { ops.deleteTransfer(req.user, req.params.id); res.json({ ok: true }); });
+
+// ---- 台子（上 key / 中转站统一管理）。credential 不回传明文
+const stationView = (s) => ({ id: s.id, name: s.name, type: s.type, base_url: s.base_url, user_id: s.user_id, quota_per_usd: s.quota_per_usd, has_credential: !!s.credential, projects: db.prepare('SELECT id, name FROM projects WHERE station_id = ?').all(s.id) });
+app.get('/api/stations', auth, (req, res) => res.json({ stations: db.prepare('SELECT * FROM stations ORDER BY type, id').all().map(stationView) }));
+app.post('/api/stations', auth, (req, res) => {
+  const b = req.body || {};
+  const type = b.type === 'key' ? 'key' : 'relay';
+  const name = String(b.name || '').trim();
+  if (!name) return fail(res, 400, '请填写台子名称');
+  const r = db.prepare('INSERT INTO stations (name, type, base_url, credential, user_id, quota_per_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(name, type, String(b.base_url || '').replace(/\/+$/, ''), String(b.credential || ''), String(b.user_id || ''), Number(b.quota_per_usd) || 500000, now());
+  res.json({ station: stationView(db.prepare('SELECT * FROM stations WHERE id = ?').get(Number(r.lastInsertRowid))) });
+});
+app.patch('/api/stations/:id', auth, (req, res) => {
+  const s = db.prepare('SELECT * FROM stations WHERE id = ?').get(Number(req.params.id));
+  if (!s) return fail(res, 404, '台子不存在');
+  const b = req.body || {};
+  db.prepare('UPDATE stations SET name = ?, base_url = ?, user_id = ?, quota_per_usd = ?, credential = ? WHERE id = ?').run(String(b.name || s.name).trim(), String(b.base_url ?? s.base_url).replace(/\/+$/, ''), String(b.user_id ?? s.user_id), Number(b.quota_per_usd) || s.quota_per_usd, b.credential ? String(b.credential) : s.credential, s.id);
+  res.json({ station: stationView(db.prepare('SELECT * FROM stations WHERE id = ?').get(s.id)) });
+});
+// 中转制客户的分组收费：body.groups = [{ group_name, price }]
+app.get('/api/stations/:id/groups', auth, async (req, res, next) => {
+  try {
+    const s = db.prepare("SELECT * FROM stations WHERE id = ? AND type = 'relay'").get(Number(req.params.id));
+    if (!s) return fail(res, 404, '中转站不存在');
+    const d = await relayGet('/admin/groups', null, s);
+    res.json({ groups: ((d && d.items) || []).map((g) => ({ id: g.id, name: g.name })) });
+  } catch (e) { next(e); }
+});
+app.get('/api/parties/:id/relay-groups', auth, (req, res) => {
+  const pa = q.party.get(Number(req.params.id));
+  if (!pa) return fail(res, 404, '往来单位不存在');
+  res.json({ groups: db.prepare('SELECT station_id, group_name, price FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(pa.id) });
+});
+app.put('/api/parties/:id/relay-groups', auth, (req, res) => {
+  const pa = q.party.get(Number(req.params.id));
+  if (!pa || pa.kind !== 'customer') return fail(res, 404, '客户不存在');
+  const stationId = Number((req.body || {}).station_id);
+  if (!db.prepare('SELECT 1 FROM stations WHERE id = ?').get(stationId)) return fail(res, 400, '请选择中转站');
+  const groups = Array.isArray((req.body || {}).groups) ? req.body.groups : [];
+  db.prepare('DELETE FROM relay_customer_groups WHERE party_id = ?').run(pa.id);
+  for (const g of groups) {
+    const name = String(g.group_name || '').trim();
+    if (name) db.prepare('INSERT INTO relay_customer_groups (party_id, station_id, group_name, price) VALUES (?, ?, ?, ?)').run(pa.id, stationId, name, Number(g.price) || 0);
+  }
+  res.json({ ok: true });
+});
+// 中转制上游 key：一个上游可以有多个分组、多个 key，每个 key 的消耗即该账号的消费
+app.post('/api/relay-keys', auth, (req, res) => {
+  const b = req.body || {};
+  if (!db.prepare('SELECT 1 FROM stations WHERE id = ?').get(Number(b.station_id))) return fail(res, 400, '请选择台子');
+  if (!db.prepare("SELECT 1 FROM parties WHERE id = ? AND kind = 'supplier'").get(Number(b.party_id))) return fail(res, 400, '请选择供应商');
+  const r = db.prepare('INSERT INTO relay_keys (station_id, party_id, project_id, key_name, group_name, ratio, base_url, token, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(Number(b.station_id), Number(b.party_id), Number(b.project_id) || null, String(b.key_name || ''), String(b.group_name || ''), Number(b.ratio) || 1, String(b.base_url || ''), String(b.token || ''), now());
+  res.json({ id: Number(r.lastInsertRowid) });
+});
+// token 不回传明文
+app.get('/api/projects/:id/relay-keys', auth, (req, res) => {
+  const rows = db.prepare("SELECT k.id, k.station_id, k.party_id, k.project_id, k.key_name, k.group_name, k.ratio, k.base_url, k.token <> '' AS has_token, pa.name AS party_name, COALESCE(SUM(u.usd), 0) AS usd, COALESCE(SUM(u.usd * k.ratio), 0) AS cost FROM relay_keys k JOIN parties pa ON pa.id = k.party_id LEFT JOIN relay_key_usage u ON u.key_id = k.id WHERE k.project_id = ? GROUP BY k.id ORDER BY k.id").all(Number(req.params.id));
+  res.json({ keys: rows });
+});
+app.delete('/api/relay-keys/:id', auth, (req, res) => { db.prepare('DELETE FROM relay_keys WHERE id = ?').run(Number(req.params.id)); res.json({ ok: true }); });
+
+app.delete('/api/stations/:id', auth, (req, res) => {
+  const used = db.prepare('SELECT COUNT(*) AS n FROM projects WHERE station_id = ?').get(Number(req.params.id)).n;
+  if (used) return fail(res, 400, `有 ${used} 个项目在用这个台子，不能删除`);
+  db.prepare('DELETE FROM stations WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
 
 // ---- 往来：供应商 / 客户
 app.get('/api/projects/:id/parties', auth, (req, res) => {
@@ -3067,6 +3225,18 @@ if (!db.prepare("SELECT 1 FROM settings WHERE key = 'suppliers_global_v1'").get(
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   finally { db.exec('PRAGMA foreign_keys = ON'); }
+}
+// 一次性：现有上 key 台子和中转站收进 stations，项目指向自己的台子
+if (!db.prepare("SELECT 1 FROM settings WHERE key = 'stations_v1'").get()) {
+  const stamp = new Date().toISOString();
+  for (const s of db.prepare('SELECT k.*, p.name AS pname FROM key_sites k JOIN projects p ON p.id = k.project_id').all()) {
+    const r = db.prepare('INSERT INTO stations (name, type, base_url, credential, user_id, quota_per_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(`${s.pname} 台子`, 'key', s.base_url || process.env.KEY_NEWAPI_BASE || 'https://ethanplum.com', s.cookie || process.env.KEY_NEWAPI_COOKIE || '', s.user_id || '', s.quota_per_usd || 500000, stamp);
+    db.prepare('UPDATE projects SET station_id = ? WHERE id = ?').run(Number(r.lastInsertRowid), s.project_id);
+  }
+  if (process.env.RELAY_BASE_URL) {
+    db.prepare('INSERT INTO stations (name, type, base_url, credential, created_at) VALUES (?, ?, ?, ?, ?)').run(process.env.RELAY_NAME || '中转站', 'relay', process.env.RELAY_BASE_URL, process.env.RELAY_ADMIN_KEY || '', stamp);
+  }
+  db.prepare("INSERT INTO settings (key, value) VALUES ('stations_v1', '1')").run();
 }
 // 侧栏「供应商」页：供应商全局一份，不挂项目
 app.get('/api/suppliers', auth, (req, res) => {
@@ -3370,10 +3540,29 @@ async function computeProfitDaily() {
   for (const pe of projects) for (const d of pe.days) {
     const e = byDate.get(d.date) || { date: d.date, customer: 0, supplier: 0, profit: 0 };
     e.customer = r2(e.customer + d.customer); e.supplier = r2(e.supplier + d.supplier); e.profit = r2(e.profit + d.profit);
+    if (d.forecast !== undefined) { e.forecast = r2((e.forecast || 0) + d.forecast); e.has_forecast = true; }
     byDate.set(d.date, e);
   }
   const daily = [...byDate.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
-  const totals = { customer: r2(projects.reduce((a, p) => a + p.customer, 0)), supplier: r2(projects.reduce((a, p) => a + p.supplier, 0)), profit: r2(projects.reduce((a, p) => a + p.profit, 0)) };
+  // 预估利润（与上面的记账利润并存）：中转制 = 客户分组收费 − 上游 key 成本；上 key = 甲方应收 − 供应商应付
+  const forecastOf = new Map();
+  for (const r of db.prepare("SELECT pa.project_id, u.date, SUM(u.usd * g.price) AS n FROM relay_group_usage u JOIN relay_customer_groups g ON g.party_id = u.party_id AND g.group_name = u.group_name JOIN parties pa ON pa.id = u.party_id GROUP BY pa.project_id, u.date").all()) {
+    const k = `${r.project_id}|${r.date}`;
+    forecastOf.set(k, r2((forecastOf.get(k) || 0) + r.n));
+  }
+  for (const r of db.prepare('SELECT project_id, date, SUM(u.usd * k.ratio) AS n FROM relay_key_usage u JOIN relay_keys k ON k.id = u.key_id WHERE k.project_id IS NOT NULL GROUP BY k.project_id, u.date').all()) {
+    const k = `${r.project_id}|${r.date}`;
+    forecastOf.set(k, r2((forecastOf.get(k) || 0) - r.n));
+  }
+  for (const pe of projects) {
+    pe.forecast = 0; pe.has_forecast = false;
+    for (const d of pe.days) {
+      const v = forecastOf.get(`${pe.project_id}|${d.date}`);
+      if (v !== undefined) { d.forecast = r2(v); pe.forecast = r2(pe.forecast + v); pe.has_forecast = true; }
+    }
+    if (!pe.has_forecast) pe.forecast = null;
+  }
+  const totals = { customer: r2(projects.reduce((a, p) => a + p.customer, 0)), supplier: r2(projects.reduce((a, p) => a + p.supplier, 0)), profit: r2(projects.reduce((a, p) => a + p.profit, 0)), forecast: r2(projects.reduce((a, p) => a + (p.forecast || 0), 0)) };
   return { projects, daily, totals, errors, rates };
 }
 app.get('/api/profit/daily', auth, async (req, res) => {

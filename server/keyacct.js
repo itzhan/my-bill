@@ -80,11 +80,16 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     usage: db.prepare('SELECT * FROM key_usage WHERE project_id = ?'),
     dayRates: db.prepare('SELECT * FROM key_day_rates WHERE project_id = ?'),
     putDayRate: db.prepare('INSERT OR IGNORE INTO key_day_rates (project_id, date, usd_rate) VALUES (?, ?, ?)'),
-    keyRecords: db.prepare("SELECT * FROM party_records WHERE project_id = ? AND source = 'key'"),
+    // 挂账键是 key:项目:供应商:日期。供应商合并后同一人会出现在多个项目，必须带项目号，
+    // 否则两个项目同一天写同一条 external_ref，同步整笔回滚、渠道额度也不再更新。
+    // 旧键（key:供应商:日期，没有项目号）按 project_id 列认回来，重算时改写成新键。
+    keyRecords: db.prepare(`SELECT * FROM party_records WHERE source = 'key' AND (
+      project_id = ? OR external_ref LIKE 'key:' || ? || ':%'
+    )`),
     recordsOfParty: db.prepare('SELECT * FROM party_records WHERE party_id = ?'),
     party: db.prepare('SELECT * FROM parties WHERE id = ?'),
     insRecord: db.prepare("INSERT INTO party_records (party_id, kind, amount, currency, rate, date, note, source, external_ref, created_at, project_id) VALUES (?, 'due', ?, ?, ?, ?, ?, 'key', ?, ?, ?)"),
-    updRecord: db.prepare('UPDATE party_records SET amount = ?, currency = ?, rate = ?, date = ?, note = ? WHERE id = ?'),
+    updRecord: db.prepare('UPDATE party_records SET amount = ?, currency = ?, rate = ?, date = ?, note = ?, external_ref = ?, project_id = ? WHERE id = ?'),
     delRecord: db.prepare('DELETE FROM party_records WHERE id = ?'),
   };
 
@@ -92,6 +97,9 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
   const siteOf = (projectId) => {
     q.ensureSite.run(projectId);
     const s = q.site.get(projectId);
+    // 台子配置统一在 stations，项目通过 station_id 指向
+    const st = db.prepare('SELECT s.* FROM stations s JOIN projects p ON p.station_id = s.id WHERE p.id = ?').get(projectId);
+    if (st) { s.base_url = st.base_url; s.cookie = st.credential; s.user_id = st.user_id; s.quota_per_usd = st.quota_per_usd; }
     // 还没选甲方、项目里正好只有一个客户：直接认定为甲方
     if (!s.customer_party_id) {
       const cs = custOfProject.all(projectId);
@@ -281,7 +289,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     let changed = false;
     db.exec('BEGIN');
     try {
-      const existing = new Map(q.keyRecords.all(projectId).map((r) => [r.external_ref, r]));
+      const existing = new Map(q.keyRecords.all(projectId, projectId).map((r) => [r.external_ref, r]));
       for (const [ref, w] of want) {
         const pa = q.party.get(w.partyId);
         if (!pa) continue;
@@ -293,7 +301,8 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
         existing.delete(ref);
         if (amount <= 0) { if (ex) { q.delRecord.run(ex.id); changed = true; } continue; }
         if (!ex) { q.insRecord.run(pa.id, amount, cur, rate, w.date, note, ref, new Date().toISOString(), projectId); changed = true; }
-        else if (Math.abs(ex.amount - amount) >= 0.01 || ex.currency !== cur || ex.note !== note) q.updRecord.run(amount, cur, rate, w.date, note, ex.id);
+        else if (ex.external_ref !== ref || Math.abs(ex.amount - amount) >= 0.01 || ex.currency !== cur || ex.note !== note || ex.project_id !== projectId)
+          q.updRecord.run(amount, cur, rate, w.date, note, ref, projectId, ex.id);
       }
       // 前缀删了 / 换了供应商 / 去掉了价格：多出来的旧挂账删掉
       for (const ex of existing.values()) { q.delRecord.run(ex.id); changed = true; }

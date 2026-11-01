@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { useQuery } from "@tanstack/react-query";
+
 import { useRouter } from "next/navigation";
 
 import { toast } from "sonner";
@@ -10,12 +12,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
-import { del, patch, post } from "../api";
+import { del, get, patch, post } from "../api";
 import { useLedgerRefresh, useMe } from "../hooks";
-import type { Project } from "../types";
+import type { Project, Station } from "../types";
 
 import { FormError, ResponsiveDialog, useConfirm } from "./shared";
 
@@ -38,6 +41,7 @@ export function ProjectDialog({
   const [note, setNote] = useState("");
   const [ptype, setPtype] = useState<"relay" | "short" | "key">("relay");
   const [category, setCategory] = useState<"customer" | "company">("customer");
+  const [stationId, setStationId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -47,8 +51,16 @@ export function ProjectDialog({
     setNote(project?.note ?? "");
     setPtype(project?.ptype ?? "relay");
     setCategory(project?.category === "company" ? "company" : "customer");
+    setStationId(project?.station_id ? String(project.station_id) : "");
     setError(null);
   }, [open, project]);
+
+  const { data: stations } = useQuery({
+    queryKey: ["ledger", "stations"],
+    queryFn: () => get<{ stations: Station[] }>("/stations").then((d) => d.stations),
+    enabled: open && ptype !== "short",
+  });
+  const stationChoices = (stations ?? []).filter((x) => x.type === ptype);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,7 +69,13 @@ export function ProjectDialog({
     setError(null);
     try {
       if (project) {
-        await patch(`/projects/${project.id}`, { name: name.trim(), note: note.trim(), ptype, category });
+        await patch(`/projects/${project.id}`, {
+          name: name.trim(),
+          note: note.trim(),
+          ptype,
+          category,
+          station_id: ptype === "short" ? null : Number(stationId) || null,
+        });
         toast.success("项目已更新");
         onOpenChange(false);
         refresh();
@@ -67,6 +85,7 @@ export function ProjectDialog({
           note: note.trim(),
           ptype,
           category,
+          station_id: ptype === "short" ? null : Number(stationId) || null,
         });
         toast.success(`项目「${d.project.name}」已创建`);
         onOpenChange(false);
@@ -187,6 +206,28 @@ export function ProjectDialog({
                   : "项目制：按实际记账（收入 − 支出）算利润，不进每日利润报表"}
             </p>
           </div>
+          {ptype !== "short" ? (
+            <div className="space-y-2">
+              <Label>所属台子</Label>
+              <Select value={stationId} onValueChange={setStationId}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder={ptype === "relay" ? "选择中转站" : "选择上 key 台子"} />
+                </SelectTrigger>
+                <SelectContent>
+                  {stationChoices.map((x) => (
+                    <SelectItem key={x.id} value={String(x.id)}>
+                      {x.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-muted-foreground text-xs">
+                {stationChoices.length
+                  ? "台子在侧边栏「台子管理」里统一配置"
+                  : "还没有这个类型的台子，先到侧边栏「台子管理」里添加"}
+              </p>
+            </div>
+          ) : null}
           <div className="space-y-2">
             <Label htmlFor="project-note">备注（可选）</Label>
             <Textarea

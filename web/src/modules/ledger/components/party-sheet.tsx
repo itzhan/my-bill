@@ -20,10 +20,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 
-import { del, get, patch, post } from "../api";
+import { del, get, patch, post, put } from "../api";
 import { CUR, CURRENCIES, PL, curf, fmt, fmtCompact, fmtTime, parseAmount, relTime, todayLocal, usdf } from "../format";
 import { qk, useLedgerRefresh, useMe, useParty } from "../hooks";
-import type { Currency, Party, PartyKind, PartyWallet, RelayLive } from "../types";
+import type { Currency, Party, PartyKind, PartyWallet, RelayLive, Station } from "../types";
 
 import {
   EMPTY_WALLET,
@@ -487,6 +487,8 @@ function PartyDetailView({
         {data.relay_configured && v.kind === "customer" ? (
           <RelayBlock party={v} live={liveData} loading={live.isFetching} onRefresh={() => live.refetch()} />
         ) : null}
+
+        {v.kind === "customer" && v.relay ? <RelayGroups party={v} /> : null}
 
         {v.archived ? <p className="text-muted-foreground text-sm">已归档，只能查看</p> : <RecordForm party={v} />}
 
@@ -1163,5 +1165,105 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
       </form>
       {confirmEl}
     </>
+  );
+}
+
+// 中转制客户的分组收费：勾选这个客户在用的分组，填每美元消耗收多少人民币
+function RelayGroups({ party: v }: { party: Party }) {
+  const qc = useQueryClient();
+  const { data: stations } = useQuery({
+    queryKey: ["ledger", "stations"],
+    queryFn: () => get<{ stations: Station[] }>("/stations").then((d) => d.stations),
+  });
+  const relays = (stations ?? []).filter((x) => x.type === "relay");
+  const saved = useQuery({
+    queryKey: ["ledger", "relay-groups", v.id],
+    queryFn: () =>
+      get<{ groups: { station_id: number; group_name: string; price: number }[] }>(`/parties/${v.id}/relay-groups`).then(
+        (d) => d.groups,
+      ),
+  });
+  const [stationId, setStationId] = useState("");
+  const [prices, setPrices] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!saved.data) return;
+    setStationId(saved.data[0] ? String(saved.data[0].station_id) : relays[0] ? String(relays[0].id) : "");
+    setPrices(Object.fromEntries(saved.data.map((g) => [g.group_name, String(g.price)])));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saved.data]);
+
+  const sid = Number(stationId);
+  const groups = useQuery({
+    queryKey: ["ledger", "station-groups", sid],
+    queryFn: () => get<{ groups: { id: number; name: string }[] }>(`/stations/${sid}/groups`).then((d) => d.groups),
+    enabled: sid > 0,
+  });
+
+  const save = async () => {
+    if (!(sid > 0)) return toast.error("请选择中转站");
+    setBusy(true);
+    try {
+      await put(`/parties/${v.id}/relay-groups`, {
+        station_id: sid,
+        groups: Object.entries(prices)
+          .filter(([, p]) => p.trim() !== "")
+          .map(([group_name, p]) => ({ group_name, price: Number(p) || 0 })),
+      });
+      toast.success("分组收费已保存，用量会自动同步");
+      qc.invalidateQueries({ queryKey: ["ledger", "relay-groups", v.id] });
+    } catch (ex) {
+      toast.error((ex as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chosen = Object.values(prices).filter((p) => p.trim() !== "").length;
+  return (
+    <div className="space-y-3 rounded-lg border p-4">
+      <div>
+        <b className="text-sm">分组收费（预估利润）</b>
+        <p className="text-muted-foreground text-xs">勾选这个客户在用的分组，填每美元消耗收多少人民币。预估应收按分组用量自动计算</p>
+      </div>
+      {relays.length ? (
+        <Select value={stationId} onValueChange={setStationId}>
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder="选择中转站" />
+          </SelectTrigger>
+          <SelectContent>
+            {relays.map((x) => (
+              <SelectItem key={x.id} value={String(x.id)}>
+                {x.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : (
+        <p className="text-muted-foreground text-xs">还没有中转站，先到侧边栏「台子管理」里添加</p>
+      )}
+      {groups.isLoading ? <Skeleton className="h-16" /> : null}
+      {groups.data ? (
+        <div className="space-y-2">
+          {groups.data.map((g) => (
+            <div key={g.name} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-sm">{g.name}</span>
+              <Input
+                inputMode="decimal"
+                className="w-28"
+                placeholder="不收"
+                value={prices[g.name] ?? ""}
+                onChange={(e) => setPrices((x) => ({ ...x, [g.name]: e.target.value }))}
+              />
+              <span className="text-muted-foreground text-xs">元/美元</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <Button className="w-full" onClick={save} disabled={busy || !groups.data}>
+        保存分组收费{chosen ? `（${chosen} 个分组）` : ""}
+      </Button>
+    </div>
   );
 }

@@ -28,6 +28,7 @@ import { FilesCard } from "@/modules/ledger/components/files-panel";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
 import { KeySection } from "@/modules/ledger/components/key-section";
 import { PartiesSection } from "@/modules/ledger/components/parties-section";
+import { RelayKeysSection } from "@/modules/ledger/components/relay-keys-section";
 import { KpiCards, PageHeader, useConfirm } from "@/modules/ledger/components/shared";
 import { useProject } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
@@ -122,6 +123,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
             {p.name}
             {p.category === "company" ? <Badge variant="secondary">公司日常</Badge> : null}
             {p.ptype === "key" ? <Badge variant="secondary">上key</Badge> : null}
+            {p.ptype === "relay" ? <Badge variant="secondary">中转</Badge> : null}
             {p.archived ? <Badge variant="outline">已归档 · 仅可查看</Badge> : null}
           </span>
         }
@@ -169,6 +171,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       <Tabs defaultValue={p.ptype === "key" ? "key" : "entries"} className="gap-4">
         <TabsList>
           {p.ptype === "key" ? <TabsTrigger value="key">上key</TabsTrigger> : null}
+          {p.ptype === "relay" ? <TabsTrigger value="relay-keys">上游 key</TabsTrigger> : null}
           <TabsTrigger value="entries">流水 {data.entries.length}</TabsTrigger>
           <TabsTrigger value="parties">往来 {partyCount || ""}</TabsTrigger>
           <TabsTrigger value="funds">成员资金</TabsTrigger>
@@ -176,6 +179,11 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         {p.ptype === "key" ? (
           <TabsContent value="key">
             <KeySection detail={data} />
+          </TabsContent>
+        ) : null}
+        {p.ptype === "relay" ? (
+          <TabsContent value="relay-keys">
+            <RelayKeysSection detail={data} />
           </TabsContent>
         ) : null}
         <TabsContent value="entries">
