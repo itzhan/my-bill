@@ -3517,10 +3517,16 @@ async function supplierDailyCost(onlyProject = null) {
 // 中转制预估利润：客户消耗 × 折扣（已按天挂账的应收）− 付给供应商的钱（站点每日消耗 × 消耗倍率）
 function relayForecastOf(projectId, byKey) {
   const days = new Map();
+  // 客户：每天的挂账（消耗 × 折扣）
   for (const r of q.recordsOfProject.all(projectId)) {
     if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
     const d = days.get(r.date) || { date: r.date, customer: 0, supplier: 0 };
     d.customer += recBase(r); days.set(r.date, d);
+  }
+  // 挂账只覆盖近几天，更早的历史消耗补一条，保证客户侧是从一开始到现在的累计
+  for (const [date, cny] of customerHistoryGap(projectId)) {
+    const d = days.get(date) || { date, customer: 0, supplier: 0 };
+    d.customer += cny; days.set(date, d);
   }
   for (const [k, cost] of byKey) {
     if (!k.startsWith(`${projectId}|`)) continue;
@@ -3531,14 +3537,58 @@ function relayForecastOf(projectId, byKey) {
   const daily = [...days.values()].map((d) => ({ date: d.date, customer: r2(d.customer), supplier: r2(d.supplier), profit: r2(d.customer - d.supplier) })).sort((a, b) => (a.date < b.date ? 1 : -1));
   return { customer: r2(daily.reduce((a, d) => a + d.customer, 0)), supplier: r2(daily.reduce((a, d) => a + d.supplier, 0)), profit: r2(daily.reduce((a, d) => a + d.profit, 0)), daily };
 }
+// 客户历史消耗里、账本还没挂上的部分（中转站累计 − 已挂账），折人民币。挂账从绑定日才开始，之前的不能丢
+const customerGapCache = new Map();
+function customerHistoryGap(projectId) {
+  return customerGapCache.get(projectId) || [];
+}
+async function refreshCustomerGaps() {
+  const rates = getRates();
+  for (const pa of db.prepare("SELECT pa.* FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer' AND pa.relay_id IS NOT NULL AND pa.archived = 0 AND p.ptype = 'relay'").all()) {
+    try {
+      const live = await relayCustomerLive(pa.relay_id, pa.relay_ref);
+      const total = Number(live.total && live.total.cost_usd) || 0;
+      // 已挂账的人民币 ÷（折扣 × 汇率）还原成美元消耗，和中转站累计比较，差额就是挂账前的历史
+      const bookedCny = db.prepare("SELECT COALESCE(SUM(amount * CASE WHEN currency = 'CNY' THEN 1 ELSE rate END), 0) AS n FROM party_records WHERE party_id = ? AND source = 'relay' AND kind = 'due'").get(pa.id).n;
+      const ratio = Number(pa.ratio) > 0 ? Number(pa.ratio) : 1;
+      const perUsd = usdToCur(ratio, pa.currency || 'CNY', rates);
+      const gap = perUsd > 0 ? r2(total - bookedCny / perUsd) : 0;
+      if (gap > 1) {
+        const cur = pa.currency || 'CNY';
+        const cny = r2(usdToCur(gap * (Number(pa.ratio) > 0 ? Number(pa.ratio) : 1), cur, rates));
+        customerGapCache.set(pa.project_id, [...(customerGapCache.get(pa.project_id) || []), ['历史（挂账前）', cny]]);
+      }
+    } catch (e) { console.error(`[relay] 客户 ${pa.name} 历史消耗失败：${e.message}`); }
+  }
+}
 // 后台每 20 分钟算一遍所有中转制项目的预估利润，打开页面只读这份缓存
 const relayForecastCache = new Map();
 async function refreshRelayForecasts() {
   try {
+    customerGapCache.clear();
+    await refreshCustomerGaps();
     const { byKey } = await supplierDailyCost();
+    // 按天消耗只有近 30 天，每个站点更早的累计消费（已抓好的 last_used_actual）补在最早那天之前
+    const lifetime = new Map();
+    const seenSite = new Set();
+    for (const w of db.prepare("SELECT base_url, project_id, last_used_actual FROM party_wallets WHERE enabled = 1 AND project_id IS NOT NULL AND last_used_actual IS NOT NULL").all()) {
+      const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
+      if (seenSite.has(site)) continue;
+      seenSite.add(site);
+      lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + (w.last_used_actual || 0)));
+    }
     for (const p of q.projects.all()) {
       if (p.ptype !== 'relay') continue;
-      relayForecastCache.set(p.id, relayForecastOf(p.id, byKey));
+      const f = relayForecastOf(p.id, byKey);
+      let recentSupplier = 0;
+      for (const [k, v] of byKey) if (k.startsWith(`${p.id}|`)) recentSupplier += v;
+      const earlier = r2((lifetime.get(p.id) || 0) - recentSupplier);
+      if (earlier > 1) {
+        f.daily.push({ date: '历史（30天前）', customer: 0, supplier: earlier, profit: r2(-earlier) });
+        f.supplier = r2(f.supplier + earlier);
+        f.profit = r2(f.profit - earlier);
+      }
+      relayForecastCache.set(p.id, f);
     }
     console.log(`[relay] 预估利润已更新：${relayForecastCache.size} 个中转制项目`);
   } catch (e) { console.error('[relay] 预估利润更新失败：', e.message); }
