@@ -3030,7 +3030,7 @@ app.get('/api/projects', auth, (req, res) => {
 });
 app.post('/api/projects', auth, (req, res) => res.json({ project: ops.createProject(req.user, req.body || {}) }));
 app.patch('/api/projects/:id', auth, (req, res) => res.json({ project: ops.updateProject(req.user, req.params.id, req.body || {}) }));
-app.get('/api/projects/:id', auth, (req, res) => {
+app.get('/api/projects/:id', auth, async (req, res) => {
   const p = q.project.get(Number(req.params.id));
   if (!p) return fail(res, 404, '项目不存在');
   const rates = getRates();
@@ -3042,7 +3042,26 @@ app.get('/api/projects/:id', auth, (req, res) => {
     m[e.type] += e.base; m.count += 1;
   }
   const members = [...byMember.values()].map((m) => ({ ...m, expense: r2(m.expense), income: r2(m.income) })).sort((a, b) => b.expense - a.expense || b.income - a.income);
-  res.json({ project: p, summary: summarize(q.projectEntries.all(p.id), rates), members, entries, rates, parties: projectPartiesSummary(p.id), funds: memberFunds(p.id), version: dataVersion });
+  const parties = projectPartiesSummary(p.id);
+  // 中转制预估利润：客户消耗 × 折扣（已按天挂账的应收）− 付给供应商的钱（站点每日消耗 × 消耗倍率）
+  let forecast = null;
+  if (p.ptype === 'relay') {
+    const { byKey } = await supplierDailyCost(p.id);
+    const days = new Map();
+    for (const r of q.recordsOfProject.all(p.id)) {
+      if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
+      const d = days.get(r.date) || { date: r.date, customer: 0, supplier: 0 };
+      d.customer += recBase(r); days.set(r.date, d);
+    }
+    for (const [k, cost] of byKey) {
+      const date = k.split('|')[1];
+      const d = days.get(date) || { date, customer: 0, supplier: 0 };
+      d.supplier += cost; days.set(date, d);
+    }
+    const daily = [...days.values()].map((d) => ({ date: d.date, customer: r2(d.customer), supplier: r2(d.supplier), profit: r2(d.customer - d.supplier) })).sort((a, b) => (a.date < b.date ? 1 : -1));
+    forecast = { customer: r2(daily.reduce((a, d) => a + d.customer, 0)), supplier: r2(daily.reduce((a, d) => a + d.supplier, 0)), profit: r2(daily.reduce((a, d) => a + d.profit, 0)), daily };
+  }
+  res.json({ project: p, summary: summarize(q.projectEntries.all(p.id), rates), members, entries, rates, parties, funds: memberFunds(p.id), forecast, version: dataVersion });
 });
 
 app.delete('/api/projects/:id', auth, (req, res) => res.json(ops.deleteProject(req.user, req.params.id)));
@@ -3468,6 +3487,26 @@ app.get('/api/members/:id/detail', auth, (req, res) => {
 // 每日利润明细（按项目）：客户每日消耗（中转站应收，CNY）− 供应商每日消耗（钱包实际消费，CNY）。只保留有消耗的
 // 结果缓存：历史不变，进页面直接返回缓存；只有点刷新（?refresh=1）才重算（重算要实时抓各供应商站点，较慢）
 let profitCache = null;
+
+// 供应商每日实际消费（人民币）：站点每日消耗 × 消耗倍率，同一项目同一站点只算一次。
+// 返回 byKey（"项目|日期" → 金额）和 byProject（项目 → [{date, cost}]）
+async function supplierDailyCost(onlyProject = null) {
+  const byKey = new Map();
+  const errors = [];
+  const walletRows = db.prepare("SELECT w.id, w.base_url, w.project_id, w.name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
+  const seen = new Set();
+  for (const w of walletRows) {
+    if (!w.project_id) { errors.push(`${w.name}：没有选择所属项目，消耗未计入利润`); continue; }
+    const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
+    if (seen.has(site)) continue;
+    seen.add(site);
+    const d = await partyWallets.detailOf(w.id);
+    if (!d || !d.ok) { if (d) errors.push(`${d.name}：${(d.error || '').slice(0, 50)}`); continue; }
+    const cr = d.consume_ratio || 1;
+    for (const x of d.daily || []) byKey.set(`${w.project_id}|${x.date}`, r2((byKey.get(`${w.project_id}|${x.date}`) || 0) + (x.usd || 0) * cr));
+  }
+  return { byKey, errors };
+}
 async function computeProfitDaily() {
   const rates = getRates();
   const projName = new Map(q.projects.all().map((p) => [p.id, p.name]));
@@ -3488,19 +3527,8 @@ async function computeProfitDaily() {
     }
   }
   // 供应商每日消耗（实际消费 = 站点每日消耗 × 消耗倍率，折人民币）：钱包 detail 的 daily，按 项目+站点 去重
-  const sup = new Map();
-  const walletRows = db.prepare("SELECT w.id, w.base_url, w.project_id, w.name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'").all();
-  const seen = new Set();
-  for (const w of walletRows) {
-    if (!w.project_id) { errors.push(`${w.name}：没有选择所属项目，消耗未计入利润`); continue; }
-    const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
-    if (seen.has(site)) continue;
-    seen.add(site);
-    const d = await partyWallets.detailOf(w.id);
-    if (!d || !d.ok) { if (d) errors.push(`${d.name}：${(d.error || '').slice(0, 50)}`); continue; }
-    const cr = d.consume_ratio || 1;
-    for (const x of d.daily || []) sup.set(`${w.project_id}|${x.date}`, r2((sup.get(`${w.project_id}|${x.date}`) || 0) + (x.usd || 0) * cr));
-  }
+  const { byKey: sup, errors: supErrors } = await supplierDailyCost();
+  errors.push(...supErrors);
   // 上 key 项目的供应商应付（台子渠道消耗 × 前缀价格，已按天挂账）
   for (const r of q.allRecords.all()) {
     if (r.party_kind !== 'supplier' || r.kind !== 'due' || r.source !== 'key') continue;

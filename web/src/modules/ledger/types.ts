@@ -424,6 +424,9 @@ export type PartiesSummary = {
   daily: { date: string; payable: number; paid: number; receivable: number; received: number; count: number }[];
 };
 
+// 中转制预估利润：客户消耗 × 折扣 − 付给供应商的钱，按天
+export type RelayForecastDay = { date: string; customer: number; supplier: number; profit: number };
+export type RelayForecast = { customer: number; supplier: number; profit: number; daily: RelayForecastDay[] };
 export type ProjectDetail = {
   project: Project;
   summary: Summary;
@@ -432,6 +435,7 @@ export type ProjectDetail = {
   rates: Rates;
   parties: PartiesSummary;
   funds: Funds;
+  forecast?: RelayForecast | null;
 };
 
 export type PartyRecord = {

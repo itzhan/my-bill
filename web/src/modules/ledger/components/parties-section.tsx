@@ -8,7 +8,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 
-import { PL, curf, fmt, money, relTime, usdf } from "../format";
+import { PL, curf, fmt, money, relTime, signed, usdf } from "../format";
 import { useProjectRelay } from "../hooks";
 import { useLedger } from "../provider";
 import type { Party, PartyKind, ProjectDetail, RelayLive } from "../types";
@@ -197,7 +197,40 @@ export function PartiesSection({ detail }: { detail: ProjectDetail }) {
         <PartyColumn kind="supplier" list={ps.suppliers} detail={detail} live={relay.data?.parties} />
         <PartyColumn kind="customer" list={ps.customers} detail={detail} live={relay.data?.parties} />
       </div>
-      {daily.length ? (
+      {detail.project.ptype === "relay" && detail.forecast ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>往来日报</CardTitle>
+            <CardDescription>预估利润 = 客户消耗 × 折扣 − 当天付给供应商的钱</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-hidden rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>日期</TableHead>
+                    <TableHead className="text-right">付给供应商</TableHead>
+                    <TableHead className="text-right">客户消耗 × 折扣</TableHead>
+                    <TableHead className="text-right">预估利润</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody className="tabular-nums">
+                  {detail.forecast.daily.slice(0, 14).map((x) => (
+                    <TableRow key={x.date}>
+                      <TableCell>{x.date}</TableCell>
+                      <TableCell className="text-expense text-right">{x.supplier ? money(x.supplier) : "—"}</TableCell>
+                      <TableCell className="text-income text-right">{x.customer ? money(x.customer) : "—"}</TableCell>
+                      <TableCell className={cn("text-right font-semibold", x.profit < 0 && "text-expense")}>
+                        {signed(x.profit)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : daily.length ? (
         <Card>
           <CardHeader>
             <CardTitle>往来日报</CardTitle>
