@@ -3498,9 +3498,15 @@ async function supplierDailyCost(onlyProject = null) {
     while (queue.length) {
       const w = queue.shift();
       try {
-        const daily = await fetchDailyUsage(w);
+        const daily = (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
         const cr = w.custom ? (Number(w.consume_ratio) || 1) : 1;
-        for (const x of daily) byKey.set(`${w.project_id}|${x.date}`, r2((byKey.get(`${w.project_id}|${x.date}`) || 0) + (x.usd || 0) * cr));
+        // 多算扣减从最早的一天开始减，减完再算进项目
+        let adjust = Number(w.used_adjust) || 0;
+        for (const x of daily) {
+          let usd = x.usd || 0;
+          if (adjust > 0) { const cut = Math.min(usd, adjust); usd -= cut; adjust -= cut; }
+          byKey.set(`${w.project_id}|${x.date}`, r2((byKey.get(`${w.project_id}|${x.date}`) || 0) + usd * cr));
+        }
       } catch (e) { errors.push(`${w.name}：${String(e.message || '').slice(0, 50)}`); }
     }
   }));

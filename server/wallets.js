@@ -462,6 +462,8 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   for (const col of ['last_used', 'last_used_actual', 'last_today', 'last_today_actual', 'consume_ratio']) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} REAL`);
   }
+  // 多算扣减：站点累计消费里多计的部分，显示和算利润时减掉。站点每次重抓不会覆盖它
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = 'used_adjust'").get()) db.exec('ALTER TABLE party_wallets ADD COLUMN used_adjust REAL NOT NULL DEFAULT 0');
   // 迁移：new-api 账号密码登录（读账户钱包与总消费，用户视角）、跳过证书校验
   for (const [col, ddl] of [['login_user', "TEXT NOT NULL DEFAULT ''"], ['login_pass', "TEXT NOT NULL DEFAULT ''"], ['insecure', 'INTEGER NOT NULL DEFAULT 0'], ['access_token', "TEXT NOT NULL DEFAULT ''"], ['token_user_id', "TEXT NOT NULL DEFAULT ''"]]) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} ${ddl}`);
@@ -503,6 +505,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     if (!partial || 'custom' in b) out.custom = b.custom ? 1 : 0;
     if (!partial || 'custom_ratio' in b) out.custom_ratio = num(b.custom_ratio);
     if (!partial || 'consume_ratio' in b) out.consume_ratio = num(b.consume_ratio);
+    if (!partial || 'used_adjust' in b) out.used_adjust = num(b.used_adjust) || 0;
     if (!partial || 'enabled' in b) out.enabled = b.enabled === false ? 0 : 1;
     if (!partial || 'insecure' in b) out.insecure = b.insecure ? 1 : 0;
     if (!partial || 'login_user' in b) out.login_user = str(b.login_user, 120);
@@ -528,8 +531,11 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     try {
       if (!w.api_key && !(w.platform === 'newapi' && w.access_token)) throw new Error('还没有填 API Key');
       const r = await fetchWallet(w);
+      // 站点报的累计消费减掉手工扣减（多算的部分），不能减成负数
+      const adjust = num(w.used_adjust) || 0;
+      const usedActual = r.usedActual === null ? null : Math.max(0, round(r.usedActual - adjust, 4));
       db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_today = ?, last_today_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
-        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, r.usedActual, r.today, r.todayActual, r.warning, t, id);
+        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, usedActual, r.today, r.todayActual, r.warning, t, id);
       // 批量试出来的账号密码存下来，以后自动刷新直接用
       if (r.loginUsed && (r.loginUsed.user !== w.login_user || r.loginUsed.pass !== w.login_pass)) {
         db.prepare('UPDATE party_wallets SET login_user = ?, login_pass = ? WHERE id = ?').run(r.loginUsed.user, r.loginUsed.pass, id);

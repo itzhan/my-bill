@@ -61,6 +61,7 @@ export type WalletDraft = {
   custom: boolean;
   custom_ratio: string;
   consume_ratio: string;
+  used_adjust: string;
   access_token: string;
   token_user_id: string;
   login_user: string;
@@ -76,6 +77,7 @@ export const EMPTY_WALLET: WalletDraft = {
   custom: false,
   custom_ratio: "",
   consume_ratio: "",
+  used_adjust: "",
   access_token: "",
   token_user_id: "",
   login_user: "",
@@ -101,6 +103,7 @@ export const walletBody = (v: WalletDraft) => ({
   custom_ratio: v.custom ? Number(v.custom_ratio) : null,
   // 消耗倍率：自定义且填了就用，没填默认 1
   consume_ratio: v.custom ? (Number(v.consume_ratio) > 0 ? Number(v.consume_ratio) : 1) : null,
+  used_adjust: Number(v.used_adjust) > 0 ? Number(v.used_adjust) : 0,
   insecure: v.insecure,
   login_user: v.login_user.trim(),
   token_user_id: v.token_user_id.trim(),
@@ -234,6 +237,17 @@ export function WalletFields({
             </div>
           </div>
         ) : null}
+        <div className="flex items-center gap-2">
+          <Label className="w-20 shrink-0">扣减多算</Label>
+          <Input
+            inputMode="decimal"
+            className="w-28"
+            placeholder="0"
+            value={v.used_adjust}
+            onChange={(e) => setV({ ...v, used_adjust: e.target.value })}
+          />
+          <span className="text-muted-foreground text-xs">站点累计消费里多算的金额，累计消费和利润都会减掉</span>
+        </div>
       </div>
       {v.platform === "newapi" ? (
         <div className="bg-muted/40 space-y-3 rounded-lg border p-3">
@@ -302,6 +316,7 @@ function WalletDialog({
             custom: wallet.custom,
             custom_ratio: wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
             consume_ratio: wallet.consume_ratio == null ? "" : String(wallet.consume_ratio),
+            used_adjust: wallet.used_adjust ? String(wallet.used_adjust) : "",
             access_token: "",
             token_user_id: wallet.token_user_id ?? "",
             login_user: wallet.login_user ?? "",
@@ -541,6 +556,9 @@ export function PartyWallets({ party }: { party: Party }) {
                     <div className="text-expense font-semibold tabular-nums" title={amtFull(w.last_used_actual)}>
                       {amt(w.last_used_actual)}
                     </div>
+                    {w.used_adjust ? (
+                      <div className="text-muted-foreground text-xs">已扣多算 {amt(w.used_adjust)}</div>
+                    ) : null}
                   </div>
                   <div className="bg-muted/50 rounded-md p-2">
                     <div className="text-muted-foreground text-xs">今日消费{w.custom ? "（× 倍率）" : ""}</div>
