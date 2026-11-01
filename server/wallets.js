@@ -385,6 +385,28 @@ async function fetchSub2apiDetail(w) {
   return { platform: "sub2api", groups: [], byGroup: [], byModel, daily, groupDaily: {}, period_days: null, period_used: num(d.usage?.total?.actual_cost), note: "sub2api 用 Key 拿不到按分组的消耗明细（需要登录态）" };
 }
 
+
+// 只要按天消耗（美元），不读分组和模型。项目预估利润用，比完整详情轻很多
+async function fetchDailyUsage(w) {
+  if (w.platform === "sub2api") {
+    const d = await fetchSub2apiDetail(w);
+    return d.daily || [];
+  }
+  const base = baseOf(w.base_url);
+  const token = w.access_token;
+  if (!token) throw new Error("没有访问令牌");
+  const st = await httpJson(`${base}/api/status`, { insecure: !!w.insecure });
+  const qpu = num(st.ok ? st.json.data?.quota_per_unit : null) || 500000;
+  const now = Math.floor(Date.now() / 1000);
+  const d = await newapiAuthedGet(base, token, w.token_user_id || "", `/api/data/self?start_timestamp=${now - 30 * 86400}&end_timestamp=${now}&default_time=day`, !!w.insecure);
+  if (!d.ok) throw new Error(d.error || "读取失败");
+  const byDay = new Map();
+  for (const r of (Array.isArray(d.json.data) ? d.json.data : [])) {
+    const day = tsDay(r.created_at);
+    byDay.set(day, (byDay.get(day) || 0) + (num(r.quota) || 0) / qpu);
+  }
+  return [...byDay.entries()].map(([date, usd]) => ({ date, usd: round(usd, 4) }));
+}
 async function fetchWallet(w) {
   const base = baseOf(w.base_url);
   const wantRatio = !w.custom;
@@ -618,4 +640,4 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   };
 }
 
-module.exports = { setupPartyWallets, fetchWallet, PLATFORMS };
+module.exports = { setupPartyWallets, fetchWallet, fetchDailyUsage, PLATFORMS };

@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 const ExcelJS = require('exceljs');
 const Anthropic = require('@anthropic-ai/sdk');
-const { setupPartyWallets } = require('./wallets');
+const { setupPartyWallets, fetchDailyUsage } = require('./wallets');
 const { setupKeyAccounting } = require('./keyacct');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -3490,22 +3490,39 @@ let profitCache = null;
 
 // 供应商每日实际消费（人民币）：站点每日消耗 × 消耗倍率，同一项目同一站点只算一次。
 // 返回 byKey（"项目|日期" → 金额）和 byProject（项目 → [{date, cost}]）
+// 供应商每日实际消费（人民币）：站点每日消耗 × 消耗倍率，同一项目同一站点只算一次。
+// 只抓按天消耗（不读分组和模型），并发抓，结果缓存 10 分钟，打开项目页不用每次重新打十几个站点
+const supplierCostCache = new Map();
 async function supplierDailyCost(onlyProject = null) {
+  const key = String(onlyProject || 'all');
+  const hit = supplierCostCache.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.data;
   const byKey = new Map();
   const errors = [];
-  const walletRows = db.prepare("SELECT w.id, w.base_url, w.project_id, w.name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
+  const walletRows = db.prepare("SELECT w.*, p.name AS party_name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
   const seen = new Set();
+  const jobs = [];
   for (const w of walletRows) {
     if (!w.project_id) { errors.push(`${w.name}：没有选择所属项目，消耗未计入利润`); continue; }
     const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
     if (seen.has(site)) continue;
     seen.add(site);
-    const d = await partyWallets.detailOf(w.id);
-    if (!d || !d.ok) { if (d) errors.push(`${d.name}：${(d.error || '').slice(0, 50)}`); continue; }
-    const cr = d.consume_ratio || 1;
-    for (const x of d.daily || []) byKey.set(`${w.project_id}|${x.date}`, r2((byKey.get(`${w.project_id}|${x.date}`) || 0) + (x.usd || 0) * cr));
+    jobs.push(w);
   }
-  return { byKey, errors };
+  const queue = [...jobs];
+  await Promise.all(Array.from({ length: Math.min(6, queue.length) }, async () => {
+    while (queue.length) {
+      const w = queue.shift();
+      try {
+        const daily = await fetchDailyUsage(w);
+        const cr = w.custom ? (Number(w.consume_ratio) || 1) : 1;
+        for (const x of daily) byKey.set(`${w.project_id}|${x.date}`, r2((byKey.get(`${w.project_id}|${x.date}`) || 0) + (x.usd || 0) * cr));
+      } catch (e) { errors.push(`${w.name}：${String(e.message || '').slice(0, 50)}`); }
+    }
+  }));
+  const data = { byKey, errors };
+  supplierCostCache.set(key, { at: Date.now(), data });
+  return data;
 }
 async function computeProfitDaily() {
   const rates = getRates();
