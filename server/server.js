@@ -3030,7 +3030,7 @@ app.get('/api/projects', auth, (req, res) => {
 });
 app.post('/api/projects', auth, (req, res) => res.json({ project: ops.createProject(req.user, req.body || {}) }));
 app.patch('/api/projects/:id', auth, (req, res) => res.json({ project: ops.updateProject(req.user, req.params.id, req.body || {}) }));
-app.get('/api/projects/:id', auth, async (req, res) => {
+app.get('/api/projects/:id', auth, (req, res) => {
   const p = q.project.get(Number(req.params.id));
   if (!p) return fail(res, 404, '项目不存在');
   const rates = getRates();
@@ -3043,24 +3043,8 @@ app.get('/api/projects/:id', auth, async (req, res) => {
   }
   const members = [...byMember.values()].map((m) => ({ ...m, expense: r2(m.expense), income: r2(m.income) })).sort((a, b) => b.expense - a.expense || b.income - a.income);
   const parties = projectPartiesSummary(p.id);
-  // 中转制预估利润：客户消耗 × 折扣（已按天挂账的应收）− 付给供应商的钱（站点每日消耗 × 消耗倍率）
-  let forecast = null;
-  if (p.ptype === 'relay') {
-    const { byKey } = await supplierDailyCost(p.id);
-    const days = new Map();
-    for (const r of q.recordsOfProject.all(p.id)) {
-      if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
-      const d = days.get(r.date) || { date: r.date, customer: 0, supplier: 0 };
-      d.customer += recBase(r); days.set(r.date, d);
-    }
-    for (const [k, cost] of byKey) {
-      const date = k.split('|')[1];
-      const d = days.get(date) || { date, customer: 0, supplier: 0 };
-      d.supplier += cost; days.set(date, d);
-    }
-    const daily = [...days.values()].map((d) => ({ date: d.date, customer: r2(d.customer), supplier: r2(d.supplier), profit: r2(d.customer - d.supplier) })).sort((a, b) => (a.date < b.date ? 1 : -1));
-    forecast = { customer: r2(daily.reduce((a, d) => a + d.customer, 0)), supplier: r2(daily.reduce((a, d) => a + d.supplier, 0)), profit: r2(daily.reduce((a, d) => a + d.profit, 0)), daily };
-  }
+  // 中转制预估利润直接读后台缓存（每 20 分钟更新），打开页面不等供应商站点
+  const forecast = p.ptype === 'relay' ? (relayForecastCache.get(p.id) || null) : null;
   res.json({ project: p, summary: summarize(q.projectEntries.all(p.id), rates), members, entries, rates, parties, funds: memberFunds(p.id), forecast, version: dataVersion });
 });
 
@@ -3524,6 +3508,37 @@ async function supplierDailyCost(onlyProject = null) {
   supplierCostCache.set(key, { at: Date.now(), data });
   return data;
 }
+// 中转制预估利润：客户消耗 × 折扣（已按天挂账的应收）− 付给供应商的钱（站点每日消耗 × 消耗倍率）
+function relayForecastOf(projectId, byKey) {
+  const days = new Map();
+  for (const r of q.recordsOfProject.all(projectId)) {
+    if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
+    const d = days.get(r.date) || { date: r.date, customer: 0, supplier: 0 };
+    d.customer += recBase(r); days.set(r.date, d);
+  }
+  for (const [k, cost] of byKey) {
+    if (!k.startsWith(`${projectId}|`)) continue;
+    const date = k.split('|')[1];
+    const d = days.get(date) || { date, customer: 0, supplier: 0 };
+    d.supplier += cost; days.set(date, d);
+  }
+  const daily = [...days.values()].map((d) => ({ date: d.date, customer: r2(d.customer), supplier: r2(d.supplier), profit: r2(d.customer - d.supplier) })).sort((a, b) => (a.date < b.date ? 1 : -1));
+  return { customer: r2(daily.reduce((a, d) => a + d.customer, 0)), supplier: r2(daily.reduce((a, d) => a + d.supplier, 0)), profit: r2(daily.reduce((a, d) => a + d.profit, 0)), daily };
+}
+// 后台每 20 分钟算一遍所有中转制项目的预估利润，打开页面只读这份缓存
+const relayForecastCache = new Map();
+async function refreshRelayForecasts() {
+  try {
+    const { byKey } = await supplierDailyCost();
+    for (const p of q.projects.all()) {
+      if (p.ptype !== 'relay') continue;
+      relayForecastCache.set(p.id, relayForecastOf(p.id, byKey));
+    }
+    console.log(`[relay] 预估利润已更新：${relayForecastCache.size} 个中转制项目`);
+  } catch (e) { console.error('[relay] 预估利润更新失败：', e.message); }
+}
+setTimeout(refreshRelayForecasts, 25 * 1000).unref();
+setInterval(refreshRelayForecasts, 20 * 60 * 1000).unref();
 async function computeProfitDaily() {
   const rates = getRates();
   const projName = new Map(q.projects.all().map((p) => [p.id, p.name]));
