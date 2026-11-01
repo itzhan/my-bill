@@ -896,9 +896,10 @@ function supplierSettlement(p) {
   const rates = getRates();
   const w = partyWallets ? partyWallets.summaryOf(p.id) : null;
   // 站点返回的消费/余额数字本身就是人民币，按结算币种折算（结算是人民币时原样不变），不要当美元乘汇率
-  const payable = w && w.used != null ? r2(cnyToCur(w.used, cur, rates)) : 0;
+  // 归档的供应商不再跑了：消费按我们实际转出的钱算，不用站点累计消费
+  const payable = p.archived ? 0 : w && w.used != null ? r2(cnyToCur(w.used, cur, rates)) : 0;
   // 授信（先用后付）没有预付余额，实际余额始终视为 0；预付才用站点钱包余额
-  const balance = p.settle_type === 'credit' ? 0 : w && w.actual != null ? r2(cnyToCur(w.actual, cur, rates)) : 0;
+  const balance = p.archived || p.settle_type === 'credit' ? 0 : w && w.actual != null ? r2(cnyToCur(w.actual, cur, rates)) : 0;
   const entries = q.entriesOfParty.all(p.id);
   const incomes = q.incomesOfParty.all(p.id);
   // 币种相同直接用原值，否则按记账汇率折人民币再折结算币种（口径同往来 partySettle）
@@ -3483,7 +3484,7 @@ async function supplierDailyCost(onlyProject = null) {
   if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.data;
   const byKey = new Map();
   const errors = [];
-  const walletRows = db.prepare("SELECT w.*, p.name AS party_name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
+  const walletRows = db.prepare("SELECT w.*, p.name AS party_name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.archived = 0 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
   const seen = new Set();
   const jobs = [];
   for (const w of walletRows) {
@@ -3571,11 +3572,15 @@ async function refreshRelayForecasts() {
     // 按天消耗只有近 30 天，每个站点更早的累计消费（已抓好的 last_used_actual）补在最早那天之前
     const lifetime = new Map();
     const seenSite = new Set();
-    for (const w of db.prepare("SELECT base_url, project_id, last_used_actual FROM party_wallets WHERE enabled = 1 AND project_id IS NOT NULL AND last_used_actual IS NOT NULL").all()) {
+    for (const w of db.prepare("SELECT w.base_url, w.project_id, w.last_used_actual FROM party_wallets w JOIN parties pa ON pa.id = w.party_id WHERE w.enabled = 1 AND pa.archived = 0 AND w.project_id IS NOT NULL AND w.last_used_actual IS NOT NULL").all()) {
       const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
       if (seenSite.has(site)) continue;
       seenSite.add(site);
       lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + (w.last_used_actual || 0)));
+    }
+    // 归档供应商：消费 = 我们实际转给他的钱，记在最后一笔转账那天
+    for (const e of db.prepare("SELECT e.project_id, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE e.type = 'expense' AND pa.kind = 'supplier' AND pa.archived = 1 AND e.project_id IS NOT NULL").all()) {
+      byKey.set(`${e.project_id}|${e.date}`, r2((byKey.get(`${e.project_id}|${e.date}`) || 0) + (e.currency === 'CNY' ? e.amount : e.amount * (Number(e.rate) || 0))));
     }
     for (const p of q.projects.all()) {
       if (p.ptype !== 'relay') continue;

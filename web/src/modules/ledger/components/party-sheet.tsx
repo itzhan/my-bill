@@ -1159,6 +1159,11 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
         <Button type="button" variant="outline" className="w-full" onClick={archive}>
           {v.archived ? "恢复" : "归档"}
         </Button>
+        {v.kind === "supplier" ? (
+          <p className="text-muted-foreground text-xs">
+            不再合作的供应商归档后，消费按我们实际转出的钱计算，不再用站点的累计消费
+          </p>
+        ) : null}
         <Button type="button" variant="outline" className="text-destructive w-full" onClick={remove}>
           删除{L.name}及全部往来记录
         </Button>
