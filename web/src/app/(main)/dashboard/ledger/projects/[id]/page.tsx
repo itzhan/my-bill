@@ -28,7 +28,7 @@ import { FilesCard } from "@/modules/ledger/components/files-panel";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
 import { KeySection } from "@/modules/ledger/components/key-section";
 import { PartiesSection } from "@/modules/ledger/components/parties-section";
-import { EstimateCards, KpiCards, PageHeader, StationsTab, useConfirm } from "@/modules/ledger/components/shared";
+import { EstimateCards, KpiCards, PageHeader, useConfirm } from "@/modules/ledger/components/shared";
 import { useProject } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { PartyContract } from "@/modules/ledger/types";
@@ -176,7 +176,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           {p.ptype === "key" ? <TabsTrigger value="key">上key</TabsTrigger> : null}
           <TabsTrigger value="entries">流水 {data.entries.length}</TabsTrigger>
           <TabsTrigger value="parties">往来 {partyCount || ""}</TabsTrigger>
-          <TabsTrigger value="stations">台子</TabsTrigger>
           <TabsTrigger value="funds">成员资金</TabsTrigger>
         </TabsList>
         {p.ptype === "key" ? (
@@ -189,9 +188,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         </TabsContent>
         <TabsContent value="parties">
           <PartiesSection detail={data} />
-        </TabsContent>
-        <TabsContent value="stations">
-          <StationsTab project={p} stations={data.stations} />
         </TabsContent>
         <TabsContent value="funds">
           <FundsSection funds={data.funds} projectId={p.id} projectOwner={p.created_by} />

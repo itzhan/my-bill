@@ -63,6 +63,9 @@ export const sidebarItems: NavGroup[] = [
   {
     id: 3,
     label: "系统",
-    items: [{ title: "设置", url: "/dashboard/ledger/settings", icon: Settings }],
+    items: [
+      { title: "台子管理", url: "/dashboard/ledger/stations", icon: Server },
+      { title: "设置", url: "/dashboard/ledger/settings", icon: Settings },
+    ],
   },
 ];

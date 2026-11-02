@@ -954,7 +954,7 @@ const partyView = (p, records, projectId = null) => {
   return { wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p, projectId) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(recs), settle };
 };
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
-function projectPartiesSummary(projectId) {
+function projectPartiesSummary(projectId, ptype) {
   const parties = q.partiesOfProject.all(projectId);
   // 供应商是全局的：本项目出现过往来记录，或有余额监控算进本项目的，都算本项目的供应商
   const supplierIds = new Set([
@@ -969,9 +969,9 @@ function projectPartiesSummary(projectId) {
   const suppliers = [], customers = [];
   for (const p of parties) {
     const view = partyView(p, byParty.get(p.id) || [], projectId);
-    // 项目页的应付 / 实付只算对本项目的贡献：应付 = 本项目挂账，实付 = 本项目充值 − 退款
+    // 项目页的应付 / 实付只算对本项目的贡献。中转的应付是站点累计消费（挂账只记了客户侧），上 key 用本项目挂账
     if (p.kind === 'supplier') {
-      const due = view.totals.due;
+      const due = ptype === 'relay' && view.wallet && view.wallet.used != null ? r2(view.wallet.used) : view.totals.due;
       const paid = view.recharge ? view.recharge.from_entries : 0;
       view.project_settle = { due, paid, open: r2(due - paid) };
     }
@@ -3041,13 +3041,13 @@ app.put('/api/settings', auth, (req, res) => {
 });
 
 // 按消耗算的应收 / 应付（人民币）。项目制没有。
-// 中转 = 客户分组用量 × 分组报价 − 上游 key 用量 × 倍率（分组用量只同步近 3 天）
+// 中转 = 累计预估（客户消耗 × 折扣 − 供应商站点累计消费），后台每 20 分钟算一次
 // 上 key = 甲方挂账 − 供应商挂账（跑量 × 价格，由 keyacct 计提）
 function usageEstimate(p) {
   if (p.ptype === 'relay') {
-    const receivable = db.prepare("SELECT COALESCE(SUM(u.usd * g.price), 0) AS n FROM relay_group_usage u JOIN relay_customer_groups g ON g.party_id = u.party_id AND g.group_name = u.group_name JOIN parties pa ON pa.id = u.party_id WHERE pa.project_id = ?").get(p.id).n;
-    const payable = db.prepare('SELECT COALESCE(SUM(u.usd * k.ratio), 0) AS n FROM relay_key_usage u JOIN relay_keys k ON k.id = u.key_id WHERE k.project_id = ?').get(p.id).n;
-    return { receivable: r2(receivable), payable: r2(payable), profit: r2(receivable - payable), note: '按已同步的分组用量' };
+    const f = relayForecastCache.get(p.id);
+    if (!f) return { receivable: 0, payable: 0, profit: 0, note: '累计消耗计算中' };
+    return { receivable: r2(f.customer), payable: r2(f.supplier), profit: r2(f.profit), note: '累计消耗 × 折扣 − 站点累计消费' };
   }
   if (p.ptype === 'key') {
     const rows = db.prepare("SELECT pa.kind, COALESCE(SUM(r.amount * CASE WHEN r.currency = 'CNY' THEN 1 ELSE r.rate END), 0) AS n FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE r.project_id = ? AND r.source = 'key' AND r.kind = 'due' GROUP BY pa.kind").all(p.id);
@@ -3113,7 +3113,7 @@ app.get('/api/projects/:id', auth, (req, res) => {
     m[e.type] += e.base; m.count += 1;
   }
   const members = [...byMember.values()].map((m) => ({ ...m, expense: r2(m.expense), income: r2(m.income) })).sort((a, b) => b.expense - a.expense || b.income - a.income);
-  const parties = projectPartiesSummary(p.id);
+  const parties = projectPartiesSummary(p.id, p.ptype);
   // 中转制旧的累计预估（客户消耗 × 折扣 − 站点累计消费）仍给往来日报用，顶部改用 usageEstimate
   const forecast = p.ptype === 'relay' ? (relayForecastCache.get(p.id) || null) : null;
   const summary = summarize(q.projectEntries.all(p.id), rates);

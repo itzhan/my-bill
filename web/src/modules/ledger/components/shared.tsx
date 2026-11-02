@@ -25,7 +25,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
 import { breakdown, hue, kw, money, signed } from "../format";
-import type { Project, ProjectStations, Summary } from "../types";
+import type { Summary } from "../types";
 
 // 电脑上是对话框，手机上是底部抽屉
 export function ResponsiveDialog({
@@ -160,67 +160,6 @@ export function EstimateCards({
             <CardTitle className={cn("text-2xl font-semibold tabular-nums @[250px]/card:text-3xl", c.cls)}>{c.value}</CardTitle>
           </CardHeader>
           <CardFooter className="text-muted-foreground text-xs">{c.sub}</CardFooter>
-        </Card>
-      ))}
-    </div>
-  );
-}
-
-function StationTable({ headers, rows }: { headers: string[]; rows: ReactNode[][] }) {
-  if (!rows.length) return <p className="text-muted-foreground px-4 py-6 text-sm">没有</p>;
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-muted-foreground border-b text-left">
-            {headers.map((h) => (
-              <th key={h} className="px-4 py-2 font-medium">{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((cells, i) => (
-            <tr key={i} className="border-b last:border-0">
-              {cells.map((cell, j) => (
-                <td key={j} className={cn("px-4 py-2", j > 0 && "tabular-nums")}>{cell}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// 项目「台子」tab：自营中转、供应商台子、甲方台子
-export function StationsTab({ project, stations }: { project: Project; stations?: ProjectStations }) {
-  if (project.ptype === "short") return <p className="text-muted-foreground text-sm">项目制按流水记账，没有台子。</p>;
-  if (!stations) return null;
-  const relayRows = stations.relay ? [[stations.relay.name, stations.relay.base_url || "—"]] : [];
-  const supplierRows = stations.suppliers.map((s) => [
-    s.name,
-    [...s.prefixes, ...s.sites].join("、") || "—",
-    money(s.due),
-    money(s.paid),
-    signed(s.due - s.paid),
-  ]);
-  const customerRows = stations.customers.map((c) => [
-    c.name,
-    c.station || c.groups.map((g) => `${g.group_name} ${g.price}`).join("、") || "—",
-    money(c.due),
-    money(c.paid),
-  ]);
-  const blocks = [
-    { title: "自营中转台子", headers: ["名称", "地址"], rows: relayRows },
-    { title: "供应商台子", headers: ["供应商", "前缀 / 站点", "应付", "实付", "未付"], rows: supplierRows },
-    { title: "甲方台子", headers: ["甲方", "台子 / 分组", "应收", "实收"], rows: customerRows },
-  ];
-  return (
-    <div className="flex flex-col gap-4">
-      {blocks.map((b) => (
-        <Card key={b.title} className="gap-0 py-0">
-          <CardHeader className="py-4"><CardTitle className="text-base">{b.title}</CardTitle></CardHeader>
-          <StationTable headers={b.headers} rows={b.rows} />
         </Card>
       ))}
     </div>

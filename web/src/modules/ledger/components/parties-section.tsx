@@ -25,8 +25,8 @@ function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; d
   const sorted = [...list].sort((a, b) => rowOf(b).due - rowOf(a).due);
   const sum = sorted.reduce((a, v) => { const r = rowOf(v); return { due: a.due + r.due, paid: a.paid + r.paid, open: a.open + r.open }; }, { due: 0, paid: 0, open: 0 });
   return (
-    <Card className="gap-0 py-0">
-      <CardHeader className="py-4">
+    <Card>
+      <CardHeader>
         <CardTitle>
           {kind === "customer" ? "甲方" : L.name} <span className="text-muted-foreground text-sm font-normal">{list.length}</span>
         </CardTitle>
@@ -45,6 +45,8 @@ function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; d
         )}
       </CardHeader>
       {sorted.length ? (
+        <CardContent>
+        <div className="overflow-hidden rounded-md border">
         <Table>
           <TableHeader>
             <TableRow>
@@ -77,8 +79,10 @@ function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; d
             </TableRow>
           </TableBody>
         </Table>
+        </div>
+        </CardContent>
       ) : (
-        <p className="text-muted-foreground px-4 py-6 text-sm">还没有{kind === "customer" ? "甲方" : L.name}。</p>
+        <CardContent><p className="text-muted-foreground text-sm">还没有{kind === "customer" ? "甲方" : L.name}。</p></CardContent>
       )}
     </Card>
   );
