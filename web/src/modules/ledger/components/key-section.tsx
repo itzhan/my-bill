@@ -17,7 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { cn } from "@/lib/utils";
 
 import { del, get, patch, post, put } from "../api";
-import { money, relTime, usdf } from "../format";
+import { money, relTime, signed, usdf } from "../format";
 import { qk } from "../hooks";
 import type { ProjectDetail } from "../types";
 
@@ -345,6 +345,8 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
               <TableRow>
                 <TableHead>日期</TableHead>
                 <TableHead className="text-right">消耗</TableHead>
+                <TableHead className="text-right">应付</TableHead>
+                <TableHead className="text-right">利润</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -352,6 +354,8 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                 <TableRow key={d.date}>
                   <TableCell>{d.date}</TableCell>
                   <TableCell className="text-right tabular-nums">{usdf(d.usd)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{money(d.payable)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", d.profit < 0 && "text-expense")}>{signed(d.profit)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
