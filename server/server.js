@@ -971,8 +971,11 @@ function projectPartiesSummary(projectId, ptype) {
     const view = partyView(p, byParty.get(p.id) || [], projectId);
     // 项目页的应付 / 实付只算对本项目的贡献。中转的应付是站点累计消费（挂账只记了客户侧），上 key 用本项目挂账
     if (p.kind === 'supplier') {
-      const due = ptype === 'relay' && view.wallet && view.wallet.used != null ? r2(view.wallet.used) : view.totals.due;
       const paid = view.recharge ? view.recharge.from_entries : 0;
+      // 归档供应商不再按站点消费：站点送的额度不算，应付就是我们实际转出的钱（已扣退款）
+      const due = p.archived ? paid
+        : ptype === 'relay' && view.wallet && view.wallet.used != null ? r2(view.wallet.used)
+        : view.totals.due;
       view.project_settle = { due, paid, open: r2(due - paid) };
     }
     (p.kind === 'supplier' ? suppliers : customers).push(view);
@@ -3653,9 +3656,11 @@ async function refreshRelayForecasts() {
       seenSite.add(site);
       lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + (w.last_used_actual || 0)));
     }
-    // 归档供应商：消费 = 我们实际转给他的钱，记在最后一笔转账那天
-    for (const e of db.prepare("SELECT e.project_id, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE e.type = 'expense' AND pa.kind = 'supplier' AND pa.archived = 1 AND e.project_id IS NOT NULL").all()) {
-      byKey.set(`${e.project_id}|${e.date}`, r2((byKey.get(`${e.project_id}|${e.date}`) || 0) + (e.currency === 'CNY' ? e.amount : e.amount * (Number(e.rate) || 0))));
+    // 归档供应商：消费 = 实际转出 − 退回，不按站点累计（站点送的额度不算）
+    for (const e of db.prepare("SELECT e.project_id, e.type, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE pa.kind = 'supplier' AND pa.archived = 1 AND e.project_id IS NOT NULL").all()) {
+      const cny = e.currency === 'CNY' ? e.amount : e.amount * (Number(e.rate) || 0);
+      const sign = e.type === 'income' ? -1 : 1;
+      byKey.set(`${e.project_id}|${e.date}`, r2((byKey.get(`${e.project_id}|${e.date}`) || 0) + sign * cny));
     }
     for (const p of q.projects.all()) {
       if (p.ptype !== 'relay') continue;
