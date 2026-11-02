@@ -19,7 +19,7 @@ const TZ = process.env.TIMEZONE || 'Asia/Shanghai';
 const COOKIE = 'hz_session';
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const CURRENCIES = ['CNY', 'USDT', 'USD'];
-const DEFAULT_RATES = { USD: 7.2, USDT: 7.2 };
+const DEFAULT_RATES = { USD: 6.7, USDT: 6.75 };
 const AI_AUTO_DELAY_MS = Number(process.env.AI_AUTO_DELAY_MS) || 45 * 1000;
 const AI_WARM_HOURS = 24;
 const KB_CONSOLIDATE_DAYS = Number(process.env.KB_CONSOLIDATE_DAYS) || 7;
@@ -203,11 +203,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS stations (
   quota_per_usd REAL NOT NULL DEFAULT 500000, created_at TEXT NOT NULL
 )`);
 try { db.exec('ALTER TABLE projects ADD COLUMN station_id INTEGER REFERENCES stations(id)'); } catch { /* 已有该列 */ }
+try { db.exec("ALTER TABLE relay_customer_groups ADD COLUMN price_mode TEXT NOT NULL DEFAULT 'cny'"); } catch { /* 已有该列 */ }
+try { db.exec("ALTER TABLE relay_customer_groups ADD COLUMN price_mode TEXT NOT NULL DEFAULT 'cny'"); } catch { /* 已有该列 */ }
 // 中转制预估利润：客户按分组收费，上游按 key 计成本
 db.exec(`
   CREATE TABLE IF NOT EXISTS relay_customer_groups (
     party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE, station_id INTEGER NOT NULL REFERENCES stations(id),
-    group_name TEXT NOT NULL, price REAL NOT NULL DEFAULT 0, PRIMARY KEY (party_id, group_name)
+    group_name TEXT NOT NULL, price REAL NOT NULL DEFAULT 0, price_mode TEXT NOT NULL DEFAULT 'cny', PRIMARY KEY (party_id, group_name)
   );
   CREATE TABLE IF NOT EXISTS relay_group_usage (
     party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE, group_name TEXT NOT NULL, date TEXT NOT NULL,
@@ -3160,19 +3162,43 @@ app.patch('/api/stations/:id', auth, (req, res) => {
   db.prepare('UPDATE stations SET name = ?, base_url = ?, user_id = ?, quota_per_usd = ?, credential = ? WHERE id = ?').run(String(b.name || s.name).trim(), String(b.base_url ?? s.base_url).replace(/\/+$/, ''), String(b.user_id ?? s.user_id), Number(b.quota_per_usd) || s.quota_per_usd, b.credential ? String(b.credential) : s.credential, s.id);
   res.json({ station: stationView(db.prepare('SELECT * FROM stations WHERE id = ?').get(s.id)) });
 });
-// 中转制客户的分组收费：body.groups = [{ group_name, price }]
+// 中转站全部分组（接口默认只给一页，这里翻完）
+async function relayAllGroups(station) {
+  const all = [];
+  for (let page = 1; page <= 10; page++) {
+    const d = await relayGet('/admin/groups', { page, page_size: 100 }, station);
+    const items = (d && d.items) || [];
+    all.push(...items);
+    if (items.length < 100) break;
+  }
+  return all;
+}
+// 这个客户在中转站被允许使用的分组。allowed_groups 是分组 id
+async function partyAllowedGroupNames(station, relayId) {
+  const u = await relayGet(`/admin/users/${relayId}`, null, station);
+  const ids = new Set((u && u.allowed_groups) || []);
+  return (await relayAllGroups(station)).filter((g) => ids.has(g.id)).map((g) => g.name);
+}
+// 中转制客户的分组收费：body.groups = [{ group_name, price, mode }]，mode = discount（折扣）或 cny（元/刀）
 app.get('/api/stations/:id/groups', auth, async (req, res, next) => {
   try {
     const s = db.prepare("SELECT * FROM stations WHERE id = ? AND type = 'relay'").get(Number(req.params.id));
     if (!s) return fail(res, 404, '中转站不存在');
-    const d = await relayGet('/admin/groups', null, s);
-    res.json({ groups: ((d && d.items) || []).map((g) => ({ id: g.id, name: g.name })) });
+    const partyId = Number(req.query.party);
+    if (partyId) {
+      const pa = q.party.get(partyId);
+      if (!pa || !pa.relay_id) return res.json({ groups: [] });
+      const names = await partyAllowedGroupNames(s, pa.relay_id);
+      return res.json({ groups: names.map((name) => ({ name })) });
+    }
+    const all = await relayAllGroups(s);
+    res.json({ groups: all.map((g) => ({ id: g.id, name: g.name })) });
   } catch (e) { next(e); }
 });
 app.get('/api/parties/:id/relay-groups', auth, (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa) return fail(res, 404, '往来单位不存在');
-  res.json({ groups: db.prepare('SELECT station_id, group_name, price FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(pa.id) });
+  res.json({ groups: db.prepare('SELECT station_id, group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(pa.id) });
 });
 app.put('/api/parties/:id/relay-groups', auth, (req, res) => {
   const pa = q.party.get(Number(req.params.id));
@@ -3183,7 +3209,12 @@ app.put('/api/parties/:id/relay-groups', auth, (req, res) => {
   db.prepare('DELETE FROM relay_customer_groups WHERE party_id = ?').run(pa.id);
   for (const g of groups) {
     const name = String(g.group_name || '').trim();
-    if (name) db.prepare('INSERT INTO relay_customer_groups (party_id, station_id, group_name, price) VALUES (?, ?, ?, ?)').run(pa.id, stationId, name, Number(g.price) || 0);
+    if (!name) continue;
+    const mode = g.mode === 'discount' ? 'discount' : 'cny';
+    let price = Number(g.price) || 0;
+    // 折扣填 68 或 0.68 都按 0.68 存
+    if (mode === 'discount' && price > 1) price = price / 100;
+    db.prepare('INSERT INTO relay_customer_groups (party_id, station_id, group_name, price, price_mode) VALUES (?, ?, ?, ?, ?)').run(pa.id, stationId, name, price, mode);
   }
   res.json({ ok: true });
 });
@@ -3747,7 +3778,7 @@ async function computeProfitDaily() {
   const daily = [...byDate.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
   // 预估利润（与上面的记账利润并存）：中转制 = 客户分组收费 − 上游 key 成本；上 key = 甲方应收 − 供应商应付
   const forecastOf = new Map();
-  for (const r of db.prepare("SELECT pa.project_id, u.date, SUM(u.usd * g.price) AS n FROM relay_group_usage u JOIN relay_customer_groups g ON g.party_id = u.party_id AND g.group_name = u.group_name JOIN parties pa ON pa.id = u.party_id GROUP BY pa.project_id, u.date").all()) {
+  for (const r of db.prepare(`SELECT pa.project_id, u.date, SUM(CASE WHEN g.price_mode = 'discount' THEN u.usd * g.price * ${getRates().USD} ELSE u.usd * g.price END) AS n FROM relay_group_usage u JOIN relay_customer_groups g ON g.party_id = u.party_id AND g.group_name = u.group_name JOIN parties pa ON pa.id = u.party_id GROUP BY pa.project_id, u.date`).all()) {
     const k = `${r.project_id}|${r.date}`;
     forecastOf.set(k, r2((forecastOf.get(k) || 0) + r.n));
   }

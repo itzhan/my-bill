@@ -1184,25 +1184,25 @@ function RelayGroups({ party: v }: { party: Party }) {
   const saved = useQuery({
     queryKey: ["ledger", "relay-groups", v.id],
     queryFn: () =>
-      get<{ groups: { station_id: number; group_name: string; price: number }[] }>(`/parties/${v.id}/relay-groups`).then(
+      get<{ groups: { station_id: number; group_name: string; price: number; price_mode?: string }[] }>(`/parties/${v.id}/relay-groups`).then(
         (d) => d.groups,
       ),
   });
   const [stationId, setStationId] = useState("");
-  const [prices, setPrices] = useState<Record<string, string>>({});
+  const [prices, setPrices] = useState<Record<string, { mode: "discount" | "cny"; value: string }>>({});
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!saved.data) return;
     setStationId(saved.data[0] ? String(saved.data[0].station_id) : relays[0] ? String(relays[0].id) : "");
-    setPrices(Object.fromEntries(saved.data.map((g) => [g.group_name, String(g.price)])));
+    setPrices(Object.fromEntries(saved.data.map((g) => [g.group_name, { mode: g.price_mode === "discount" ? "discount" : "cny", value: g.price_mode === "discount" ? String(Math.round(g.price * 10000) / 100) : String(g.price) }])));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved.data]);
 
   const sid = Number(stationId);
   const groups = useQuery({
     queryKey: ["ledger", "station-groups", sid],
-    queryFn: () => get<{ groups: { id: number; name: string }[] }>(`/stations/${sid}/groups`).then((d) => d.groups),
+    queryFn: () => get<{ groups: { name: string }[] }>(`/stations/${sid}/groups?party=${v.id}`).then((d) => d.groups),
     enabled: sid > 0,
   });
 
@@ -1213,8 +1213,8 @@ function RelayGroups({ party: v }: { party: Party }) {
       await put(`/parties/${v.id}/relay-groups`, {
         station_id: sid,
         groups: Object.entries(prices)
-          .filter(([, p]) => p.trim() !== "")
-          .map(([group_name, p]) => ({ group_name, price: Number(p) || 0 })),
+          .filter(([, p]) => p.value.trim() !== "")
+          .map(([group_name, p]) => ({ group_name, price: Number(p.value) || 0, mode: p.mode })),
       });
       toast.success("分组收费已保存，用量会自动同步");
       qc.invalidateQueries({ queryKey: ["ledger", "relay-groups", v.id] });
@@ -1225,12 +1225,12 @@ function RelayGroups({ party: v }: { party: Party }) {
     }
   };
 
-  const chosen = Object.values(prices).filter((p) => p.trim() !== "").length;
+  const chosen = Object.values(prices).filter((p) => p.value.trim() !== "").length;
   return (
     <div className="space-y-3 rounded-lg border p-4">
       <div>
         <b className="text-sm">分组收费（预估利润）</b>
-        <p className="text-muted-foreground text-xs">勾选这个客户在用的分组，填每美元消耗收多少人民币。预估应收按分组用量自动计算</p>
+        <p className="text-muted-foreground text-xs">只显示这个客户在中转站可访问的分组。填折扣（68 = 68 折，按汇率折人民币）或每刀多少元</p>
       </div>
       {relays.length ? (
         <Select value={stationId} onValueChange={setStationId}>
@@ -1251,19 +1251,28 @@ function RelayGroups({ party: v }: { party: Party }) {
       {groups.isLoading ? <Skeleton className="h-16" /> : null}
       {groups.data ? (
         <div className="space-y-2">
-          {groups.data.map((g) => (
-            <div key={g.name} className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 truncate text-sm">{g.name}</span>
-              <Input
-                inputMode="decimal"
-                className="w-28"
-                placeholder="不收"
-                value={prices[g.name] ?? ""}
-                onChange={(e) => setPrices((x) => ({ ...x, [g.name]: e.target.value }))}
-              />
-              <span className="text-muted-foreground text-xs">元/美元</span>
-            </div>
-          ))}
+          {groups.data.map((g) => {
+            const row = prices[g.name] ?? { mode: "discount" as const, value: "" };
+            return (
+              <div key={g.name} className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-sm">{g.name}</span>
+                <Select value={row.mode} onValueChange={(mode) => setPrices((x) => ({ ...x, [g.name]: { ...row, mode: mode === "cny" ? "cny" : "discount" } }))}>
+                  <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="discount">折扣</SelectItem>
+                    <SelectItem value="cny">元/刀</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input
+                  inputMode="decimal"
+                  className="w-24"
+                  placeholder={row.mode === "discount" ? "68" : "4.5"}
+                  value={row.value}
+                  onChange={(e) => setPrices((x) => ({ ...x, [g.name]: { ...row, value: e.target.value } }))}
+                />
+              </div>
+            );
+          })}
         </div>
       ) : null}
       <Button className="w-full" onClick={save} disabled={busy || !groups.data}>

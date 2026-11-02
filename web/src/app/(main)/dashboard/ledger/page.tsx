@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-
 import Link from "next/link";
 
 import { FolderPlus, Plus } from "lucide-react";
@@ -10,9 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
-import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
 import { OverviewTrends } from "@/modules/ledger/components/overview-trends";
@@ -22,15 +18,14 @@ import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { ProjectWithSummary } from "@/modules/ledger/types";
 
-// 总览顶部：中转和上 key 合计成应收 / 应付 / 目前流水 / 预估利润。没有这类项目时退回记账收支
+// 总览顶部：全部项目，含已归档。中转和上 key 用消耗口径，项目制用记账收入当应收、记账支出当应付
 function OverviewCards({ projects, totals }: { projects: ProjectWithSummary[]; totals: ProjectWithSummary["summary"] }) {
-  const list = projects.filter((p) => !p.archived && p.receivable != null);
-  if (!list.length) return <KpiCards summary={totals} />;
-  const receivable = list.reduce((a, p) => a + (p.receivable || 0), 0);
-  const payable = list.reduce((a, p) => a + (p.payable || 0), 0);
+  const receivable = projects.reduce((a, p) => a + (p.receivable ?? p.summary.income.base), 0);
+  const payable = projects.reduce((a, p) => a + (p.payable ?? p.summary.expense.base), 0);
+  const profit = projects.reduce((a, p) => a + (p.forecast_profit ?? p.summary.profit), 0);
   return (
     <EstimateCards
-      estimate={{ receivable, payable, profit: receivable - payable, note: `${list.length} 个中转 / 上 key 项目 · 项目制不计入` }}
+      estimate={{ receivable, payable, profit, note: `全部 ${projects.length} 个项目，含已归档。项目制按实际收支计` }}
       cash={totals.profit}
     />
   );
@@ -41,7 +36,7 @@ function ProjectCard({ p }: { p: ProjectWithSummary }) {
   const forecast = p.ptype === "short" ? null : p.forecast_profit;
   return (
     <Link href={`/dashboard/ledger/projects/${p.id}`} prefetch={false}>
-      <Card className={cn("hover:border-primary/40 h-full gap-3 transition-colors", p.archived && "opacity-60")}>
+      <Card className="hover:border-primary/40 h-full gap-3 transition-colors">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 truncate">
             <span className="truncate">{p.name}</span>
@@ -80,11 +75,7 @@ function ProjectCard({ p }: { p: ProjectWithSummary }) {
 export default function LedgerOverviewPage() {
   const { me, openEntry, openProject } = useLedger();
   const { data } = useProjects();
-  const [showArchived, setShowArchived] = useState(false);
-
-  const active = data?.projects.filter((p) => !p.archived) ?? [];
-  const archived = data?.projects.filter((p) => p.archived) ?? [];
-  const shown = showArchived ? (data?.projects ?? []) : active;
+  const shown = data?.projects ?? [];
 
   return (
     <div className="@container/main flex flex-col gap-6">
@@ -122,16 +113,8 @@ export default function LedgerOverviewPage() {
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">
-            项目 <span className="text-muted-foreground text-sm font-normal">{active.length}</span>
+            项目 <span className="text-muted-foreground text-sm font-normal">{shown.length}</span>
           </h2>
-          {archived.length ? (
-            <div className="flex items-center gap-2">
-              <Switch id="show-archived" checked={showArchived} onCheckedChange={setShowArchived} />
-              <Label htmlFor="show-archived" className="text-muted-foreground text-sm font-normal">
-                显示已归档（{archived.length}）
-              </Label>
-            </div>
-          ) : null}
         </div>
         {!data ? (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
