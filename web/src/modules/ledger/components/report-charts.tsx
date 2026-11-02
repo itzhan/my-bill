@@ -7,7 +7,7 @@ import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } f
 import { cn } from "@/lib/utils";
 
 import { fmtCompact, money, signed } from "../format";
-import type { DailyPoint } from "../types";
+import type { DailyPoint, ProfitDay } from "../types";
 
 const mdLabel = (key: string) => {
   const [, m, d] = key.split("-").map(Number);
@@ -22,6 +22,51 @@ const dailyConfig = {
   income: { label: "收入", color: "var(--income)" },
   expense: { label: "支出", color: "var(--expense)" },
 } satisfies ChartConfig;
+
+const forecastConfig = { profit: { label: "预估利润", color: "var(--primary)" } } satisfies ChartConfig;
+
+// 每日预估利润：客户消耗 − 供应商消耗
+export function ForecastChart({ daily }: { daily: ProfitDay[] }) {
+  return (
+    <Card className="@container/card">
+      <CardHeader>
+        <CardTitle>每日预估利润</CardTitle>
+        <CardDescription>客户消耗 − 供应商消耗（¥）</CardDescription>
+      </CardHeader>
+      <CardContent className="px-2 sm:px-6">
+        <ChartContainer config={forecastConfig} className="aspect-auto h-[240px] w-full">
+          <AreaChart data={daily} margin={{ left: 4, right: 8 }}>
+            <defs>
+              <linearGradient id="fillForecast" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-profit)" stopOpacity={0.35} />
+                <stop offset="95%" stopColor="var(--color-profit)" stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={28} tickFormatter={mdLabel} />
+            <YAxis tickLine={false} axisLine={false} width={52} tickFormatter={(v) => fmtCompact(Number(v))} />
+            <ReferenceLine y={0} stroke="var(--border)" />
+            <ChartTooltip
+              cursor={false}
+              content={
+                <ChartTooltipContent
+                  indicator="line"
+                  formatter={(value) => (
+                    <div className="flex w-full justify-between gap-4">
+                      <span className="text-muted-foreground">预估利润</span>
+                      <b className={cn("tabular-nums", Number(value) < 0 && "text-expense")}>{signed(Number(value))}</b>
+                    </div>
+                  )}
+                />
+              }
+            />
+            <Area dataKey="profit" type="monotone" stroke="var(--color-profit)" fill="url(#fillForecast)" />
+          </AreaChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  );
+}
 
 export function ProfitChart({ daily }: { daily: DailyPoint[] }) {
   const last = daily[daily.length - 1];

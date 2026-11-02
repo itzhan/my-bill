@@ -267,7 +267,7 @@ export function PageHeader({
 }
 
 // ---- 分页（客户端）----
-export const PAGE_SIZES = [10, 20, 50, 100];
+export const PAGE_SIZES = [20, 50, 100];
 export const DEFAULT_PAGE_SIZE = 20;
 
 // 对 items 做客户端分页：resetKey 变化（如筛选 / 排序改变）时回到第 1 页

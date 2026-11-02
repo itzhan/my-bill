@@ -16,27 +16,23 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
 import { OverviewTrends } from "@/modules/ledger/components/overview-trends";
-import { KpiCards, PageHeader } from "@/modules/ledger/components/shared";
+import { EstimateCards, KpiCards, PageHeader } from "@/modules/ledger/components/shared";
 import { greeting, money, relTime, signed } from "@/modules/ledger/format";
 import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { ProjectWithSummary } from "@/modules/ledger/types";
 
-// 预估利润合计：只算有预估的项目（中转制、上 key），项目制不参与
-function ForecastTotal({ projects }: { projects: ProjectWithSummary[] }) {
-  const list = projects.filter((p) => !p.archived && p.forecast_profit != null);
-  if (!list.length) return null;
-  const total = list.reduce((a, p) => a + (p.forecast_profit || 0), 0);
+// 总览顶部：中转和上 key 合计成应收 / 应付 / 目前流水 / 预估利润。没有这类项目时退回记账收支
+function OverviewCards({ projects, totals }: { projects: ProjectWithSummary[]; totals: ProjectWithSummary["summary"] }) {
+  const list = projects.filter((p) => !p.archived && p.receivable != null);
+  if (!list.length) return <KpiCards summary={totals} />;
+  const receivable = list.reduce((a, p) => a + (p.receivable || 0), 0);
+  const payable = list.reduce((a, p) => a + (p.payable || 0), 0);
   return (
-    <Card className="gap-2">
-      <CardHeader>
-        <CardDescription>预估利润（中转制按分组收费 − 上游 key 成本，上 key 按甲方应收 − 供应商应付）</CardDescription>
-        <CardTitle className={cn("text-2xl font-semibold tabular-nums", total < 0 && "text-expense")}>
-          {signed(Math.round(total * 100) / 100)}
-        </CardTitle>
-      </CardHeader>
-      <CardFooter className="text-muted-foreground text-xs">{list.length} 个项目 · 与上面的记账利润并存，项目制不计入</CardFooter>
-    </Card>
+    <EstimateCards
+      estimate={{ receivable, payable, profit: receivable - payable, note: `${list.length} 个中转 / 上 key 项目 · 项目制不计入` }}
+      cash={totals.profit}
+    />
   );
 }
 
@@ -51,22 +47,26 @@ function ProjectCard({ p }: { p: ProjectWithSummary }) {
             <span className="truncate">{p.name}</span>
             {p.archived ? <Badge variant="outline">已归档</Badge> : null}
           </CardTitle>
-          <CardDescription>利润</CardDescription>
-          <div className={cn("text-2xl font-semibold tabular-nums", s.profit < 0 && "text-expense")}>
-            {signed(s.profit)}
+          <CardDescription>{forecast == null ? "利润" : "预估利润"}</CardDescription>
+          <div className={cn("text-2xl font-semibold tabular-nums", (forecast ?? s.profit) < 0 && "text-expense")}>
+            {signed(forecast ?? s.profit)}
           </div>
           <div className="text-muted-foreground text-xs tabular-nums">
-            预估利润{" "}
-            {forecast == null ? (
-              "—"
-            ) : (
-              <span className={cn("text-foreground font-medium", forecast < 0 && "text-expense")}>{signed(forecast)}</span>
-            )}
+            目前流水 <span className={cn("text-foreground font-medium", s.profit < 0 && "text-expense")}>{signed(s.profit)}</span>
           </div>
         </CardHeader>
         <CardContent className="flex gap-4 text-sm tabular-nums">
-          <span className="text-income">收 {money(s.income.base)}</span>
-          <span className="text-expense">支 {money(s.expense.base)}</span>
+          {forecast == null ? (
+            <>
+              <span className="text-income">收 {money(s.income.base)}</span>
+              <span className="text-expense">支 {money(s.expense.base)}</span>
+            </>
+          ) : (
+            <>
+              <span className="text-income">应收 {money(p.receivable || 0)}</span>
+              <span className="text-expense">应付 {money(p.payable || 0)}</span>
+            </>
+          )}
         </CardContent>
         <CardFooter className="text-muted-foreground flex justify-between text-xs">
           <span>{s.count} 笔</span>
@@ -107,8 +107,7 @@ export default function LedgerOverviewPage() {
 
       {data ? (
         <>
-          <KpiCards summary={data.totals} />
-          <ForecastTotal projects={data.projects} />
+          <OverviewCards projects={data.projects} totals={data.totals} />
         </>
       ) : (
         <div className="grid gap-4 md:grid-cols-3">

@@ -2042,7 +2042,7 @@ async function relayAccrualSweep() {
   finally { relaySyncing = false; }
 }
 setTimeout(relayAccrualSweep, 20 * 1000).unref();
-setInterval(relayAccrualSweep, 15 * 60 * 1000).unref();
+setInterval(relayAccrualSweep, 5 * 60 * 1000).unref();
 
 // 中转制预估利润的同步：客户按分组的消耗 + 上游每个 key 的消耗
 async function syncRelayEstimate() {
@@ -3097,7 +3097,7 @@ app.get('/api/projects', auth, (req, res) => {
     const customer_open_cny = r2(custOpen.get(p.id) || 0);
     // est_profit 保持原义（记账利润 + 应收未收）。forecast_profit 是按消耗算的预估利润
     const est = usageEstimate(p);
-    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny), forecast_profit: est ? est.profit : null };
+    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny), forecast_profit: est ? est.profit : null, receivable: est ? est.receivable : null, payable: est ? est.payable : null };
   });
   list.sort((a, b) => (a.archived - b.archived) || String(b.summary.last_at || b.created_at).localeCompare(String(a.summary.last_at || a.created_at)));
   res.json({ projects: list, totals: summarize(list.flatMap((p) => byProject.get(p.id) || []), rates), funds: memberFunds(null), rates, version: dataVersion });

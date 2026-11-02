@@ -92,7 +92,6 @@ export function PartiesSection({ detail }: { detail: ProjectDetail }) {
   const ps = detail.parties;
   const linked = [...ps.suppliers, ...ps.customers].some((v) => v.relay);
   const relay = useProjectRelay(detail.project.id, linked);
-  const daily = ps.daily.slice(0, 14);
 
   return (
     <div className="space-y-4">
@@ -101,7 +100,7 @@ export function PartiesSection({ detail }: { detail: ProjectDetail }) {
           <>
             <span>
               {relay.data
-                ? `中转站数据 ${relTime(relay.data.fetched_at)} 更新 · 每 30 秒自动刷新`
+                ? `中转站数据 ${relTime(relay.data.fetched_at)} 更新 · 每 5 分钟自动刷新`
                 : "中转站数据获取中…"}
               ；合计按人民币折算
             </span>
@@ -118,75 +117,6 @@ export function PartiesSection({ detail }: { detail: ProjectDetail }) {
         <PartyColumn kind="customer" list={ps.customers} detail={detail} />
         <PartyColumn kind="supplier" list={ps.suppliers} detail={detail} />
       </div>
-      {detail.project.ptype === "relay" && detail.forecast ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>往来日报</CardTitle>
-            <CardDescription>预估利润 = 客户消耗 × 折扣 − 当天付给供应商的钱</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-hidden rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>日期</TableHead>
-                    <TableHead className="text-right">付给供应商</TableHead>
-                    <TableHead className="text-right">客户消耗 × 折扣</TableHead>
-                    <TableHead className="text-right">预估利润</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody className="tabular-nums">
-                  {detail.forecast.daily.slice(0, 14).map((x) => (
-                    <TableRow key={x.date}>
-                      <TableCell>{x.date}</TableCell>
-                      <TableCell className="text-expense text-right">{x.supplier ? money(x.supplier) : "—"}</TableCell>
-                      <TableCell className="text-income text-right">{x.customer ? money(x.customer) : "—"}</TableCell>
-                      <TableCell className={cn("text-right font-semibold", x.profit < 0 && "text-expense")}>
-                        {signed(x.profit)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
-        </Card>
-      ) : daily.length ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>往来日报</CardTitle>
-            <CardDescription>最近 {daily.length} 天有记录</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-hidden rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>日期</TableHead>
-                    <TableHead className="text-right">应收</TableHead>
-                    <TableHead className="text-right">实收</TableHead>
-                    <TableHead className="text-right">应付</TableHead>
-                    <TableHead className="text-right">实付</TableHead>
-                    <TableHead className="text-right">笔数</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody className="tabular-nums">
-                  {daily.map((x) => (
-                    <TableRow key={x.date}>
-                      <TableCell>{x.date}</TableCell>
-                      <TableCell className="text-right">{x.receivable ? money(x.receivable) : "—"}</TableCell>
-                      <TableCell className="text-income text-right">{x.received ? money(x.received) : "—"}</TableCell>
-                      <TableCell className="text-right">{x.payable ? money(x.payable) : "—"}</TableCell>
-                      <TableCell className="text-expense text-right">{x.paid ? money(x.paid) : "—"}</TableCell>
-                      <TableCell className="text-right">{x.count}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
     </div>
   );
 }

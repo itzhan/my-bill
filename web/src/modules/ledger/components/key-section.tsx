@@ -17,7 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { cn } from "@/lib/utils";
 
 import { del, get, patch, post, put } from "../api";
-import { money, relTime, signed, usdf } from "../format";
+import { money, relTime, usdf } from "../format";
 import { qk } from "../hooks";
 import type { ProjectDetail } from "../types";
 
@@ -133,39 +133,6 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
     if (ok) await run(() => del<KeyView>(`/key-prefixes/${p.id}`), "已删除");
   };
 
-  const t = data.totals;
-  const cs = data.customer.settle;
-  const supSum = data.suppliers.reduce(
-    (a, x) => ({
-      due: a.due + x.settle.due_cny,
-      paid: a.paid + x.settle.paid_cny,
-      open: a.open + x.settle.open_cny,
-      credit: a.credit + x.settle.credit_cny,
-    }),
-    { due: 0, paid: 0, open: 0, credit: 0 },
-  );
-  const kpis = [
-    { label: "累计消耗", value: usdf(t.usd), sub: `今日 ${usdf(t.today_usd)} · 汇率 ${data.usd_rate}` },
-    {
-      label: "甲方应收",
-      value: money(t.receivable),
-      sub: cs ? `已收 ${money(cs.paid_cny)} · 还欠 ${money(cs.open_cny)}` : "未设置甲方",
-      cls: "text-income",
-    },
-    {
-      label: "供应商应付",
-      value: money(t.payable),
-      sub: `已付 ${money(supSum.paid)} · 未结 ${money(supSum.open)}${supSum.credit ? ` · 预付 ${money(supSum.credit)}` : ""}`,
-      cls: "text-expense",
-    },
-    {
-      label: "利润 = 应收 − 应付",
-      value: signed(t.profit),
-      sub: "按当前价格实时计算",
-      cls: t.profit < 0 ? "text-expense" : "",
-    },
-  ];
-
   return (
     <div className="flex flex-col gap-4">
       {/* 台子 */}
@@ -193,18 +160,6 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
           </CardAction>
         </CardHeader>
       </Card>
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {kpis.map((k) => (
-          <Card key={k.label} className="gap-2">
-            <CardHeader>
-              <CardDescription>{k.label}</CardDescription>
-              <CardTitle className={cn("text-2xl font-semibold tabular-nums", k.cls)}>{k.value}</CardTitle>
-            </CardHeader>
-            <CardContent className="text-muted-foreground text-xs">{k.sub}</CardContent>
-          </Card>
-        ))}
-      </div>
 
       {/* 供应商前缀 */}
       <Card>
@@ -234,7 +189,6 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                 <TableHead>分组 · 价格</TableHead>
                 <TableHead className="text-right">累计消耗</TableHead>
                 <TableHead className="text-right">今日</TableHead>
-                <TableHead className="text-right">应付</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
@@ -282,7 +236,6 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{usdf(p.usd)}</TableCell>
                     <TableCell className="text-right tabular-nums">{usdf(p.today_usd)}</TableCell>
-                    <TableCell className="text-expense text-right tabular-nums">{money(p.payable)}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">
                       <Button
                         variant="ghost"
@@ -306,7 +259,7 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                 ))
               ) : (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-muted-foreground py-8 text-center">
+                  <TableCell colSpan={7} className="text-muted-foreground py-8 text-center">
                     还没有前缀。先在「往来」里添加供应商，再在这里给供应商添加前缀
                   </TableCell>
                 </TableRow>
@@ -356,7 +309,6 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                 <TableHead>甲方价格</TableHead>
                 <TableHead className="text-right">累计消耗</TableHead>
                 <TableHead className="text-right">今日</TableHead>
-                <TableHead className="text-right">应收</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -367,74 +319,15 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                     <TableCell className={cn(!g.price && "text-expense")}>{g.price?.label ?? "未定价"}</TableCell>
                     <TableCell className="text-right tabular-nums">{usdf(g.usd)}</TableCell>
                     <TableCell className="text-right tabular-nums">{usdf(g.today_usd)}</TableCell>
-                    <TableCell className="text-income text-right tabular-nums">{money(g.receivable)}</TableCell>
                   </TableRow>
                 ))
               ) : (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-muted-foreground py-8 text-center">
+                  <TableCell colSpan={4} className="text-muted-foreground py-8 text-center">
                     同步到渠道后会列出各分组
                   </TableCell>
                 </TableRow>
               )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {/* 结算 */}
-      <Card>
-        <CardHeader>
-          <CardTitle>结算</CardTitle>
-          <CardDescription>应付 / 应收由消耗自动按天挂账；付款、回款在「往来」里记实付 / 实收</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>对象</TableHead>
-                <TableHead>前缀</TableHead>
-                <TableHead className="text-right">应付 / 应收</TableHead>
-                <TableHead className="text-right">已付 / 已收</TableHead>
-                <TableHead className="text-right">未结</TableHead>
-                <TableHead className="text-right">预付 / 多收</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {cs ? (
-                <TableRow>
-                  <TableCell className="font-medium">
-                    甲方 {custName} <Badge variant="outline">客户</Badge>
-                  </TableCell>
-                  <TableCell />
-                  <TableCell className="text-right tabular-nums">{money(cs.due_cny)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(cs.paid_cny)}</TableCell>
-                  <TableCell className={cn("text-right tabular-nums", cs.open_cny > 0 && "text-income font-medium")}>
-                    {money(cs.open_cny)}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {cs.credit_cny ? money(cs.credit_cny) : "-"}
-                  </TableCell>
-                </TableRow>
-              ) : null}
-              {data.suppliers.map((x) => (
-                <TableRow key={x.party_id}>
-                  <TableCell className="font-medium">
-                    {x.name} <Badge variant="outline">供应商</Badge>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">{x.prefixes.join(", ")}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(x.settle.due_cny)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(x.settle.paid_cny)}</TableCell>
-                  <TableCell
-                    className={cn("text-right tabular-nums", x.settle.open_cny > 0 && "text-expense font-medium")}
-                  >
-                    {money(x.settle.open_cny)}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {x.settle.credit_cny ? money(x.settle.credit_cny) : "-"}
-                  </TableCell>
-                </TableRow>
-              ))}
             </TableBody>
           </Table>
         </CardContent>
@@ -452,9 +345,6 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
               <TableRow>
                 <TableHead>日期</TableHead>
                 <TableHead className="text-right">消耗</TableHead>
-                <TableHead className="text-right">应收</TableHead>
-                <TableHead className="text-right">应付</TableHead>
-                <TableHead className="text-right">利润</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -462,11 +352,6 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                 <TableRow key={d.date}>
                   <TableCell>{d.date}</TableCell>
                   <TableCell className="text-right tabular-nums">{usdf(d.usd)}</TableCell>
-                  <TableCell className="text-income text-right tabular-nums">{money(d.receivable)}</TableCell>
-                  <TableCell className="text-expense text-right tabular-nums">{money(d.payable)}</TableCell>
-                  <TableCell className={cn("text-right tabular-nums", d.profit < 0 && "text-expense")}>
-                    {signed(d.profit)}
-                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

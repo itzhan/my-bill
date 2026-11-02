@@ -46,7 +46,8 @@ export const useProjectRelay = (id: number, enabled: boolean) =>
     queryKey: qk.projectRelay(id),
     queryFn: () => get<ProjectRelay>(`/projects/${id}/relay`),
     enabled,
-    refetchInterval: 30_000,
+    refetchInterval: 5 * 60 * 1000,
+    placeholderData: (p) => p,
   });
 
 export const useParty = (id: number | null) =>

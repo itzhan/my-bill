@@ -22,7 +22,7 @@ import { useLedger } from "../provider";
 import type { Entry, ProjectDetail } from "../types";
 
 import { EntryDetailDialog } from "./entry-detail";
-import { MemberAvatar, useConfirm } from "./shared";
+import { MemberAvatar, Pager, useConfirm, usePaged } from "./shared";
 
 // 流水：按日期分组，点击看详情（含图片）；登记人本人或项目创建者可修改 / 删除
 export function EntriesTable({ detail }: { detail: ProjectDetail }) {
@@ -33,9 +33,10 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
   const [viewing, setViewing] = useState<Entry | null>(null);
   const { project: p, entries, rates } = detail;
   const list = entries.filter((e) => filter === "all" || e.type === filter);
+  const { rows, pager } = usePaged(list, filter);
 
-  const groups = new Map<string, typeof list>();
-  for (const e of list) {
+  const groups = new Map<string, typeof rows>();
+  for (const e of rows) {
     const k = dayKey(e.created_at);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k)!.push(e);
@@ -225,6 +226,7 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
             </EmptyHeader>
           </Empty>
         )}
+        <Pager {...pager} className="pt-4" />
       </CardContent>
       <EntryDetailDialog
         entry={viewing}
