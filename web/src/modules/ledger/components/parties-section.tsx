@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus, RefreshCw } from "lucide-react";
+import { Plus } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,8 +8,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 
-import { PL, money, relTime, signed } from "../format";
-import { useProjectRelay } from "../hooks";
+import { PL, money, signed } from "../format";
 import { useLedger } from "../provider";
 import type { Party, PartyKind, ProjectDetail } from "../types";
 
@@ -90,28 +89,11 @@ function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; d
 
 export function PartiesSection({ detail }: { detail: ProjectDetail }) {
   const ps = detail.parties;
-  const linked = [...ps.suppliers, ...ps.customers].some((v) => v.relay);
-  const relay = useProjectRelay(detail.project.id, linked);
 
   return (
     <div className="space-y-4">
-      <div className="text-muted-foreground flex flex-wrap items-center justify-between gap-2 text-xs">
-        {linked ? (
-          <>
-            <span>
-              {relay.data
-                ? `中转站数据 ${relTime(relay.data.fetched_at)} 更新 · 每 5 分钟自动刷新`
-                : "中转站数据获取中…"}
-              ；合计按人民币折算
-            </span>
-            <Button variant="outline" size="sm" onClick={() => relay.refetch()} disabled={relay.isFetching}>
-              <RefreshCw className={cn(relay.isFetching && "animate-spin")} />
-              刷新
-            </Button>
-          </>
-        ) : (
-          <span>应付 / 应收只挂账，实付 / 实收同步记入流水；合计按人民币折算</span>
-        )}
+      <div className="text-muted-foreground text-xs">
+        <span>后台每 5 分钟更新，这里显示的是上次算好的结果；合计按人民币折算</span>
       </div>
       <div className="grid gap-4 xl:grid-cols-2">
         <PartyColumn kind="customer" list={ps.customers} detail={detail} />

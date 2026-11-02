@@ -512,7 +512,6 @@ export type RelayLive = {
     models_5m: Record<string, number>;
   } | null;
 };
-export type ProjectRelay = { fetched_at: string; relay: { name: string } | null; parties: Record<string, RelayLive> };
 
 export type DailyPoint = {
   date: string;

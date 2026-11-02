@@ -3046,12 +3046,13 @@ app.put('/api/settings', auth, (req, res) => {
 });
 
 // 按消耗算的应收 / 应付（人民币）。项目制没有。
-// 中转 = 累计预估（客户消耗 × 折扣 − 供应商站点累计消费），后台每 20 分钟算一次
+// 中转 = 累计预估（客户消耗 × 折扣 − 供应商站点累计消费），后台每 5 分钟算一次
 // 上 key = 甲方挂账 − 供应商挂账（跑量 × 价格，由 keyacct 计提）
 function usageEstimate(p) {
   if (p.ptype === 'relay') {
     const f = relayForecastCache.get(p.id);
-    if (!f) return { receivable: 0, payable: 0, profit: 0, note: '累计消耗计算中' };
+    // 缓存还没算出来时返回空，让没有消耗数据的项目先按记账收支显示
+    if (!f) return null;
     return { receivable: r2(f.customer), payable: r2(f.supplier), profit: r2(f.profit), note: '累计消耗 × 折扣 − 站点累计消费' };
   }
   if (p.ptype === 'key') {
@@ -3067,6 +3068,14 @@ function usageEstimate(p) {
     return { receivable: r2(receivable), payable: r2(payable), profit: r2(receivable - payable), note: '记账收入 / 记账支出' };
   }
   return null;
+}
+// 中转制但没绑定中转站客户、也没有供应商站点时，消耗口径是 0，改用记账收支
+function shownEstimate(p, summary) {
+  const est = usageEstimate(p);
+  if (p.ptype === 'relay' && !(est && (est.receivable || est.payable)) && (summary.income.base || summary.expense.base)) {
+    return { receivable: summary.income.base, payable: summary.expense.base, profit: summary.profit, note: '记账收入 / 记账支出' };
+  }
+  return est;
 }
 // 项目详情「台子」tab：只列和本项目有关的，不新增台子类型
 function projectStations(p, parties) {
@@ -3104,8 +3113,8 @@ app.get('/api/projects', auth, (req, res) => {
     const summary = summarize(byProject.get(p.id) || [], rates);
     const customer_open_cny = r2(custOpen.get(p.id) || 0);
     // est_profit 保持原义（记账利润 + 应收未收）。forecast_profit 是按消耗算的预估利润
-    const est = usageEstimate(p);
-    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny), forecast_profit: est ? est.profit : null, receivable: est ? est.receivable : null, payable: est ? est.payable : null };
+    const shown = shownEstimate(p, summary);
+    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny), forecast_profit: shown ? shown.profit : null, receivable: shown ? shown.receivable : null, payable: shown ? shown.payable : null };
   });
   list.sort((a, b) => (a.archived - b.archived) || String(b.summary.last_at || b.created_at).localeCompare(String(a.summary.last_at || a.created_at)));
   res.json({ projects: list, totals: summarize(list.flatMap((p) => byProject.get(p.id) || []), rates), funds: memberFunds(null), rates, version: dataVersion });
@@ -3128,7 +3137,8 @@ app.get('/api/projects/:id', auth, (req, res) => {
   // 中转制旧的累计预估（客户消耗 × 折扣 − 站点累计消费）仍给往来日报用，顶部改用 usageEstimate
   const forecast = p.ptype === 'relay' ? (relayForecastCache.get(p.id) || null) : null;
   const summary = summarize(q.projectEntries.all(p.id), rates);
-  res.json({ project: p, summary, members, entries, rates, parties, funds: memberFunds(p.id), forecast, estimate: usageEstimate(p), stations: projectStations(p, parties), version: dataVersion });
+  const estimate = shownEstimate(p, summary);
+  res.json({ project: p, summary, members, entries, rates, parties, funds: memberFunds(p.id), forecast, estimate, stations: projectStations(p, parties), version: dataVersion });
 });
 
 app.delete('/api/projects/:id', auth, (req, res) => res.json(ops.deleteProject(req.user, req.params.id)));
@@ -3677,7 +3687,7 @@ async function refreshCustomerGaps() {
     } catch (e) { console.error(`[relay] 客户 ${pa.name} 历史消耗失败：${e.message}`); }
   }
 }
-// 后台每 20 分钟算一遍所有中转制项目的预估利润，打开页面只读这份缓存
+// 后台每 5 分钟算一遍所有中转制项目的预估利润，打开页面只读这份缓存
 const relayForecastCache = new Map();
 async function refreshRelayForecasts() {
   try {
@@ -3716,7 +3726,7 @@ async function refreshRelayForecasts() {
   } catch (e) { console.error('[relay] 预估利润更新失败：', e.message); }
 }
 setTimeout(refreshRelayForecasts, 25 * 1000).unref();
-setInterval(refreshRelayForecasts, 20 * 60 * 1000).unref();
+setInterval(refreshRelayForecasts, 5 * 60 * 1000).unref();
 async function computeProfitDaily() {
   const rates = getRates();
   const projName = new Map(q.projects.all().map((p) => [p.id, p.name]));

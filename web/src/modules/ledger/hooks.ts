@@ -14,7 +14,6 @@ import type {
   PartyDetail,
   Proposal,
   ProjectDetail,
-  ProjectRelay,
   ProjectsResponse,
   Report,
 } from "./types";
@@ -23,7 +22,6 @@ export const qk = {
   me: ["ledger", "me"] as const,
   projects: ["ledger", "projects"] as const,
   project: (id: number) => ["ledger", "project", id] as const,
-  projectRelay: (id: number) => ["ledger", "project-relay", id] as const,
   party: (id: number) => ["ledger", "party", id] as const,
   partyRelay: (id: number) => ["ledger", "party-relay", id] as const,
   report: (qs: string) => ["ledger", "report", qs] as const,
@@ -40,15 +38,6 @@ export const useProjects = () => useQuery({ queryKey: qk.projects, queryFn: () =
 
 export const useProject = (id: number) =>
   useQuery({ queryKey: qk.project(id), queryFn: () => get<ProjectDetail>(`/projects/${id}`), retry: false });
-
-export const useProjectRelay = (id: number, enabled: boolean) =>
-  useQuery({
-    queryKey: qk.projectRelay(id),
-    queryFn: () => get<ProjectRelay>(`/projects/${id}/relay`),
-    enabled,
-    refetchInterval: 5 * 60 * 1000,
-    placeholderData: (p) => p,
-  });
 
 export const useParty = (id: number | null) =>
   useQuery({ queryKey: qk.party(id ?? 0), queryFn: () => get<PartyDetail>(`/parties/${id}`), enabled: !!id });
