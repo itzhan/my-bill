@@ -165,10 +165,10 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         }
       />
 
-      {p.ptype === "short" || !data.estimate ? (
-        <KpiCards summary={data.summary} />
-      ) : (
+      {data.estimate ? (
         <EstimateCards estimate={data.estimate} cash={data.summary.profit} />
+      ) : (
+        <KpiCards summary={data.summary} />
       )}
 
       <Tabs defaultValue={p.ptype === "key" ? "key" : "entries"} className="gap-4">

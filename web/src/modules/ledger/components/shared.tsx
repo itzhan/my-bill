@@ -149,7 +149,7 @@ export function EstimateCards({
     { label: "应收", value: money(estimate.receivable), sub: estimate.note, cls: "text-income" },
     { label: "应付", value: money(estimate.payable), sub: estimate.note, cls: "text-expense" },
     { label: "目前流水", value: signed(cash), sub: "记账实收 − 记账实付", cls: cash < 0 ? "text-expense" : "" },
-    { label: "预估利润 = 应收 − 应付", value: signed(estimate.profit), sub: "按消耗估算，不是记账利润", cls: estimate.profit < 0 ? "text-expense" : "" },
+    { label: "预估利润 = 应收 − 应付", value: signed(estimate.profit), sub: estimate.note === "记账收入 / 记账支出" ? "项目制按实际收支计" : "按消耗估算，不是记账利润", cls: estimate.profit < 0 ? "text-expense" : "" },
   ];
   return (
     <div className="*:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card dark:*:data-[slot=card]:bg-card grid grid-cols-1 gap-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:shadow-xs md:grid-cols-4">

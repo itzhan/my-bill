@@ -12,7 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
 import { OverviewTrends } from "@/modules/ledger/components/overview-trends";
-import { EstimateCards, KpiCards, PageHeader } from "@/modules/ledger/components/shared";
+import { EstimateCards, PageHeader } from "@/modules/ledger/components/shared";
 import { greeting, money, relTime, signed } from "@/modules/ledger/format";
 import { useProjects } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
@@ -33,7 +33,7 @@ function OverviewCards({ projects, totals }: { projects: ProjectWithSummary[]; t
 
 function ProjectCard({ p }: { p: ProjectWithSummary }) {
   const s = p.summary;
-  const forecast = p.ptype === "short" ? null : p.forecast_profit;
+  const forecast = p.forecast_profit;
   return (
     <Link href={`/dashboard/ledger/projects/${p.id}`} prefetch={false}>
       <Card className="hover:border-primary/40 h-full gap-3 transition-colors">
@@ -51,17 +51,8 @@ function ProjectCard({ p }: { p: ProjectWithSummary }) {
           </div>
         </CardHeader>
         <CardContent className="flex gap-4 text-sm tabular-nums">
-          {forecast == null ? (
-            <>
-              <span className="text-income">收 {money(s.income.base)}</span>
-              <span className="text-expense">支 {money(s.expense.base)}</span>
-            </>
-          ) : (
-            <>
-              <span className="text-income">应收 {money(p.receivable || 0)}</span>
-              <span className="text-expense">应付 {money(p.payable || 0)}</span>
-            </>
-          )}
+          <span className="text-income">应收 {money(p.receivable || 0)}</span>
+          <span className="text-expense">应付 {money(p.payable || 0)}</span>
         </CardContent>
         <CardFooter className="text-muted-foreground flex justify-between text-xs">
           <span>{s.count} 笔</span>

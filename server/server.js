@@ -3060,6 +3060,12 @@ function usageEstimate(p) {
     const payable = (rows.find((x) => x.kind === 'supplier') || {}).n || 0;
     return { receivable: r2(receivable), payable: r2(payable), profit: r2(receivable - payable), note: '跑量 × 价格' };
   }
+  if (p.ptype === 'short') {
+    const rows = db.prepare("SELECT type, COALESCE(SUM(amount * CASE WHEN currency = 'CNY' THEN 1 ELSE rate END), 0) AS n FROM entries WHERE project_id = ? GROUP BY type").all(p.id);
+    const receivable = (rows.find((x) => x.type === 'income') || {}).n || 0;
+    const payable = (rows.find((x) => x.type === 'expense') || {}).n || 0;
+    return { receivable: r2(receivable), payable: r2(payable), profit: r2(receivable - payable), note: '记账收入 / 记账支出' };
+  }
   return null;
 }
 // 项目详情「台子」tab：只列和本项目有关的，不新增台子类型

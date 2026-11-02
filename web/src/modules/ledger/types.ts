@@ -84,7 +84,7 @@ export type ProjectWithSummary = Project & {
   summary: Summary;
   customer_open_cny?: number;
   est_profit?: number;
-  // 按消耗算的预估利润：中转制 = 客户消耗 × 折扣 − 站点累计消费，上 key = 甲方应收 − 供应商应付，项目制没有
+  // 预估利润：中转制 = 客户消耗 × 折扣 − 站点累计消费，上 key = 甲方应收 − 供应商应付，项目制 = 记账收入 − 记账支出
   forecast_profit?: number | null;
   receivable?: number | null;
   payable?: number | null;
