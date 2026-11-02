@@ -8,133 +8,29 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 
-import { PL, curf, fmt, money, relTime, signed, usdf } from "../format";
+import { PL, money, relTime, signed } from "../format";
 import { useProjectRelay } from "../hooks";
 import { useLedger } from "../provider";
-import type { Party, PartyKind, ProjectDetail, RelayLive } from "../types";
+import type { Party, PartyKind, ProjectDetail } from "../types";
 
-import { amt } from "./party-wallets";
-import { Pager, usePaged } from "./shared";
-
-function LiveLine({ v, live }: { v: Party; live?: RelayLive }) {
-  if (!v.relay) return null;
-  const dot = (cls: string) => <span className={cn("inline-block size-1.5 shrink-0 rounded-full", cls)} />;
-  if (!live)
-    return (
-      <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
-        {dot("bg-muted-foreground/40")}中转站已绑定 · 获取中…
-      </div>
-    );
-  if (live.error)
-    return (
-      <div className="text-destructive flex items-center gap-1.5 text-xs">
-        {dot("bg-destructive")}
-        {live.error}
-      </div>
-    );
-  const st = live.settlement;
-  const C = st.currency;
-  const L = PL[v.kind];
-  const ok = v.kind === "customer" ? live.user?.status === "active" : live.account?.status === "active";
-  return (
-    <div className="text-muted-foreground flex items-start gap-1.5 text-xs">
-      <span className="mt-1.5">{dot(ok ? "bg-income" : "bg-warning")}</span>
-      <span>
-        消耗 {usdf(st.consumption_usd)} × {st.ratio_label} {st.ratio} = {L.due} {curf(st.consumption_x_ratio, C)} · 今日{" "}
-        {curf(st.today || 0, C)}
-        {live.live ? ` · ${live.live.rpm_now} RPM` : ""}
-        {v.kind === "customer" && live.user?.balance_usd !== undefined ? ` · 余额 ${usdf(live.user.balance_usd)}` : ""}
-      </span>
-    </div>
-  );
+// 只看对本项目的贡献，人民币。供应商用 project_settle（挂账 / 充值减退款），客户用 settle
+function rowOf(v: Party) {
+  if (v.kind === "supplier" && v.project_settle) return v.project_settle;
+  return { due: v.settle.due_cny, paid: v.settle.paid_cny, open: v.settle.open_cny };
 }
 
-function PartyCard({ v, live, onOpen }: { v: Party; live?: RelayLive; onOpen: () => void }) {
-  const L = PL[v.kind];
-  const st = v.settle;
-  const C = st.currency;
-  const openVal = st.open > 0 ? st.open : -st.credit;
-  const openLabel = st.credit > 0 ? (v.kind === "customer" ? "预收余额" : "待消耗额度") : L.open;
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={cn(
-        "hover:bg-accent/50 flex w-full items-start justify-between gap-3 rounded-lg border p-3 text-left transition-colors",
-        v.archived && "opacity-60",
-      )}
-    >
-      <div className="min-w-0 space-y-1">
-        <div className="flex items-center gap-1.5 font-medium">
-          <span className="truncate">{v.name}</span>
-          {v.relay ? <Badge variant="secondary">中转站</Badge> : null}
-          {v.archived ? <Badge variant="outline">归档</Badge> : null}
-        </div>
-        <div className="text-muted-foreground text-xs">
-          {L.due} {curf(st.due, C)} · {L.paid} {curf(st.paid, C)}
-          {v.totals.last_at ? ` · ${v.totals.last_at}` : ""}
-        </div>
-        <LiveLine v={v} live={live} />
-        {v.wallet ? (
-          <div className="text-muted-foreground text-xs">
-            供应商余额 <span className="text-foreground font-medium tabular-nums">{amt(v.wallet.actual)}</span> ·
-            累计消费 <span className="text-foreground font-medium tabular-nums">{amt(v.wallet.used)}</span> ·{" "}
-            {v.wallet.count} 个 Key
-            {v.wallet.errors ? <span className="text-destructive"> · {v.wallet.errors} 个抓取失败</span> : null}
-          </div>
-        ) : null}
-      </div>
-      <div className="shrink-0 text-right">
-        <div
-          className={cn("font-semibold tabular-nums", openVal > 0 ? "text-warning" : openVal < 0 ? "text-income" : "")}
-        >
-          {curf(Math.abs(openVal), C)}
-        </div>
-        <div className="text-muted-foreground text-xs">
-          {openLabel}
-          {C !== "CNY" ? ` · ≈¥${fmt(Math.abs(st.open_cny))}` : ""}
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function PartyColumn({
-  kind,
-  list,
-  detail,
-  live,
-}: {
-  kind: PartyKind;
-  list: Party[];
-  detail: ProjectDetail;
-  live?: Record<string, RelayLive>;
-}) {
+function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; detail: ProjectDetail }) {
   const { openParty, openPartyNew } = useLedger();
   const L = PL[kind];
-  const t = detail.parties.totals[kind];
-  // 排序：供应商按累计消费多的在前；客户按应收多的在前
-  const sorted = [...list].sort((a, b) =>
-    kind === "supplier" ? (b.wallet?.used ?? 0) - (a.wallet?.used ?? 0) : b.settle.due - a.settle.due,
-  );
-  const { rows, pager } = usePaged(sorted, list.length);
+  const sorted = [...list].sort((a, b) => rowOf(b).due - rowOf(a).due);
+  const sum = sorted.reduce((a, v) => { const r = rowOf(v); return { due: a.due + r.due, paid: a.paid + r.paid, open: a.open + r.open }; }, { due: 0, paid: 0, open: 0 });
   return (
-    <Card>
-      <CardHeader>
+    <Card className="gap-0 py-0">
+      <CardHeader className="py-4">
         <CardTitle>
-          {L.name} <span className="text-muted-foreground text-sm font-normal">{list.length}</span>
+          {kind === "customer" ? "甲方" : L.name} <span className="text-muted-foreground text-sm font-normal">{list.length}</span>
         </CardTitle>
-        <CardDescription className="flex flex-wrap gap-x-3 tabular-nums">
-          <span>
-            {L.due} {money(t.due)}
-          </span>
-          <span>
-            {L.paid} {money(t.paid)}
-          </span>
-          <span className={cn(t.open > 0 && "text-warning")}>
-            {L.open} {money(t.open)}
-          </span>
-        </CardDescription>
+        <CardDescription>只统计对本项目的贡献</CardDescription>
         {detail.project.archived ? null : (
           <CardAction>
             <Button
@@ -148,21 +44,42 @@ function PartyColumn({
           </CardAction>
         )}
       </CardHeader>
-      <CardContent className="space-y-2">
-        {list.length ? (
-          <>
-            {rows.map((v) => (
-              <PartyCard key={v.id} v={v} live={live?.[v.id]} onOpen={() => openParty(v.id)} />
-            ))}
-            <Pager {...pager} className="pt-2" />
-          </>
-        ) : (
-          <p className="text-muted-foreground text-sm">
-            还没有{L.name}。
-            {kind === "supplier" ? "录入后按天记应付与实付。" : "录入后按天记应收与实收，也可由外部接口自动同步。"}
-          </p>
-        )}
-      </CardContent>
+      {sorted.length ? (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>名称</TableHead>
+              <TableHead className="text-right">{L.due}</TableHead>
+              <TableHead className="text-right">{L.paid}</TableHead>
+              <TableHead className="text-right">{L.open}</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody className="tabular-nums">
+            {sorted.map((v) => {
+              const r = rowOf(v);
+              return (
+                <TableRow key={v.id} className="cursor-pointer" onClick={() => openParty(v.id)}>
+                  <TableCell className="font-medium">
+                    {v.name}
+                    {v.archived ? <Badge variant="outline" className="ml-1.5">归档</Badge> : null}
+                  </TableCell>
+                  <TableCell className="text-right">{money(r.due)}</TableCell>
+                  <TableCell className="text-right">{money(r.paid)}</TableCell>
+                  <TableCell className={cn("text-right", r.open > 0 && "text-warning")}>{signed(r.open)}</TableCell>
+                </TableRow>
+              );
+            })}
+            <TableRow>
+              <TableCell className="font-medium">合计</TableCell>
+              <TableCell className="text-right font-medium">{money(sum.due)}</TableCell>
+              <TableCell className="text-right font-medium">{money(sum.paid)}</TableCell>
+              <TableCell className={cn("text-right font-medium", sum.open > 0 && "text-warning")}>{signed(sum.open)}</TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
+      ) : (
+        <p className="text-muted-foreground px-4 py-6 text-sm">还没有{kind === "customer" ? "甲方" : L.name}。</p>
+      )}
     </Card>
   );
 }
@@ -194,8 +111,8 @@ export function PartiesSection({ detail }: { detail: ProjectDetail }) {
         )}
       </div>
       <div className="grid gap-4 xl:grid-cols-2">
-        <PartyColumn kind="supplier" list={ps.suppliers} detail={detail} live={relay.data?.parties} />
-        <PartyColumn kind="customer" list={ps.customers} detail={detail} live={relay.data?.parties} />
+        <PartyColumn kind="customer" list={ps.customers} detail={detail} />
+        <PartyColumn kind="supplier" list={ps.suppliers} detail={detail} />
       </div>
       {detail.project.ptype === "relay" && detail.forecast ? (
         <Card>

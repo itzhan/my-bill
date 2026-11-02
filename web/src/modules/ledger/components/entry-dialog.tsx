@@ -84,12 +84,17 @@ export function EntryDialog({
   const active = projects.filter((p) => !p.archived || (editing && p.id === editing.project_id));
   const rates = pd?.rates ?? me?.rates ?? { USD: 7.2, USDT: 7.2 };
 
-  // 充值 / 结算：支出可挂全局供应商（供应商不归属项目）
+  // 支出只能挂供应商（充值）。收入可以挂供应商（退款）或本项目的甲方（打款）
   const isExpense = type === "expense";
   const { data: suppliers } = useQuery({
     queryKey: ["ledger", "supplier-options"],
     queryFn: () => get<{ suppliers: { id: number; name: string }[] }>("/suppliers/options").then((d) => d.suppliers),
     enabled: open,
+  });
+  const { data: customers } = useQuery({
+    queryKey: ["ledger", "customer-options", project],
+    queryFn: () => get<{ customers: { id: number; name: string }[] }>(`/projects/${project}/customers/options`).then((d) => d.customers),
+    enabled: open && !isExpense && !!project,
   });
 
   // 每次打开时按「新建 / 编辑」初始化表单
@@ -347,7 +352,7 @@ export function EntryDialog({
           </div>
 
           <div className="space-y-2">
-            <Label>供应商（{isExp ? "充值 / 结算" : "退款 / 换钱"}，可选）</Label>
+            <Label>{isExp ? "供应商（充值 / 结算，可选）" : "往来（可选）"}</Label>
             <Select
               value={supplier ? String(supplier) : NO_SUPPLIER}
               onValueChange={(v) => setSupplier(v === NO_SUPPLIER ? null : Number(v))}
@@ -356,18 +361,19 @@ export function EntryDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={NO_SUPPLIER}>不挂供应商</SelectItem>
+                <SelectItem value={NO_SUPPLIER}>{isExp ? "不挂供应商" : "不挂往来"}</SelectItem>
+                {isExp ? null : (customers ?? []).map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)}>甲方 · {c.name}</SelectItem>
+                ))}
                 {(suppliers ?? []).map((s) => (
-                  <SelectItem key={s.id} value={String(s.id)}>
-                    {s.name}
-                  </SelectItem>
+                  <SelectItem key={s.id} value={String(s.id)}>{isExp ? s.name : `供应商 · ${s.name}`}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
             <p className="text-muted-foreground text-xs">
               {isExp
                 ? "挂上供应商 = 我们转给他（充值），计入该供应商的「已结算」"
-                : "挂上供应商 = 他转给我们（退款 / 换钱），抵减该供应商的「已结算」"}
+                : "挂甲方 = 甲方打款，计入该甲方的实收；挂供应商 = 供应商退款，抵减该供应商的「已结算」"}
             </p>
           </div>
 

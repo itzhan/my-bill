@@ -161,6 +161,7 @@ export type Entry = {
   images: Attachment[];
   party_id: number | null;
   party_name: string;
+  party_kind?: "supplier" | "customer" | null;
 };
 
 export type Settle = {
@@ -203,6 +204,8 @@ export type Party = {
   profile?: string;
   // 客户逻辑分组：同名的多个项目往来视为同一个客户
   customer_group?: string;
+  // 项目页：只算对本项目的贡献（应付 = 本项目挂账，实付 = 本项目充值 − 退款），人民币
+  project_settle?: { due: number; paid: number; open: number };
   // 供应商结算：应付（消费折结算币种）/ 已结算（期初+充值支出）/ 未结算
   recharge?: {
     currency: Currency;
@@ -437,6 +440,15 @@ export type ProjectDetail = {
   parties: PartiesSummary;
   funds: Funds;
   forecast?: RelayForecast | null;
+  // 按消耗算的应收 / 应付。项目制没有
+  estimate?: { receivable: number; payable: number; profit: number; note: string } | null;
+  stations?: ProjectStations;
+};
+// 项目「台子」tab
+export type ProjectStations = {
+  relay: { id: number; name: string; base_url: string } | null;
+  suppliers: { id: number; name: string; sites: string[]; prefixes: string[]; due: number; paid: number }[];
+  customers: { id: number; name: string; station: string; groups: { group_name: string; price: number }[]; due: number; paid: number }[];
 };
 
 export type PartyRecord = {

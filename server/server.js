@@ -242,7 +242,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS project_files (
 CREATE INDEX IF NOT EXISTS idx_project_files_project ON project_files(project_id);`);
 
 const ENTRY_SELECT = `SELECT e.*, p.name AS project_name, p.archived AS project_archived,
-                             h.username AS handler_name, c.username AS creator_name, sp.name AS party_name
+                             h.username AS handler_name, c.username AS creator_name, sp.name AS party_name, sp.kind AS party_kind
                       FROM entries e
                       JOIN projects p ON p.id = e.project_id
                       JOIN users h ON h.id = e.handler_id
@@ -278,10 +278,10 @@ const q = {
   insertEntry: db.prepare(`INSERT INTO entries (project_id, type, amount, currency, rate, handler_id, created_by, note, created_at, images, party_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   updateEntry: db.prepare(`UPDATE entries SET project_id = ?, type = ?, amount = ?, currency = ?, rate = ?, handler_id = ?, note = ?, created_at = ?, images = ?, party_id = ? WHERE id = ?`),
   deleteEntry: db.prepare('DELETE FROM entries WHERE id = ?'),
-  // 某供应商的充值支出（计入已结算）
-  entriesOfParty: db.prepare("SELECT * FROM entries WHERE party_id = ? AND type = 'expense'"),
+  // 某供应商的充值支出（计入已结算）。带 project_id 时只算该项目
+  entriesOfParty: db.prepare("SELECT * FROM entries WHERE party_id = ? AND type = 'expense' AND (? IS NULL OR project_id = ?)"),
   // 某供应商的退款收入（他转给我们，抵减已结算）
-  incomesOfParty: db.prepare("SELECT * FROM entries WHERE party_id = ? AND type = 'income'"),
+  incomesOfParty: db.prepare("SELECT * FROM entries WHERE party_id = ? AND type = 'income' AND (? IS NULL OR project_id = ?)"),
   // 资金往来明细：挂该供应商的全部流水（含项目名，供详情页双向跳转）
   entriesTaggedParty: db.prepare(`${ENTRY_SELECT} WHERE e.party_id = ? ORDER BY e.created_at DESC, e.id DESC`),
   // 某成员经手的全部流水（跨项目，用于经手人明细）
@@ -664,13 +664,15 @@ const ops = {
       }
       images = JSON.stringify(ids);
     }
-    // 挂供应商：支出 = 我们转给他（充值 / 结算），收入 = 他转给我们（退款 / 换钱）；传 null 或空清除
+    // 支出只能挂供应商（充值 / 结算）。收入可以挂供应商（退款 / 换钱）或客户（甲方打款）。传 null 或空清除
     let partyId = base ? base.party_id : null;
     if (body.party_id !== undefined) {
       if (body.party_id === null || body.party_id === '' || body.party_id === 0) partyId = null;
       else {
         const pa = q.party.get(Number(body.party_id));
-        if (!pa || pa.kind !== 'supplier') throw new HttpError(400, '供应商不存在');
+        if (!pa) throw new HttpError(400, '往来单位不存在');
+        if (type === 'expense' && pa.kind !== 'supplier') throw new HttpError(400, '支出只能挂供应商');
+        if (pa.kind === 'customer' && pa.project_id !== p.id) throw new HttpError(400, '这个客户不属于当前项目');
         partyId = pa.id;
       }
     }
@@ -680,6 +682,14 @@ const ops = {
     const n = ops.normalizeEntry(user, body);
     const r = q.insertEntry.run(n.project.id, n.type, n.amount, n.currency, n.rate, n.handlerId, user.id, n.note, n.at, n.images, n.partyId || null);
     const entry = q.entry.get(Number(r.lastInsertRowid));
+    // 收入挂了甲方：同步一笔实收，不再另插一条流水（流水就是这一笔）
+    if (n.type === 'income' && n.partyId && body.skip_party_record !== true) {
+      const pa = q.party.get(n.partyId);
+      if (pa && pa.kind === 'customer') {
+        const date = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(n.at));
+        q.insertRecord.run(pa.id, 'paid', n.amount, n.currency, n.rate, date, n.note, 'manual', '', entry.id, user.id, now(), pa.project_id);
+      }
+    }
     dataChanged(user, `${via}记了一笔${n.type === 'income' ? '收入' : '支出'} ${n.amount.toLocaleString('zh-CN')} ${n.currency} · ${n.project.name}`, `${via}记了一笔${entryLine(entry)}`);
     return entry;
   },
@@ -891,7 +901,8 @@ function partySettle(records, cur) {
 let partyWallets = null;
 // 供应商结算：应付 = 累计消费（折结算币种）；已结算 = 期初 + 记账时选了该供应商的充值支出；
 // 未结算 = 累计消费 − 已结算 + 实际余额（预付还在钱包里的钱）：≥0 视为已结清显示 0，<0（我们多付）才显示差额
-function supplierSettlement(p) {
+// projectId 给出时只算该项目的充值与退款（供应商给多个项目供货时，项目页只看对本项目的贡献）
+function supplierSettlement(p, projectId = null) {
   const cur = p.currency || 'CNY';
   const rates = getRates();
   const w = partyWallets ? partyWallets.summaryOf(p.id) : null;
@@ -900,8 +911,9 @@ function supplierSettlement(p) {
   const payable = p.archived ? 0 : w && w.used != null ? r2(cnyToCur(w.used, cur, rates)) : 0;
   // 授信（先用后付）没有预付余额，实际余额始终视为 0；预付才用站点钱包余额
   const balance = p.archived || p.settle_type === 'credit' ? 0 : w && w.actual != null ? r2(cnyToCur(w.actual, cur, rates)) : 0;
-  const entries = q.entriesOfParty.all(p.id);
-  const incomes = q.incomesOfParty.all(p.id);
+  const scope = projectId == null ? null : Number(projectId);
+  const entries = q.entriesOfParty.all(p.id, scope, scope);
+  const incomes = q.incomesOfParty.all(p.id, scope, scope);
   // 币种相同直接用原值，否则按记账汇率折人民币再折结算币种（口径同往来 partySettle）
   const conv = (e) => (e.currency === cur ? e.amount : cnyToCur(entryBase(e, rates), cur, rates));
   let paidOut = 0;
@@ -918,7 +930,29 @@ function supplierSettlement(p) {
   const unsettled = r2(payable - settled + balance);
   return { currency: cur, payable, balance, settled, settled_base: base, from_entries: fromEntries, paid_out: paidOut, refunded, entry_count: entries.length + incomes.length, unsettled };
 }
-const partyView = (p, records) => ({ wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(records || q.recordsOfParty.all(p.id)), settle: partySettle(records || q.recordsOfParty.all(p.id), p.currency || 'CNY') });
+const partyView = (p, records, projectId = null) => {
+  const recs = records || q.recordsOfParty.all(p.id);
+  // 客户实收把「记一笔时直接挂上的甲方打款」也算进去：那笔只有流水、没有 party_records
+  let settle = partySettle(recs, p.currency || 'CNY');
+  if (p.kind === 'customer' && projectId != null) {
+    const rates = getRates();
+    const cur = p.currency || 'CNY';
+    const linked = new Set(recs.filter((r) => r.entry_id).map((r) => r.entry_id));
+    let extra = 0, extraCny = 0;
+    for (const e of db.prepare("SELECT * FROM entries WHERE project_id = ? AND party_id = ? AND type = 'income'").all(projectId, p.id)) {
+      if (linked.has(e.id)) continue;
+      const cny = entryBase(e, rates);
+      extraCny += cny;
+      extra += e.currency === cur ? e.amount : cnyToCur(cny, cur, rates);
+    }
+    if (extra) {
+      const paid = r2(settle.paid + extra), paidCny = r2(settle.paid_cny + extraCny);
+      const open = r2(settle.due - paid);
+      settle = { ...settle, paid, paid_cny: paidCny, open: open > 0 ? open : 0, credit: open < 0 ? -open : 0, open_cny: r2(settle.due_cny - paidCny) };
+    }
+  }
+  return { wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p, projectId) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref } : null, totals: partyTotals(recs), settle };
+};
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId) {
   const parties = q.partiesOfProject.all(projectId);
@@ -933,7 +967,16 @@ function projectPartiesSummary(projectId) {
   const byParty = new Map();
   for (const r of records) { if (!byParty.has(r.party_id)) byParty.set(r.party_id, []); byParty.get(r.party_id).push(r); }
   const suppliers = [], customers = [];
-  for (const p of parties) (p.kind === 'supplier' ? suppliers : customers).push(partyView(p, byParty.get(p.id) || []));
+  for (const p of parties) {
+    const view = partyView(p, byParty.get(p.id) || [], projectId);
+    // 项目页的应付 / 实付只算对本项目的贡献：应付 = 本项目挂账，实付 = 本项目充值 − 退款
+    if (p.kind === 'supplier') {
+      const due = view.totals.due;
+      const paid = view.recharge ? view.recharge.from_entries : 0;
+      view.project_settle = { due, paid, open: r2(due - paid) };
+    }
+    (p.kind === 'supplier' ? suppliers : customers).push(view);
+  }
   const sum = (list) => list.reduce((a, x) => ({ due: r2(a.due + x.totals.due), paid: r2(a.paid + x.totals.paid), open: r2(a.open + x.totals.open) }), { due: 0, paid: 0, open: 0 });
   const dailyMap = new Map();
   for (const r of records) {
@@ -1037,8 +1080,8 @@ Object.assign(ops, {
     const source = ['manual', 'api', 'ai', 'relay'].includes(body.source) ? body.source : 'manual';
     const ref = String(body.external_ref || '').trim().slice(0, 120);
     if (ref) { const dup = q.recordByRef.get(ref); if (dup) return { record: q.record.get(dup.id), duplicate: true }; }
-    let entryId = null;
-    const linkEntry = kind === 'paid' && body.link_entry !== false && body.link_entry !== 0 && body.link_entry !== '0';
+    let entryId = Number(body.entry_id) > 0 ? Number(body.entry_id) : null;
+    const linkEntry = !entryId && kind === 'paid' && body.link_entry !== false && body.link_entry !== 0 && body.link_entry !== '0';
     if (linkEntry) {
       const timeIso = body.time ? parseTime(body.time) : (date === todayKey() ? now() : parseTime(`${date}T12:00`));
         const recProject = pa.kind === 'supplier' ? Number(body.project_id) : pa.project_id;
@@ -2997,6 +3040,44 @@ app.put('/api/settings', auth, (req, res) => {
   res.json({ ...out, integration_token: integrationToken() });
 });
 
+// 按消耗算的应收 / 应付（人民币）。项目制没有。
+// 中转 = 客户分组用量 × 分组报价 − 上游 key 用量 × 倍率（分组用量只同步近 3 天）
+// 上 key = 甲方挂账 − 供应商挂账（跑量 × 价格，由 keyacct 计提）
+function usageEstimate(p) {
+  if (p.ptype === 'relay') {
+    const receivable = db.prepare("SELECT COALESCE(SUM(u.usd * g.price), 0) AS n FROM relay_group_usage u JOIN relay_customer_groups g ON g.party_id = u.party_id AND g.group_name = u.group_name JOIN parties pa ON pa.id = u.party_id WHERE pa.project_id = ?").get(p.id).n;
+    const payable = db.prepare('SELECT COALESCE(SUM(u.usd * k.ratio), 0) AS n FROM relay_key_usage u JOIN relay_keys k ON k.id = u.key_id WHERE k.project_id = ?').get(p.id).n;
+    return { receivable: r2(receivable), payable: r2(payable), profit: r2(receivable - payable), note: '按已同步的分组用量' };
+  }
+  if (p.ptype === 'key') {
+    const rows = db.prepare("SELECT pa.kind, COALESCE(SUM(r.amount * CASE WHEN r.currency = 'CNY' THEN 1 ELSE r.rate END), 0) AS n FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE r.project_id = ? AND r.source = 'key' AND r.kind = 'due' GROUP BY pa.kind").all(p.id);
+    const receivable = (rows.find((x) => x.kind === 'customer') || {}).n || 0;
+    const payable = (rows.find((x) => x.kind === 'supplier') || {}).n || 0;
+    return { receivable: r2(receivable), payable: r2(payable), profit: r2(receivable - payable), note: '跑量 × 价格' };
+  }
+  return null;
+}
+// 项目详情「台子」tab：只列和本项目有关的，不新增台子类型
+function projectStations(p, parties) {
+  const own = p.station_id ? db.prepare('SELECT id, name, type, base_url FROM stations WHERE id = ?').get(p.station_id) : null;
+  const money = (x) => ({ due: x.settle.due_cny, paid: x.settle.paid_cny });
+  if (p.ptype === 'short') return { relay: null, suppliers: [], customers: [] };
+  const customers = parties.customers.map((c) => ({
+    id: c.id, name: c.name,
+    station: own && own.type === 'key' ? own.name : '',
+    groups: db.prepare('SELECT group_name, price FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(c.id),
+    ...money(c),
+  }));
+  const suppliers = parties.suppliers.map((s) => ({
+    id: s.id, name: s.name,
+    sites: db.prepare('SELECT DISTINCT base_url FROM party_wallets WHERE party_id = ? AND project_id = ?').all(s.id, p.id).map((w) => w.base_url).filter(Boolean),
+    prefixes: db.prepare('SELECT prefix FROM key_prefixes WHERE party_id = ? AND project_id = ?').all(s.id, p.id).map((k) => k.prefix),
+    due: s.project_settle ? s.project_settle.due : 0,
+    paid: s.project_settle ? s.project_settle.paid : 0,
+  }));
+  return { relay: own && own.type === 'relay' ? { id: own.id, name: own.name, base_url: own.base_url } : null, suppliers, customers };
+}
+
 // ---- 项目
 app.get('/api/projects', auth, (req, res) => {
   const rates = getRates();
@@ -3011,20 +3092,9 @@ app.get('/api/projects', auth, (req, res) => {
   const list = q.projects.all().map((p) => {
     const summary = summarize(byProject.get(p.id) || [], rates);
     const customer_open_cny = r2(custOpen.get(p.id) || 0);
-    // est_profit 保持原义（记账利润 + 应收未收）。forecast_profit 是按消耗算的预估利润：
-    // 中转制 = 客户分组收费 − 上游 key 成本；上 key = 甲方应收 − 供应商应付；项目制没有
-    let forecast = null;
-    if (p.ptype === 'relay') {
-      const income = db.prepare("SELECT COALESCE(SUM(u.usd * g.price), 0) AS n FROM relay_group_usage u JOIN relay_customer_groups g ON g.party_id = u.party_id AND g.group_name = u.group_name JOIN parties pa ON pa.id = u.party_id WHERE pa.project_id = ?").get(p.id).n;
-      const cost = db.prepare('SELECT COALESCE(SUM(u.usd * k.ratio), 0) AS n FROM relay_key_usage u JOIN relay_keys k ON k.id = u.key_id WHERE k.project_id = ?').get(p.id).n;
-      forecast = r2(income - cost);
-    } else if (p.ptype === 'key') {
-      const rows = db.prepare("SELECT pa.kind, COALESCE(SUM(r.amount * CASE WHEN r.currency = 'CNY' THEN 1 ELSE r.rate END), 0) AS n FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE r.project_id = ? AND r.source = 'key' AND r.kind = 'due' GROUP BY pa.kind").all(p.id);
-      const income = (rows.find((x) => x.kind === 'customer') || {}).n || 0;
-      const cost = (rows.find((x) => x.kind === 'supplier') || {}).n || 0;
-      forecast = r2(income - cost);
-    }
-    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny), forecast_profit: forecast };
+    // est_profit 保持原义（记账利润 + 应收未收）。forecast_profit 是按消耗算的预估利润
+    const est = usageEstimate(p);
+    return { ...p, summary, customer_open_cny, est_profit: r2(summary.profit + customer_open_cny), forecast_profit: est ? est.profit : null };
   });
   list.sort((a, b) => (a.archived - b.archived) || String(b.summary.last_at || b.created_at).localeCompare(String(a.summary.last_at || a.created_at)));
   res.json({ projects: list, totals: summarize(list.flatMap((p) => byProject.get(p.id) || []), rates), funds: memberFunds(null), rates, version: dataVersion });
@@ -3044,9 +3114,10 @@ app.get('/api/projects/:id', auth, (req, res) => {
   }
   const members = [...byMember.values()].map((m) => ({ ...m, expense: r2(m.expense), income: r2(m.income) })).sort((a, b) => b.expense - a.expense || b.income - a.income);
   const parties = projectPartiesSummary(p.id);
-  // 中转制预估利润直接读后台缓存（每 20 分钟更新），打开页面不等供应商站点
+  // 中转制旧的累计预估（客户消耗 × 折扣 − 站点累计消费）仍给往来日报用，顶部改用 usageEstimate
   const forecast = p.ptype === 'relay' ? (relayForecastCache.get(p.id) || null) : null;
-  res.json({ project: p, summary: summarize(q.projectEntries.all(p.id), rates), members, entries, rates, parties, funds: memberFunds(p.id), forecast, version: dataVersion });
+  const summary = summarize(q.projectEntries.all(p.id), rates);
+  res.json({ project: p, summary, members, entries, rates, parties, funds: memberFunds(p.id), forecast, estimate: usageEstimate(p), stations: projectStations(p, parties), version: dataVersion });
 });
 
 app.delete('/api/projects/:id', auth, (req, res) => res.json(ops.deleteProject(req.user, req.params.id)));
@@ -3249,6 +3320,10 @@ app.get('/api/suppliers', auth, (req, res) => {
 });
 app.get('/api/suppliers/options', auth, (req, res) => {
   res.json({ suppliers: db.prepare("SELECT id, name FROM parties WHERE kind = 'supplier' AND archived = 0 ORDER BY name").all() });
+});
+// 记一笔收入时可选的甲方（客户归属项目）
+app.get('/api/projects/:id/customers/options', auth, (req, res) => {
+  res.json({ customers: db.prepare("SELECT id, name FROM parties WHERE kind = 'customer' AND project_id = ? AND archived = 0 ORDER BY name").all(Number(req.params.id)) });
 });
 
 // 批量拉中转站用户余额（美元），id -> balance_usd

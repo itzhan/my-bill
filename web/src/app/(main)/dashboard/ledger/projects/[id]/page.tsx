@@ -19,19 +19,16 @@ import {
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
-import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { cn } from "@/lib/utils";
 import { get, patch, post } from "@/modules/ledger/api";
 import { EntriesTable } from "@/modules/ledger/components/entries-table";
 import { FilesCard } from "@/modules/ledger/components/files-panel";
 import { FundsSection } from "@/modules/ledger/components/funds-section";
 import { KeySection } from "@/modules/ledger/components/key-section";
 import { PartiesSection } from "@/modules/ledger/components/parties-section";
-import { KpiCards, PageHeader, useConfirm } from "@/modules/ledger/components/shared";
-import { money, signed } from "@/modules/ledger/format";
+import { EstimateCards, KpiCards, PageHeader, StationsTab, useConfirm } from "@/modules/ledger/components/shared";
 import { useProject } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
 import type { PartyContract } from "@/modules/ledger/types";
@@ -168,29 +165,18 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         }
       />
 
-      <KpiCards summary={data.summary} />
-
-      {p.ptype === "relay" && data.forecast ? (
-        <Card className="gap-2">
-          <CardHeader>
-            <CardDescription>预估利润 = 客户消耗 × 折扣 − 付给供应商的钱</CardDescription>
-            <CardTitle className={cn("text-2xl font-semibold tabular-nums", data.forecast.profit < 0 && "text-expense")}>
-              {signed(data.forecast.profit)}
-            </CardTitle>
-          </CardHeader>
-          <CardFooter className="text-muted-foreground text-xs tabular-nums">
-            客户消耗 <span className="text-income font-medium">{money(data.forecast.customer)}</span> − 供应商{" "}
-            <span className="text-expense font-medium">{money(data.forecast.supplier)}</span>
-            {" · 与上面的记账利润并存"}
-          </CardFooter>
-        </Card>
-      ) : null}
+      {p.ptype === "short" || !data.estimate ? (
+        <KpiCards summary={data.summary} />
+      ) : (
+        <EstimateCards estimate={data.estimate} cash={data.summary.profit} />
+      )}
 
       <Tabs defaultValue={p.ptype === "key" ? "key" : "entries"} className="gap-4">
         <TabsList>
           {p.ptype === "key" ? <TabsTrigger value="key">上key</TabsTrigger> : null}
           <TabsTrigger value="entries">流水 {data.entries.length}</TabsTrigger>
           <TabsTrigger value="parties">往来 {partyCount || ""}</TabsTrigger>
+          <TabsTrigger value="stations">台子</TabsTrigger>
           <TabsTrigger value="funds">成员资金</TabsTrigger>
         </TabsList>
         {p.ptype === "key" ? (
@@ -203,6 +189,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         </TabsContent>
         <TabsContent value="parties">
           <PartiesSection detail={data} />
+        </TabsContent>
+        <TabsContent value="stations">
+          <StationsTab project={p} stations={data.stations} />
         </TabsContent>
         <TabsContent value="funds">
           <FundsSection funds={data.funds} projectId={p.id} projectOwner={p.created_by} />

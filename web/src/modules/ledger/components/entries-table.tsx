@@ -143,7 +143,7 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                               </div>
                               <div className="text-muted-foreground text-xs sm:hidden">
                                 {e.handler_name} {isExp ? "支付" : "收款"} · {fmtTime(e.created_at)}
-                                {e.party_name ? ` · ${isExp ? "充值" : "退款"} ${e.party_name}` : ""}
+                                {e.party_name ? ` · ${e.party_kind === "customer" ? "甲方打款" : isExp ? "充值" : "退款"} ${e.party_name}` : ""}
                               </div>
                             </TableCell>
                             <TableCell className="hidden sm:table-cell">
@@ -168,8 +168,9 @@ export function EntriesTable({ detail }: { detail: ProjectDetail }) {
                                 <Badge
                                   variant="secondary"
                                   className="font-normal"
-                                  title={e.type === "income" ? "他退款 / 换钱" : "充值 / 结算"}
+                                  title={e.party_kind === "customer" ? "甲方打款" : e.type === "income" ? "供应商退款" : "供应商充值"}
                                 >
+                                  {e.party_kind === "customer" ? "甲方打款 · " : e.type === "income" ? "退款 · " : "充值 · "}
                                   {e.party_name}
                                 </Badge>
                               ) : (
