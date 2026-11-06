@@ -84,7 +84,7 @@ export type ProjectWithSummary = Project & {
   summary: Summary;
   customer_open_cny?: number;
   est_profit?: number;
-  // 预估利润：中转制 = 客户消耗 × 折扣 − 站点累计消费，上 key = 甲方应收 − 供应商应付，项目制 = 记账收入 − 记账支出
+  // 预估利润：中转制 = 分组收费 − 站点累计消费，上 key = 甲方应收 − 供应商应付，项目制 = 记账收入 − 记账支出
   forecast_profit?: number | null;
   receivable?: number | null;
   payable?: number | null;
@@ -405,6 +405,7 @@ export type CustomerProject = {
   ratio: number;
   currency: Currency;
   settle: Settle;
+  groups?: { group_name: string; price: number; price_mode?: string }[];
   // 项目制项目：直接按项目流水的收入 / 支出 / 利润统计（不走中转挂账）
   summary?: { income: { base: number }; expense: { base: number }; profit: number } | null;
 };
@@ -430,7 +431,7 @@ export type PartiesSummary = {
   daily: { date: string; payable: number; paid: number; receivable: number; received: number; count: number }[];
 };
 
-// 中转制预估利润：客户消耗 × 折扣 − 付给供应商的钱，按天
+// 中转制预估利润：客户分组收费 − 付给供应商的钱，按天
 export type RelayForecastDay = { date: string; customer: number; supplier: number; profit: number };
 export type RelayForecast = { customer: number; supplier: number; profit: number; daily: RelayForecastDay[] };
 export type ProjectDetail = {
@@ -450,7 +451,7 @@ export type ProjectDetail = {
 export type ProjectStations = {
   relay: { id: number; name: string; base_url: string } | null;
   suppliers: { id: number; name: string; sites: string[]; prefixes: string[]; due: number; paid: number }[];
-  customers: { id: number; name: string; station: string; groups: { group_name: string; price: number }[]; due: number; paid: number }[];
+  customers: { id: number; name: string; station: string; groups: { group_name: string; price: number; price_mode?: string }[]; due: number; paid: number }[];
 };
 
 export type PartyRecord = {
@@ -479,6 +480,7 @@ export type PartyDetail = {
 export type Settlement = Settle & {
   ratio: number;
   ratio_label: string;
+  grouped?: boolean;
   consumption_usd: number;
   consumption_x_ratio: number;
   today: number | null;

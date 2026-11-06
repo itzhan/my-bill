@@ -245,8 +245,10 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const usd = (n: number) => `$${n.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
   const relayProjects = projects.filter((p) => p.project_type !== "short");
   const shortProjects = projects.filter((p) => p.project_type === "short");
+  const grouped = relayProjects.some((p) => (p.groups ?? []).length > 0);
   const consUsd = relayProjects.reduce((a, p) => {
     const dueUsd = p.currency === "USD" ? p.settle.due : p.settle.due_cny / usdRate;
+    if ((p.groups ?? []).length) return a + dueUsd;
     return a + (p.ratio > 0 ? dueUsd / p.ratio : dueUsd);
   }, 0);
   const paidUsd = c.settle.paid_cny / usdRate;
@@ -307,7 +309,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
             <CardTitle className="text-expense text-xl font-semibold tabular-nums">{money(c.settle.due_cny)}</CardTitle>
           </CardHeader>
           <CardContent className="text-muted-foreground px-5 text-xs">
-            标准消耗 {usd(consUsd)} × 折扣 × 汇率 {usdRate}
+            {grouped ? `分组收费 · 汇率 ${usdRate}` : `标准消耗 ${usd(consUsd)} × 折扣 × 汇率 ${usdRate}`}
           </CardContent>
         </Card>
         <Card className="gap-2 py-5">
@@ -349,7 +351,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         <Card>
           <CardHeader>
             <CardTitle className="text-base">中转项目（{relayProjects.length}）</CardTitle>
-            <CardDescription>按中转站消耗 × 折扣结算（折人民币）</CardDescription>
+            <CardDescription>中转项目按分组收费；没填分组价时仍用默认折扣</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="overflow-x-auto rounded-md border">
@@ -358,7 +360,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                   <TableRow>
                     <TableHead>项目</TableHead>
                     <TableHead>中转客户</TableHead>
-                    <TableHead className="text-right">折扣</TableHead>
+                    <TableHead className="text-right">计费</TableHead>
                     <TableHead className="text-right">累计消费</TableHead>
                     <TableHead className="text-right">已收</TableHead>
                     <TableHead className="text-right">未收</TableHead>
@@ -367,7 +369,10 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                 <TableBody>
                   {relayProjects.map((p) => {
                     const dueUsd = p.currency === "USD" ? p.settle.due : p.settle.due_cny / usdRate;
-                    const consUsdP = p.ratio > 0 ? dueUsd / p.ratio : dueUsd;
+                    const gs = p.groups ?? [];
+                    const consUsdP = gs.length ? dueUsd : p.ratio > 0 ? dueUsd / p.ratio : dueUsd;
+                    const priceTxt = (g: { price: number; price_mode?: string }) =>
+                      g.price_mode === "cny" ? `¥${g.price}/刀` : `${Math.round(g.price * 10000) / 100} 折`;
                     return (
                       <TableRow key={p.party_id}>
                         <TableCell>
@@ -386,13 +391,15 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                         <TableCell className="text-muted-foreground text-sm">
                           {p.relay_ref ? p.relay_ref : "—"}
                         </TableCell>
-                        <TableCell className="text-muted-foreground text-right tabular-nums">
-                          {+p.ratio.toFixed(4)}
+                        <TableCell className="text-muted-foreground text-right text-xs">
+                          {gs.length
+                            ? gs.map((g) => `${g.group_name} ${priceTxt(g)}`).join("、")
+                            : `折扣 ${+p.ratio.toFixed(4)}`}
                         </TableCell>
                         <TableCell className="text-expense text-right tabular-nums">
                           <div>{money(p.settle.due_cny)}</div>
                           <div className="text-muted-foreground text-xs">
-                            {usd(consUsdP)} × {+p.ratio.toFixed(4)} × {usdRate}
+                            {gs.length ? `${usd(consUsdP)} 按分组收费` : `${usd(consUsdP)} × ${+p.ratio.toFixed(4)} × ${usdRate}`}
                           </div>
                         </TableCell>
                         <TableCell className="text-income text-right tabular-nums">

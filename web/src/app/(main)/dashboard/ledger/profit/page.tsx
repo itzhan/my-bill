@@ -161,7 +161,7 @@ export default function ProfitPage() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="每日利润"
-        description="每日利润 = 客户消耗（中转站消耗 × 折扣，折人民币）− 供应商消耗（钱包实际消费）。只列有消耗的项目"
+        description="每日利润 = 客户消耗（分组收费，没设分组价时按折扣）− 供应商消耗（钱包实际消费）。只列有消耗的项目"
         actions={
           <Button variant="outline" onClick={refresh} disabled={refreshing || isLoading}>
             <RefreshCw className={cn(refreshing && "animate-spin")} />

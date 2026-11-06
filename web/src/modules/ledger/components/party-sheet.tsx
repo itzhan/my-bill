@@ -307,7 +307,7 @@ function NewPartyForm({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="pty-ratio">折扣（应收 = 消耗 × 折扣）</Label>
+            <Label htmlFor="pty-ratio">默认折扣（没填分组价时用）</Label>
             <Input id="pty-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
           </div>
         </div>
@@ -581,7 +581,7 @@ function RelayBlock({
           <b className="text-sm">中转站</b>
           <p className="text-muted-foreground text-xs">
             {v.kind === "customer"
-              ? "填客户在中转站的邮箱；应收 = 消耗 × 折扣，按结算币种自动逐日挂账"
+              ? "填客户在中转站的邮箱；没设分组价时应收 = 消耗 × 折扣，设了分组价按分组收费"
               : "填中转站「账号管理」里的账号名；应付 = 消耗 × 倍率，按结算币种自动逐日挂账"}
           </p>
         </div>
@@ -659,7 +659,10 @@ function RelayBlock({
       {head}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Kv label="中转站累计消耗" value={usdf(st.consumption_usd)} />
-        <Kv label={`× ${rl} ${st.ratio} = ${L.due}`} value={curf(st.consumption_x_ratio, C)} />
+        <Kv
+          label={st.grouped ? `分组收费 = ${L.due}` : `× ${rl} ${st.ratio} = ${L.due}`}
+          value={curf(st.consumption_x_ratio, C)}
+        />
         <Kv label={`今日${L.due}`} value={st.today === null ? "—" : curf(st.today, C)} />
         <Kv label="本小时" value={st.this_hour === null ? "—" : curf(st.this_hour, C)} />
       </div>
@@ -1066,7 +1069,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="pe-ratio">折扣（应收 = 中转站消耗 × 折扣）</Label>
+              <Label htmlFor="pe-ratio">默认折扣（没填分组价时用）</Label>
               <Input id="pe-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
             </div>
           </>
@@ -1173,9 +1176,10 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   );
 }
 
-// 中转制客户的分组收费：勾选这个客户在用的分组，填每美元消耗收多少人民币
+// 中转制客户的分组收费：只列这个客户能访问的分组，按分组折扣或元/刀计价
 function RelayGroups({ party: v }: { party: Party }) {
   const qc = useQueryClient();
+  const refresh = useLedgerRefresh();
   const { data: stations } = useQuery({
     queryKey: ["ledger", "stations"],
     queryFn: () => get<{ stations: Station[] }>("/stations").then((d) => d.stations),
@@ -1201,7 +1205,7 @@ function RelayGroups({ party: v }: { party: Party }) {
 
   const sid = Number(stationId);
   const groups = useQuery({
-    queryKey: ["ledger", "station-groups", sid],
+    queryKey: ["ledger", "station-groups", sid, v.id],
     queryFn: () => get<{ groups: { name: string }[] }>(`/stations/${sid}/groups?party=${v.id}`).then((d) => d.groups),
     enabled: sid > 0,
   });
@@ -1210,14 +1214,20 @@ function RelayGroups({ party: v }: { party: Party }) {
     if (!(sid > 0)) return toast.error("请选择中转站");
     setBusy(true);
     try {
+      const visible = new Set((groups.data ?? []).map((g) => g.name));
       await put(`/parties/${v.id}/relay-groups`, {
         station_id: sid,
         groups: Object.entries(prices)
-          .filter(([, p]) => p.value.trim() !== "")
+          .filter(([name, p]) => p.value.trim() !== "" && visible.has(name))
           .map(([group_name, p]) => ({ group_name, price: Number(p.value) || 0, mode: p.mode })),
       });
-      toast.success("分组收费已保存，用量会自动同步");
+      toast.success("分组收费已保存，应收和预估利润已按分组重算");
       qc.invalidateQueries({ queryKey: ["ledger", "relay-groups", v.id] });
+      qc.invalidateQueries({ queryKey: ["ledger", "station-groups", sid, v.id] });
+      qc.invalidateQueries({ queryKey: ["ledger", "customers"] });
+      qc.invalidateQueries({ queryKey: ["ledger", "customer-detail"] });
+      qc.invalidateQueries({ queryKey: ["ledger", "profit-daily"] });
+      refresh();
     } catch (ex) {
       toast.error((ex as Error).message);
     } finally {
@@ -1229,8 +1239,8 @@ function RelayGroups({ party: v }: { party: Party }) {
   return (
     <div className="space-y-3 rounded-lg border p-4">
       <div>
-        <b className="text-sm">分组收费（预估利润）</b>
-        <p className="text-muted-foreground text-xs">只显示这个客户在中转站可访问的分组。填折扣（68 = 68 折，按汇率折人民币）或每刀多少元</p>
+        <b className="text-sm">分组收费</b>
+        <p className="text-muted-foreground text-xs">只显示这个客户在中转站可访问的分组。填折扣（68 = 68 折，按汇率折人民币）或每刀多少元。保存后应收和预估利润按分组重算</p>
       </div>
       {relays.length ? (
         <Select value={stationId} onValueChange={setStationId}>
@@ -1249,6 +1259,9 @@ function RelayGroups({ party: v }: { party: Party }) {
         <p className="text-muted-foreground text-xs">还没有中转站，先到侧边栏「台子管理」里添加</p>
       )}
       {groups.isLoading ? <Skeleton className="h-16" /> : null}
+      {groups.data && !groups.data.length ? (
+        <p className="text-muted-foreground text-xs">这个客户在中转站没有可访问的分组</p>
+      ) : null}
       {groups.data ? (
         <div className="space-y-2">
           {groups.data.map((g) => {

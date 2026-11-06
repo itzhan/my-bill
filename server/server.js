@@ -1965,10 +1965,41 @@ function relaySupplierLive(accountId) {
     return { kind: 'supplier', fetched_at: now(), account: a ? relayAccountView(a) : { id: accountId }, total: { requests: allTime.total_requests, std_cost_usd: r2(allTime.total_account_cost ?? allTime.total_cost), cost_usd: r2(allTime.total_actual_cost), tokens: allTime.total_tokens }, today: { requests: ts ? ts.requests : todayStats ? 0 : null, std_cost_usd: ts ? r2(ts.standard_cost ?? ts.cost) : null, tokens: ts ? ts.tokens : null }, this_hour: h.this_hour, hourly: h.hourly, daily: daySeries(days.trend).slice(-3), live };
   });
 }
-// 自动挂账：把中转站每日消耗 × 倍率（供应商）/ 折扣（客户）按单位的结算币种写成应付 / 应收记录（source=relay，幂等）
+// 自动挂账：供应商 = 中转站每日消耗 × 倍率；客户有分组报价时按分组收费，否则仍用单一折扣
 // 首次绑定时把绑定前的累计消耗写成一条「期初」记录，之后每天一条，随消耗增长自动更新
 const relayCostOf = (pa, x) => (pa.kind === 'customer' ? x.cost_usd : x.std_cost_usd);
 const qRelayRec = { byRef: () => q.recordByRef, upd: db.prepare('UPDATE party_records SET amount = ?, currency = ?, rate = ?, note = ? WHERE id = ?') };
+const qRelayRecs = db.prepare("SELECT id FROM party_records WHERE party_id = ? AND source = 'relay'");
+const qCustomerGroups = db.prepare('SELECT group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ?');
+const qGroupUsageOf = db.prepare('SELECT date, group_name, usd FROM relay_group_usage WHERE party_id = ?');
+function customerGroupPrices(partyId) {
+  return qCustomerGroups.all(partyId).filter((g) => Number(g.price) > 0);
+}
+function groupUsdToCny(usd, g, rates) {
+  return g.price_mode === 'discount' ? usd * g.price * rates.USD : usd * g.price;
+}
+function groupPriceNote(g) {
+  return g.price_mode === 'discount' ? `折扣 ${g.price}` : `¥${g.price}/刀`;
+}
+function groupBillOf(partyId, rates) {
+  const prices = customerGroupPrices(partyId);
+  if (!prices.length) return null;
+  const byName = new Map(prices.map((g) => [g.group_name, g]));
+  const daily = new Map();
+  let totalUsd = 0, totalCny = 0;
+  for (const u of qGroupUsageOf.all(partyId)) {
+    const g = byName.get(u.group_name);
+    if (!g) continue;
+    const usd = Number(u.usd) || 0;
+    const cny = groupUsdToCny(usd, g, rates);
+    const d = daily.get(u.date) || { date: u.date, usd: 0, cny: 0, parts: [] };
+    d.usd += usd; d.cny += cny;
+    if (usd > 0) d.parts.push(`${u.group_name} $${usd.toFixed(2)} × ${groupPriceNote(g)}`);
+    daily.set(u.date, d);
+    totalUsd += usd; totalCny += cny;
+  }
+  return { prices, daily, totalUsd: r2(totalUsd), totalCny: r2(totalCny) };
+}
 function syncRelayAccrual(pa, live) {
   if (!pa.relay_id || pa.archived || !live || live.error) return;
   const ratio = Number(pa.ratio) > 0 ? Number(pa.ratio) : 1;
@@ -1977,47 +2008,82 @@ function syncRelayAccrual(pa, live) {
   const rate = cur === 'CNY' ? 1 : rates[cur];
   const label = pa.kind === 'customer' ? '折扣' : '倍率';
   const daily = live.daily || [];
-  const upsert = (ref, date, usd, note) => {
-    const amount = r2(usdToCur(usd * ratio, cur, rates));
-    if (amount <= 0) return;
+  const bill = pa.kind === 'customer' ? groupBillOf(pa.id, rates) : null;
+  const upsert = (ref, date, amount, usd, note) => {
+    amount = r2(amount);
     const ex = q.recordByRef.get(ref);
-    if (ex) { if (Math.abs(ex.amount - amount) >= 0.01 || ex.currency !== cur) qRelayRec.upd.run(amount, cur, rate, note, ex.id); return; }
+    if (amount <= 0) { if (ex) { q.deleteRecord.run(ex.id); changed = true; } return; }
+    if (ex) { if (Math.abs(ex.amount - amount) >= 0.01 || ex.currency !== cur || ex.note !== note) qRelayRec.upd.run(amount, cur, rate, note, ex.id); return; }
     q.insertRecord.run(pa.id, 'due', amount, cur, rate, date, note, 'relay', ref, null, null, now(), pa.project_id);
-    kbLog(`中转站自动挂账：${PARTY_LABEL[pa.kind].name}「${pa.name}」${PARTY_LABEL[pa.kind].due} ${amount.toLocaleString('zh-CN')} ${cur}（${date}，消耗 $${usd.toFixed(2)} × ${label} ${ratio}）· ${pa.project_name || ''}`);
+    kbLog(`中转站自动挂账：${PARTY_LABEL[pa.kind].name}「${pa.name}」${PARTY_LABEL[pa.kind].due} ${amount.toLocaleString('zh-CN')} ${cur}（${date}，消耗 $${usd.toFixed(2)}）· ${pa.project_name || ''}`);
     changed = true;
   };
   let changed = false;
-  const total = pa.kind === 'customer' ? live.total.cost_usd : live.total.std_cost_usd;
-  const inWindow = daily.reduce((a, x) => a + relayCostOf(pa, x), 0);
-  const openingRef = `relay:${pa.id}:opening`;
-  if (getSetting(`relay_opening:${pa.id}`, '') !== '1') {
-    const before = r2(total - inWindow);
-    const openDate = daily.length ? addDays(daily.reduce((a, x) => (x.date < a ? x.date : a), daily[0].date), -1) : todayKey();
-    if (before > 0.005) upsert(openingRef, openDate, before, `期初（${openDate} 及以前）累计消耗 $${before.toFixed(2)} × ${label} ${ratio}`);
+  if (bill) {
+    if (!bill.daily.size) return;
+    const seen = new Set();
+    for (const d of bill.daily.values()) {
+      seen.add(d.date);
+      upsert(`relay:${pa.id}:${d.date}`, d.date, cur === 'CNY' ? d.cny : cnyToCur(d.cny, cur, rates), d.usd, `分组收费 ${d.parts.join('；') || `$${d.usd.toFixed(2)}`}`);
+    }
+    // 分组收费覆盖全部历史，清掉旧的单一折扣期初和过期日期
+    for (const r of qRelayRecs.all(pa.id)) {
+      const rec = q.record.get(r.id);
+      if (!rec) continue;
+      const m = String(rec.external_ref || '').match(new RegExp(`^relay:${pa.id}:(.+)$`));
+      if (!m) continue;
+      if (!seen.has(m[1])) q.deleteRecord.run(rec.id);
+    }
     q.putSetting.run(`relay_opening:${pa.id}`, '1');
+  } else {
+    const total = pa.kind === 'customer' ? live.total.cost_usd : live.total.std_cost_usd;
+    const inWindow = daily.reduce((a, x) => a + relayCostOf(pa, x), 0);
+    const openingRef = `relay:${pa.id}:opening`;
+    if (getSetting(`relay_opening:${pa.id}`, '') !== '1') {
+      const before = r2(total - inWindow);
+      const openDate = daily.length ? addDays(daily.reduce((a, x) => (x.date < a ? x.date : a), daily[0].date), -1) : todayKey();
+      if (before > 0.005) upsert(openingRef, openDate, usdToCur(before * ratio, cur, rates), before, `期初（${openDate} 及以前）累计消耗 $${before.toFixed(2)} × ${label} ${ratio}`);
+      q.putSetting.run(`relay_opening:${pa.id}`, '1');
+    }
+    for (const x of daily) {
+      const usd = relayCostOf(pa, x);
+      upsert(`relay:${pa.id}:${x.date}`, x.date, usdToCur(usd * ratio, cur, rates), usd, `中转站消耗 $${usd.toFixed(2)} × ${label} ${ratio}`);
+    }
   }
-  for (const x of daily) upsert(`relay:${pa.id}:${x.date}`, x.date, relayCostOf(pa, x), `中转站消耗 $${relayCostOf(pa, x).toFixed(2)} × ${label} ${ratio}`);
   // 新增了挂账记录：通知在线页面刷新（金额随消耗微调时不刷，避免每 30 秒闪一次）
   if (changed) { dataVersion += 1; broadcast('changed', { version: dataVersion, byId: 0, by: '中转站', text: '', at: now() }); }
 }
 // 倍率 / 折扣 / 币种变了或重新绑定：清掉自动挂账记录，下次刷新按新参数重算（期初 + 近 3 天）
-const qRelayRecs = db.prepare("SELECT id FROM party_records WHERE party_id = ? AND source = 'relay'");
 function resetRelayAccrual(partyId) {
   for (const r of qRelayRecs.all(partyId)) q.deleteRecord.run(r.id);
   q.putSetting.run(`relay_opening:${partyId}`, '');
   relayCache.clear();
 }
-// 结算视图：以单位结算币种为主，人民币为辅
+// 结算视图：以单位结算币种为主，人民币为辅。客户有分组报价时按分组收费
 function settlementView(pa, live) {
   const records = q.recordsOfParty.all(pa.id);
   const st = partySettle(records, pa.currency || 'CNY');
   const rates = getRates(), cur = pa.currency || 'CNY', ratio = Number(pa.ratio) > 0 ? Number(pa.ratio) : 1;
+  const bill = pa.kind === 'customer' ? groupBillOf(pa.id, rates) : null;
   const total = live ? (pa.kind === 'customer' ? live.total.cost_usd : live.total.std_cost_usd) : 0;
   const todayUsd = live ? (pa.kind === 'customer' ? live.today.cost_usd : live.today.std_cost_usd) : null;
   const hourUsd = live && live.this_hour ? (pa.kind === 'customer' ? live.this_hour.cost_usd : live.this_hour.std_cost_usd) : null;
-  const computed = r2(usdToCur(total * ratio, cur, rates));
-  const xRatio = live && st.relay_due > 0 && Math.abs(computed - st.relay_due) < 1 ? st.relay_due : computed;
-  return { ...st, ratio, ratio_label: pa.kind === 'customer' ? '折扣' : '倍率', consumption_usd: r2(total), consumption_x_ratio: xRatio, today: todayUsd === null ? null : r2(usdToCur(todayUsd * ratio, cur, rates)), this_hour: hourUsd === null ? null : r2(usdToCur(hourUsd * ratio, cur, rates)), usd_rate: rates.USD, cur_rate: cur === 'CNY' ? 1 : rates[cur] };
+  const todayKeyS = todayKey();
+  let computed, todayAmt, hourAmt, billedUsd;
+  if (bill) {
+    billedUsd = bill.totalUsd;
+    computed = r2(cur === 'CNY' ? bill.totalCny : cnyToCur(bill.totalCny, cur, rates));
+    const todayRow = bill.daily.get(todayKeyS);
+    todayAmt = todayRow ? r2(cur === 'CNY' ? todayRow.cny : cnyToCur(todayRow.cny, cur, rates)) : (todayUsd === null ? null : 0);
+    hourAmt = null;
+  } else {
+    billedUsd = total;
+    computed = r2(usdToCur(total * ratio, cur, rates));
+    todayAmt = todayUsd === null ? null : r2(usdToCur(todayUsd * ratio, cur, rates));
+    hourAmt = hourUsd === null ? null : r2(usdToCur(hourUsd * ratio, cur, rates));
+  }
+  const xRatio = st.relay_due > 0 && Math.abs(computed - st.relay_due) < 1 ? st.relay_due : computed;
+  return { ...st, ratio, ratio_label: bill ? '分组收费' : (pa.kind === 'customer' ? '折扣' : '倍率'), grouped: !!bill, consumption_usd: r2(billedUsd || total), consumption_x_ratio: xRatio, today: todayAmt, this_hour: hourAmt, usd_rate: rates.USD, cur_rate: cur === 'CNY' ? 1 : rates[cur] };
 }
 async function partyLive(pa) {
   if (!pa.relay_id) return { party_id: pa.id, linked: false, settlement: settlementView(pa, null) };
@@ -2047,32 +2113,56 @@ setTimeout(relayAccrualSweep, 20 * 1000).unref();
 setInterval(relayAccrualSweep, 5 * 60 * 1000).unref();
 
 // 中转制预估利润的同步：客户按分组的消耗 + 上游每个 key 的消耗
-async function syncRelayEstimate() {
-  const today = dayFmt.format(new Date());
-  const start = dayFmt.format(new Date(Date.now() - 2 * 86400_000));
-  // 客户分组：一个客户勾了哪些分组，就按这些分组落每天的美元消耗
-  const groups = db.prepare("SELECT g.party_id, g.group_name, g.station_id, pa.relay_id FROM relay_customer_groups g JOIN parties pa ON pa.id = g.party_id WHERE pa.relay_id IS NOT NULL").all();
+async function syncRelayGroupUsage(partyId = null, opts = {}) {
+  const today = todayKey();
+  const groups = db.prepare("SELECT g.party_id, g.group_name, g.station_id, pa.relay_id, pa.start_date FROM relay_customer_groups g JOIN parties pa ON pa.id = g.party_id WHERE pa.relay_id IS NOT NULL" + (partyId ? ' AND g.party_id = ?' : '')).all(...(partyId ? [partyId] : []));
   const byUser = new Map();
   for (const g of groups) {
-    const k = `${g.station_id}|${g.relay_id}`;
+    const k = `${g.station_id}|${g.relay_id}|${g.party_id}`;
     if (!byUser.has(k)) byUser.set(k, []);
     byUser.get(k).push(g);
   }
+  const putUsage = db.prepare('INSERT INTO relay_group_usage (party_id, group_name, date, usd) VALUES (?, ?, ?, ?) ON CONFLICT (party_id, group_name, date) DO UPDATE SET usd = excluded.usd');
   for (const [, rows] of byUser) {
     const station = db.prepare('SELECT * FROM stations WHERE id = ?').get(rows[0].station_id);
     if (!station) continue;
     const want = new Set(rows.map((r) => r.group_name));
-    for (let t = new Date(start + 'T00:00:00Z').getTime(); t <= new Date(today + 'T00:00:00Z').getTime(); t += 86400_000) {
-      const date = dayFmt.format(new Date(t));
-      try {
-        const d = await relayGet('/admin/dashboard/groups', { user_id: rows[0].relay_id, start_date: date, end_date: date }, station);
-        for (const g of (d && d.groups) || []) {
-          if (!want.has(g.group_name)) continue;
-          db.prepare('INSERT INTO relay_group_usage (party_id, group_name, date, usd) VALUES (?, ?, ?, ?) ON CONFLICT (party_id, group_name, date) DO UPDATE SET usd = excluded.usd').run(rows[0].party_id, g.group_name, date, Number(g.actual_cost) || 0);
-        }
-      } catch (e) { console.error(`[relay] 分组用量 ${rows[0].relay_id} ${date} 失败：${e.message}`); }
+    const first = db.prepare('SELECT MIN(date) AS d FROM relay_group_usage WHERE party_id = ?').get(rows[0].party_id);
+    const windows = [];
+    if (opts.days) windows.push([addDays(today, 1 - opts.days), today]);
+    else if (partyId) windows.push([RE_DATE.test(rows[0].start_date) ? rows[0].start_date : '2024-01-01', today]);
+    else {
+      windows.push([addDays(today, -6), today]);
+      if (!first || !first.d) windows.push([addDays(today, -89), addDays(today, -7)]);
+      else if (first.d > '2024-01-01') windows.push([addDays(first.d, -30), addDays(first.d, -1)]);
     }
+    const dates = [];
+    for (const [from0, to0] of windows) {
+      let from = from0 > today ? today : from0, to = to0 > today ? today : to0;
+      if (from > to) continue;
+      for (let date = from; date <= to; date = addDays(date, 1)) dates.push(date);
+    }
+    const queue = [...dates];
+    await Promise.all(Array.from({ length: Math.min(6, queue.length) }, async () => {
+      while (queue.length) {
+        const date = queue.shift();
+        try {
+          const d = await relayGet('/admin/dashboard/groups', { user_id: rows[0].relay_id, start_date: date, end_date: date }, station);
+          const seen = new Set();
+          for (const g of (d && d.groups) || []) {
+            const name = g.group_name || g.name;
+            if (!want.has(name)) continue;
+            seen.add(name);
+            putUsage.run(rows[0].party_id, name, date, Number(g.actual_cost ?? g.cost) || 0);
+          }
+          for (const name of want) if (!seen.has(name)) putUsage.run(rows[0].party_id, name, date, 0);
+        } catch (e) { console.error(`[relay] 分组用量 ${rows[0].relay_id} ${date} 失败：${e.message}`); }
+      }
+    }));
   }
+}
+async function syncRelayEstimate() {
+  await syncRelayGroupUsage();
   // 上游 key：每个 key 用自己的令牌读站点日志，按天记消耗
   for (const k of db.prepare('SELECT * FROM relay_keys').all()) {
     if (!k.base_url || !k.token) continue;
@@ -3053,7 +3143,7 @@ function usageEstimate(p) {
     const f = relayForecastCache.get(p.id);
     // 缓存还没算出来时返回空，让没有消耗数据的项目先按记账收支显示
     if (!f) return null;
-    return { receivable: r2(f.customer), payable: r2(f.supplier), profit: r2(f.profit), note: '累计消耗 × 折扣 − 站点累计消费' };
+    return { receivable: r2(f.customer), payable: r2(f.supplier), profit: r2(f.profit), note: '分组收费 − 站点累计消费' };
   }
   if (p.ptype === 'key') {
     const rows = db.prepare("SELECT pa.kind, COALESCE(SUM(r.amount * CASE WHEN r.currency = 'CNY' THEN 1 ELSE r.rate END), 0) AS n FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE r.project_id = ? AND r.source = 'key' AND r.kind = 'due' GROUP BY pa.kind").all(p.id);
@@ -3085,7 +3175,7 @@ function projectStations(p, parties) {
   const customers = parties.customers.map((c) => ({
     id: c.id, name: c.name,
     station: own && own.type === 'key' ? own.name : '',
-    groups: db.prepare('SELECT group_name, price FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(c.id),
+    groups: db.prepare('SELECT group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(c.id),
     ...money(c),
   }));
   const suppliers = parties.suppliers.map((s) => ({
@@ -3189,11 +3279,37 @@ async function relayAllGroups(station) {
   }
   return all;
 }
-// 这个客户在中转站被允许使用的分组。allowed_groups 是分组 id
+function partyGroupAllow(u) {
+  const raw = u && (u.allowed_groups || u.group_ids || u.groups);
+  const ids = new Set(), names = new Set();
+  const list = Array.isArray(raw) ? raw : (typeof raw === 'string' ? raw.split(/[,，\s]+/).filter(Boolean) : []);
+  for (const x of list) {
+    if (x && typeof x === 'object') {
+      if (x.id != null && Number(x.id) > 0) ids.add(Number(x.id));
+      if (x.name) names.add(String(x.name));
+    } else if (/^\d+$/.test(String(x))) ids.add(Number(x));
+    else if (x) names.add(String(x));
+  }
+  return { ids, names };
+}
+// 只列这个客户能用的分组，不列中转站全部。用户详情对不上时，用近 30 天实际跑过的分组
 async function partyAllowedGroupNames(station, relayId) {
-  const u = await relayGet(`/admin/users/${relayId}`, null, station);
-  const ids = new Set((u && u.allowed_groups) || []);
-  return (await relayAllGroups(station)).filter((g) => ids.has(g.id)).map((g) => g.name);
+  const all = await relayAllGroups(station);
+  let u = null;
+  try { u = await relayGet(`/admin/users/${relayId}`, null, station); } catch { /* 详情接口可能没有 */ }
+  const allow = partyGroupAllow(u);
+  const names = new Set(allow.names);
+  if (allow.ids.size) for (const g of all) if (allow.ids.has(Number(g.id))) names.add(g.name);
+  if (names.size) return [...names];
+  const today = todayKey();
+  try {
+    const d = await relayGet('/admin/dashboard/groups', { user_id: relayId, start_date: addDays(today, -29), end_date: today }, station);
+    for (const g of (d && d.groups) || []) {
+      const name = g.group_name || g.name;
+      if (name) names.add(name);
+    }
+  } catch { /* 用量接口没有就只靠用户详情 */ }
+  return [...names];
 }
 // 中转制客户的分组收费：body.groups = [{ group_name, price, mode }]，mode = discount（折扣）或 cny（元/刀）
 app.get('/api/stations/:id/groups', auth, async (req, res, next) => {
@@ -3216,23 +3332,38 @@ app.get('/api/parties/:id/relay-groups', auth, (req, res) => {
   if (!pa) return fail(res, 404, '往来单位不存在');
   res.json({ groups: db.prepare('SELECT station_id, group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(pa.id) });
 });
-app.put('/api/parties/:id/relay-groups', auth, (req, res) => {
-  const pa = q.party.get(Number(req.params.id));
-  if (!pa || pa.kind !== 'customer') return fail(res, 404, '客户不存在');
-  const stationId = Number((req.body || {}).station_id);
-  if (!db.prepare('SELECT 1 FROM stations WHERE id = ?').get(stationId)) return fail(res, 400, '请选择中转站');
-  const groups = Array.isArray((req.body || {}).groups) ? req.body.groups : [];
-  db.prepare('DELETE FROM relay_customer_groups WHERE party_id = ?').run(pa.id);
-  for (const g of groups) {
-    const name = String(g.group_name || '').trim();
-    if (!name) continue;
-    const mode = g.mode === 'discount' ? 'discount' : 'cny';
-    let price = Number(g.price) || 0;
-    // 折扣填 68 或 0.68 都按 0.68 存
-    if (mode === 'discount' && price > 1) price = price / 100;
-    db.prepare('INSERT INTO relay_customer_groups (party_id, station_id, group_name, price, price_mode) VALUES (?, ?, ?, ?, ?)').run(pa.id, stationId, name, price, mode);
-  }
-  res.json({ ok: true });
+app.put('/api/parties/:id/relay-groups', auth, async (req, res, next) => {
+  try {
+    const pa = q.party.get(Number(req.params.id));
+    if (!pa || pa.kind !== 'customer') return fail(res, 404, '客户不存在');
+    const stationId = Number((req.body || {}).station_id);
+    if (!db.prepare('SELECT 1 FROM stations WHERE id = ?').get(stationId)) return fail(res, 400, '请选择中转站');
+    const groups = Array.isArray((req.body || {}).groups) ? req.body.groups : [];
+    db.prepare('DELETE FROM relay_customer_groups WHERE party_id = ?').run(pa.id);
+    for (const g of groups) {
+      const name = String(g.group_name || '').trim();
+      if (!name) continue;
+      const mode = g.mode === 'discount' ? 'discount' : 'cny';
+      let price = Number(g.price) || 0;
+      // 折扣填 68 或 0.68 都按 0.68 存
+      if (mode === 'discount' && price > 1) price = price / 100;
+      db.prepare('INSERT INTO relay_customer_groups (party_id, station_id, group_name, price, price_mode) VALUES (?, ?, ?, ?, ?)').run(pa.id, stationId, name, price, mode);
+    }
+    db.prepare('DELETE FROM relay_group_usage WHERE party_id = ?').run(pa.id);
+    resetRelayAccrual(pa.id);
+    // 先拉近 14 天，应收和预估马上能改；更早的历史后台补完再重算一遍
+    await syncRelayGroupUsage(pa.id, { days: 14 });
+    await partyLive(q.party.get(pa.id));
+    profitCache = null;
+    refreshRelayForecasts().catch((e) => console.error('[relay] 预估利润更新失败：', e.message));
+    syncRelayGroupUsage(pa.id).then(async () => {
+      await partyLive(q.party.get(pa.id));
+      profitCache = null;
+      await refreshRelayForecasts();
+    }).catch((e) => console.error(`[relay] 客户 ${pa.name} 分组用量回补失败：`, e.message));
+    dataChanged(req.user, `设置了客户「${pa.name}」的分组收费（${groups.filter((g) => String(g.group_name || '').trim()).length} 个分组）· ${pa.project_name || ''}`);
+    res.json({ ok: true });
+  } catch (e) { next(e); }
 });
 // 中转制上游 key：一个上游可以有多个分组、多个 key，每个 key 的消耗即该账号的消费
 app.post('/api/relay-keys', auth, (req, res) => {
@@ -3542,7 +3673,7 @@ app.get('/api/customers/:id/detail', auth, async (req, res) => {
   const bal = await relayBalances();
   const siblings = custSiblings(pa);
   const entriesOfProj = db.prepare('SELECT * FROM entries WHERE project_id = ?');
-  const projects = siblings.map((s) => { const v = partyView(s); const isShort = (s.project_type || 'relay') === 'short'; return { party_id: s.id, project_id: s.project_id, project_name: s.project_name, project_type: s.project_type || 'relay', settle_type: v.settle_type, relay_id: s.relay_id || null, relay_ref: s.relay_ref || '', balance_usd: s.relay_id != null ? (bal.has(s.relay_id) ? bal.get(s.relay_id) : null) : null, ratio: v.ratio, currency: v.currency, settle: v.settle, summary: isShort ? summarize(entriesOfProj.all(s.project_id), rates) : null }; });
+  const projects = siblings.map((s) => { const v = partyView(s); const isShort = (s.project_type || 'relay') === 'short'; return { party_id: s.id, project_id: s.project_id, project_name: s.project_name, project_type: s.project_type || 'relay', settle_type: v.settle_type, relay_id: s.relay_id || null, relay_ref: s.relay_ref || '', balance_usd: s.relay_id != null ? (bal.has(s.relay_id) ? bal.get(s.relay_id) : null) : null, ratio: v.ratio, currency: v.currency, settle: v.settle, groups: db.prepare('SELECT group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(s.id), summary: isShort ? summarize(entriesOfProj.all(s.project_id), rates) : null }; });
   const records = siblings.flatMap((s) => q.recordsWithCreator.all(s.id).map((r) => ({ ...recordView(r), project_name: s.project_name }))).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
   const contracts = siblings.flatMap((s) => qContractsOf.all(s.id).map((r) => ({ ...contractView(r), project_name: s.project_name })));
   // 实时：取第一个绑定了中转站的 party
@@ -3672,15 +3803,15 @@ async function refreshCustomerGaps() {
   const rates = getRates();
   for (const pa of db.prepare("SELECT pa.* FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer' AND pa.relay_id IS NOT NULL AND pa.archived = 0 AND p.ptype = 'relay'").all()) {
     try {
+      // 已设分组收费的客户，用量表覆盖全部历史，不再按单一折扣补差额
+      if (customerGroupPrices(pa.id).length) continue;
       const live = await relayCustomerLive(pa.relay_id, pa.relay_ref);
       const total = Number(live.total && live.total.cost_usd) || 0;
-      // 已挂账的人民币 ÷（折扣 × 汇率）还原成美元消耗，和中转站累计比较，差额就是挂账前的历史
+      // 已挂账的人民币 ÷ 汇率还原成美元消耗，和中转站累计比较，差额就是挂账前的历史
       const bookedCny = db.prepare("SELECT COALESCE(SUM(amount * CASE WHEN currency = 'CNY' THEN 1 ELSE rate END), 0) AS n FROM party_records WHERE party_id = ? AND source = 'relay' AND kind = 'due'").get(pa.id).n;
-      // 挂账金额已经是消耗 × 折扣，所以这里只按汇率还原美元，不能再乘折扣
       const perUsd = usdToCur(1, pa.currency || 'CNY', rates);
       const gap = perUsd > 0 ? r2(total - bookedCny / perUsd) : 0;
       if (gap > 1) {
-        const cur = pa.currency || 'CNY';
         const cny = r2(usdToCur(gap * (Number(pa.ratio) > 0 ? Number(pa.ratio) : 1), pa.currency || 'CNY', rates));
         customerGapCache.set(pa.project_id, [...(customerGapCache.get(pa.project_id) || []), ['历史（挂账前）', cny]]);
       }

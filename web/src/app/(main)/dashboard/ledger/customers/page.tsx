@@ -169,13 +169,13 @@ export default function CustomersPage() {
     {
       label: "中转余额合计",
       value: usdf(totalBalUsd),
-      sub: `折后 ${usdf(totalBalRevUsd)} · 余额 × 折扣`,
+      sub: `折后 ${usdf(totalBalRevUsd)} · 余额按折扣估算`,
       cls: "text-income",
     },
     {
       label: "累计消费合计",
       value: money(totalDue),
-      sub: `${usdf(toUsd(totalDue))} · 美金 × 折扣`,
+      sub: `${usdf(toUsd(totalDue))} · 按结算价折美金`,
       cls: "text-expense",
     },
     {
@@ -246,7 +246,7 @@ export default function CustomersPage() {
         <>
           <CustomerTable
             title="中转客户"
-            description="有中转项目的客户，自动跟踪中转站余额、消费与应收（折扣 = 中转消耗 × 折扣）"
+            description="有中转项目的客户，自动跟踪中转站余额、消费与应收（设了分组价按分组收费）"
             customers={relay}
             withBalance
             resetKey={`relay|${q}|${showArchived}`}
