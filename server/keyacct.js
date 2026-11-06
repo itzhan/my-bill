@@ -386,7 +386,12 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
       },
       suppliers: supplierIds.map((id) => { const pa = q.party.get(id); return { party_id: id, name: pa ? pa.name : '', prefixes: prefixes.filter((k) => k.party_id === id).map((k) => k.prefix), settle: settleOf(id) }; }),
       totals: { ...round(totals), profit: r2(totals.receivable - totals.payable) },
-      daily: [...daily.values()].map((d) => ({ ...round(d), profit: r2(d.receivable - d.payable) })).sort((a, b) => (a.opening !== b.opening ? (a.opening ? 1 : -1) : b.date.localeCompare(a.date))),
+      daily: [...daily.values()].map((d) => ({ ...round(d), profit: r2(d.receivable - d.payable) })).sort((a, b) => {
+        const day = (x) => (x.opening ? x.date.replace(/^期初\s*/, '') : x.date);
+        const c = day(b).localeCompare(day(a));
+        if (c) return c;
+        return a.opening === b.opening ? 0 : (a.opening ? -1 : 1);
+      }),
     };
   }
 
