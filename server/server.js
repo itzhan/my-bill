@@ -2021,19 +2021,12 @@ function syncRelayAccrual(pa, live) {
   let changed = false;
   if (bill) {
     if (!bill.daily.size) return;
-    const seen = new Set();
     for (const d of bill.daily.values()) {
-      seen.add(d.date);
       upsert(`relay:${pa.id}:${d.date}`, d.date, cur === 'CNY' ? d.cny : cnyToCur(d.cny, cur, rates), d.usd, `分组收费 ${d.parts.join('；') || `$${d.usd.toFixed(2)}`}`);
     }
-    // 分组收费覆盖全部历史，清掉旧的单一折扣期初和过期日期
-    for (const r of qRelayRecs.all(pa.id)) {
-      const rec = q.record.get(r.id);
-      if (!rec) continue;
-      const m = String(rec.external_ref || '').match(new RegExp(`^relay:${pa.id}:(.+)$`));
-      if (!m) continue;
-      if (!seen.has(m[1])) q.deleteRecord.run(rec.id);
-    }
+    // 只覆盖已拉到用量的日期；没拉到的旧挂账先留着，避免回补完成前把历史清掉
+    const opening = q.recordByRef.get(`relay:${pa.id}:opening`);
+    if (opening) { q.deleteRecord.run(opening.id); changed = true; }
     q.putSetting.run(`relay_opening:${pa.id}`, '1');
   } else {
     const total = pa.kind === 'customer' ? live.total.cost_usd : live.total.std_cost_usd;
@@ -3771,12 +3764,25 @@ async function supplierDailyCost(onlyProject = null) {
   supplierCostCache.set(key, { at: Date.now(), data });
   return data;
 }
-// 中转制预估利润：客户消耗 × 折扣（已按天挂账的应收）− 付给供应商的钱（站点每日消耗 × 消耗倍率）
+// 中转制预估利润：客户分组收费（没设分组价才用消耗 × 折扣）− 付给供应商的钱（站点每日消耗 × 消耗倍率）
 function relayForecastOf(projectId, byKey) {
   const days = new Map();
-  // 客户：每天的挂账（消耗 × 折扣）
+  const rates = getRates();
+  const groupedDates = new Set();
+  // 设了分组价的客户：已有用量的日期按分组价；还没拉到的日期仍用旧挂账，避免回补前少算
+  for (const pa of q.partiesOfProject.all(projectId)) {
+    if (pa.kind !== 'customer' || pa.archived) continue;
+    const bill = groupBillOf(pa.id, rates);
+    if (!bill || !bill.daily.size) continue;
+    for (const row of bill.daily.values()) {
+      groupedDates.add(`${pa.id}|${row.date}`);
+      const d = days.get(row.date) || { date: row.date, customer: 0, supplier: 0 };
+      d.customer += row.cny; days.set(row.date, d);
+    }
+  }
   for (const r of q.recordsOfProject.all(projectId)) {
     if (r.party_kind !== 'customer' || r.kind !== 'due' || r.source !== 'relay') continue;
+    if (groupedDates.has(`${r.party_id}|${r.date}`)) continue;
     const d = days.get(r.date) || { date: r.date, customer: 0, supplier: 0 };
     d.customer += recBase(r); days.set(r.date, d);
   }
@@ -3863,19 +3869,32 @@ async function computeProfitDaily() {
   const projName = new Map(q.projects.all().map((p) => [p.id, p.name]));
   const errors = [];
   const todayS = todayKey();
-  // 客户每日消耗：中转站自动挂账记录（每 30 分钟同步、按天按用户，稳定可靠）。key = projectId|date
+  // 客户每日消耗：有分组价用分组用量 × 分组价，否则用中转站自动挂账。key = projectId|date
   const cust = new Map();
   const custPDU = new Map(); // projectId|date -> Map(用户名 -> cny)：每天各用户消耗
+  const groupedDates = new Set();
+  const addCust = (projectId, date, name, cny) => {
+    if (cny <= 0) return;
+    const k = `${projectId}|${date}`;
+    cust.set(k, r2((cust.get(k) || 0) + cny));
+    if (!custPDU.has(k)) custPDU.set(k, new Map());
+    const m = custPDU.get(k);
+    m.set(name, r2((m.get(name) || 0) + cny));
+  };
+  for (const row of db.prepare('SELECT DISTINCT party_id FROM relay_customer_groups').all()) {
+    const pa = q.party.get(row.party_id);
+    if (!pa || pa.archived) continue;
+    const bill = groupBillOf(pa.id, rates);
+    if (!bill || !bill.daily.size) continue;
+    for (const d of bill.daily.values()) {
+      groupedDates.add(`${pa.id}|${d.date}`);
+      addCust(pa.project_id, d.date, pa.name, d.cny);
+    }
+  }
   for (const r of q.allRecords.all()) {
     if (r.party_kind !== 'customer' || r.kind !== 'due' || (r.source !== 'relay' && r.source !== 'key')) continue;
-    const cny = recBase(r);
-    const k = `${r.project_id}|${r.date}`;
-    cust.set(k, r2((cust.get(k) || 0) + cny));
-    if (cny > 0) {
-      if (!custPDU.has(k)) custPDU.set(k, new Map());
-      const m = custPDU.get(k);
-      m.set(r.party_name, r2((m.get(r.party_name) || 0) + cny));
-    }
+    if (r.source === 'relay' && groupedDates.has(`${r.party_id}|${r.date}`)) continue;
+    addCust(r.project_id, r.date, r.party_name, recBase(r));
   }
   // 供应商每日消耗（实际消费 = 站点每日消耗 × 消耗倍率，折人民币）：钱包 detail 的 daily，按 项目+站点 去重
   const { byKey: sup, errors: supErrors } = await supplierDailyCost();
