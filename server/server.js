@@ -1991,6 +1991,7 @@ function groupBillOf(partyId, rates) {
     const g = byName.get(u.group_name);
     if (!g) continue;
     const usd = Number(u.usd) || 0;
+    if (usd <= 0) continue;
     const cny = groupUsdToCny(usd, g, rates);
     const d = daily.get(u.date) || { date: u.date, usd: 0, cny: 0, parts: [] };
     d.usd += usd; d.cny += cny;
@@ -2141,13 +2142,17 @@ async function syncRelayGroupUsage(partyId = null, opts = {}) {
         const date = queue.shift();
         try {
           const d = await relayGet('/admin/dashboard/groups', { user_id: rows[0].relay_id, start_date: date, end_date: date }, station);
+          const groups = (d && d.groups) || [];
+          // 中转站对较老的日期经常返回空列表，不能据此把已有用量改成 0
+          if (!groups.length) continue;
           const seen = new Set();
-          for (const g of (d && d.groups) || []) {
+          for (const g of groups) {
             const name = g.group_name || g.name;
             if (!want.has(name)) continue;
             seen.add(name);
             putUsage.run(rows[0].party_id, name, date, Number(g.actual_cost ?? g.cost) || 0);
           }
+          if (!seen.size) continue;
           for (const name of want) if (!seen.has(name)) putUsage.run(rows[0].party_id, name, date, 0);
         } catch (e) { console.error(`[relay] 分组用量 ${rows[0].relay_id} ${date} 失败：${e.message}`); }
       }
@@ -3342,8 +3347,9 @@ app.put('/api/parties/:id/relay-groups', auth, async (req, res, next) => {
       if (mode === 'discount' && price > 1) price = price / 100;
       db.prepare('INSERT INTO relay_customer_groups (party_id, station_id, group_name, price, price_mode) VALUES (?, ?, ?, ?, ?)').run(pa.id, stationId, name, price, mode);
     }
-    db.prepare('DELETE FROM relay_group_usage WHERE party_id = ?').run(pa.id);
-    resetRelayAccrual(pa.id);
+    db.prepare('DELETE FROM relay_group_usage WHERE party_id = ? AND group_name NOT IN (SELECT group_name FROM relay_customer_groups WHERE party_id = ?)').run(pa.id, pa.id);
+    // 改价只重算已有用量，不清空历史；中转站对旧日期经常返回空，清掉就补不回来
+    if (!db.prepare('SELECT 1 FROM relay_customer_groups WHERE party_id = ?').get(pa.id)) resetRelayAccrual(pa.id);
     // 先拉近 14 天，应收和预估马上能改；更早的历史后台补完再重算一遍
     await syncRelayGroupUsage(pa.id, { days: 14 });
     await partyLive(q.party.get(pa.id));
