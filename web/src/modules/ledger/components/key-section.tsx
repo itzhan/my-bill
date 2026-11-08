@@ -40,6 +40,8 @@ type KeyView = {
     groups: string;
     bill_mode: "prefix" | "station";
     from_date: string;
+    supplier_party_id: number | null;
+    cost: GroupPrice;
     has_cookie: boolean;
     cookie_from_env: boolean;
     cookie_masked: string;
@@ -154,8 +156,18 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                 ? ` 只统计 ${s.groups} 分组 ·`
                 : ""}
             甲方 {custName ?? <span className="text-expense">未设置</span>}
+            {s.bill_mode === "station" ? (
+              <>
+                {" · "}成本 {s.cost?.label ?? <span className="text-expense">未设置</span>}
+                {s.supplier_party_id
+                  ? ` · 供应商 ${data.suppliers.find((x) => x.party_id === s.supplier_party_id)?.name ?? s.supplier_party_id}`
+                  : ""}
+              </>
+            ) : null}
             {s.cookie_from_env ? " · 凭证用服务器默认值" : s.has_cookie ? "" : " · 未配置凭证"}
-            {data.totals.usd ? ` · 累计 ${usdf(data.totals.usd)} / 应收 ${money(data.totals.receivable)}` : ""}
+            {data.totals.usd
+              ? ` · 累计 ${usdf(data.totals.usd)} / 应收 ${money(data.totals.receivable)} / 应付 ${money(data.totals.payable)} / 利润 ${signed(data.totals.profit)}`
+              : ""}
             {s.last_error ? <span className="text-expense block">{s.last_error}</span> : null}
           </CardDescription>
           <CardAction className="flex gap-2">
@@ -389,6 +401,7 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
         onOpenChange={setSiteOpen}
         site={s}
         customers={customers}
+        suppliers={suppliers}
         onSave={(body) => run(() => put<KeyView>(`/projects/${id}/key/site`, body), "已保存")}
       />
       <PrefixDialog
@@ -418,12 +431,14 @@ function SiteDialog({
   onOpenChange,
   site,
   customers,
+  suppliers,
   onSave,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   site: KeyView["site"];
   customers: { id: number; name: string }[];
+  suppliers: { id: number; name: string }[];
   onSave: SaveFn;
 }) {
   return (
@@ -433,7 +448,7 @@ function SiteDialog({
       title="台子设置"
       description={site.bill_mode === "station" ? "包台子只读用量日志汇总，不会改动台子" : "只读访问台子的渠道列表（GET），不会改动台子"}
     >
-      <SiteForm site={site} customers={customers} onSave={onSave} onDone={() => onOpenChange(false)} />
+      <SiteForm site={site} customers={customers} suppliers={suppliers} onSave={onSave} onDone={() => onOpenChange(false)} />
     </ResponsiveDialog>
   );
 }
@@ -441,11 +456,13 @@ function SiteDialog({
 function SiteForm({
   site,
   customers,
+  suppliers,
   onSave,
   onDone,
 }: {
   site: KeyView["site"];
   customers: { id: number; name: string }[];
+  suppliers: { id: number; name: string }[];
   onSave: SaveFn;
   onDone: () => void;
 }) {
@@ -457,6 +474,9 @@ function SiteForm({
   const [mode, setMode] = useState<"prefix" | "station">(site.bill_mode || "prefix");
   const [fromDate, setFromDate] = useState(site.from_date || "");
   const [cust, setCust] = useState(site.customer_party_id ? String(site.customer_party_id) : "");
+  const [supplier, setSupplier] = useState(site.supplier_party_id ? String(site.supplier_party_id) : "none");
+  const [costMode, setCostMode] = useState<PriceMode>(site.cost?.mode ?? "discount");
+  const [costValue, setCostValue] = useState(site.cost ? String(site.cost.value) : "");
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const body: Record<string, unknown> = {
@@ -468,6 +488,11 @@ function SiteForm({
       from_date: fromDate,
       customer_party_id: cust ? Number(cust) : null,
     };
+    if (mode === "station") {
+      body.supplier_party_id = supplier === "none" ? null : Number(supplier);
+      body.cost_mode = costMode;
+      body.cost_value = costValue.trim() ? Number(costValue) : "";
+    }
     if (cookie.trim()) body.cookie = cookie.trim();
     if (await onSave(body)) onDone();
   };
@@ -494,11 +519,51 @@ function SiteForm({
         </p>
       </div>
       {mode === "station" ? (
-        <div className="space-y-2">
-          <Label>起始日期</Label>
-          <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
-          <p className="text-muted-foreground text-xs">这一天及以后的消耗算我们的，之前的不计</p>
-        </div>
+        <>
+          <div className="space-y-2">
+            <Label>起始日期</Label>
+            <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+            <p className="text-muted-foreground text-xs">这一天及以后的消耗算我们的，之前的不计</p>
+          </div>
+          <div className="space-y-2">
+            <Label>我们的成本</Label>
+            <div className="grid grid-cols-[7rem_1fr] gap-2">
+              <Select value={costMode} onValueChange={(v) => setCostMode(v as PriceMode)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="discount">折扣 ×</SelectItem>
+                  <SelectItem value="cny">¥ / 刀</SelectItem>
+                </SelectContent>
+              </Select>
+              <Input
+                inputMode="decimal"
+                value={costValue}
+                onChange={(e) => setCostValue(e.target.value)}
+                placeholder={costMode === "cny" ? "如 3.5" : "如 0.5"}
+              />
+            </div>
+            <p className="text-muted-foreground text-xs">应付 = 台子总消耗 × 成本。留空则不算应付</p>
+          </div>
+          <div className="space-y-2">
+            <Label>成本挂到供应商</Label>
+            <Select value={supplier} onValueChange={setSupplier}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder={suppliers.length ? "可选" : "先在「供应商」页添加"} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">不挂往来（只在本页算利润）</SelectItem>
+                {suppliers.map((x) => (
+                  <SelectItem key={x.id} value={String(x.id)}>
+                    {x.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-muted-foreground text-xs">选了才会把应付写入该供应商的往来</p>
+          </div>
+        </>
       ) : null}
       <div className="space-y-2">
         <Label>甲方（本项目的客户）</Label>
@@ -684,7 +749,7 @@ function PriceForm({
   onSave: (body: PriceBody) => Promise<boolean>;
   onDone: () => void;
 }) {
-  const tiered = target.prefixId !== 0;
+  const tiered = target.prefixId > 0;
   const [rows, setRows] = useState<PriceRow[]>(() =>
     ["", ...new Set([...groups, ...target.prices.map((p) => p.grp)].filter(Boolean))].map((g) => {
       const p = target.prices.find((x) => x.grp === g);

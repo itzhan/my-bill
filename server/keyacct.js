@@ -1,7 +1,8 @@
 // 上 key 项目：甲方给一个 new-api 台子。两种计费：
 // - prefix（默认）：各供应商把 key 上成渠道，渠道名以前缀开头。定时抓 used_quota 做差得到每日消耗。
 //   供应商应付 = Σ 消耗 × 前缀价格；甲方应收 = Σ 消耗 × 分组价格。
-// - station（包台子）：不看前缀，按 /api/log/stat 取某起始日及以后的台子总消耗，甲方按默认价计应收。
+// - station（包台子）：不看前缀，按 /api/log/stat 取某起始日及以后的台子总消耗；
+//   甲方应收 = 消耗 × 甲方价，我们的成本 / 应付 = 消耗 × 成本价（可挂到一个供应商）。
 // 价格两种：discount 折扣（美金 × 折扣 × 汇率）/ cny 人民币单价（美金 × 每刀多少元）。
 // 结果按天写成往来记录（party_records，source = 'key'，幂等），实付 / 实收沿用往来里的记录。
 'use strict';
@@ -11,6 +12,7 @@ const LOOP_MS = 5 * 60_000;
 const PAGE_SIZE = 100;
 const DEFAULT_BASE = 'https://ethanplum.com';
 const DEFAULT_QPU = 500000; // new-api 默认 500000 额度 = $1
+const STATION_COST = -1; // key_prices.prefix_id：包台子成本价（甲方是 0）
 
 const str = (v, max = 500) => String(v ?? '').trim().slice(0, max);
 const r2 = (n) => Math.round(n * 100) / 100;
@@ -63,6 +65,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
   // 包台子：不按前缀，按台子总消耗从 from_date 起计费
   try { db.exec("ALTER TABLE key_sites ADD COLUMN bill_mode TEXT NOT NULL DEFAULT 'prefix'"); } catch { /* 已有该列 */ }
   try { db.exec("ALTER TABLE key_sites ADD COLUMN from_date TEXT NOT NULL DEFAULT ''"); } catch { /* 已有该列 */ }
+  try { db.exec('ALTER TABLE key_sites ADD COLUMN supplier_party_id INTEGER REFERENCES parties(id) ON DELETE SET NULL'); } catch { /* 已有该列 */ }
   db.exec(`
     CREATE TABLE IF NOT EXISTS key_station_usage (
       project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, date TEXT NOT NULL,
@@ -315,7 +318,10 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     for (const r of q.stationUsage.all(projectId)) {
       if (from && r.date < from) continue;
       if (!(r.quota > 0)) continue;
-      out.push({ date: r.date, opening: false, prefix: null, grp: '', usd: r.quota / qpu });
+      out.push({
+        date: r.date, opening: false, grp: '', usd: r.quota / qpu,
+        prefix: { id: STATION_COST, party_id: Number(s.supplier_party_id) || 0, prefix: '*' },
+      });
     }
     return out;
   }
@@ -438,13 +444,14 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
       d.usd += b.usd; d.payable += pay; d.receivable += rec; daily.set(dk, d);
     }
     const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === 'number' ? (k.endsWith('usd') ? r4(v) : r2(v)) : v]));
-    const supplierIds = [...new Set(prefixes.map((k) => k.party_id))];
+    const supplierIds = isStation(s) && s.supplier_party_id ? [s.supplier_party_id] : [...new Set(prefixes.map((k) => k.party_id))];
     const priceView = (pr) => (pr ? { mode: pr.mode, value: pr.value, tiers: tiersOf(pr), date_tiers: dateTiersOf(pr), label: priceLabel(pr) } : null);
     const cookie = cookieOf(s);
     return {
       site: {
         base_url: s.base_url, effective_base: baseOf(s), user_id: s.user_id, quota_per_usd: qpuOf(s), customer_party_id: s.customer_party_id, groups: s.groups || '',
         bill_mode: isStation(s) ? 'station' : 'prefix', from_date: s.from_date || '',
+        supplier_party_id: s.supplier_party_id || null, cost: priceView(price(STATION_COST, '')),
         has_cookie: !!s.cookie, cookie_from_env: !s.cookie && !!cookie, cookie_masked: cookie ? `${cookie.slice(0, 10)}…（${cookie.length} 字符）` : '',
         last_sync_at: s.last_sync_at, last_error: s.last_error, interval_min: LOOP_MS / 60000,
       },
@@ -495,10 +502,26 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     let fromDate = b.from_date === undefined ? (s.from_date || '') : str(b.from_date, 10);
     if (fromDate && !/^\d{4}-\d{2}-\d{2}$/.test(fromDate)) throw new HttpError(400, '起始日期格式为 YYYY-MM-DD');
     if (billMode === 'station' && !fromDate) throw new HttpError(400, '包台子请填写起始日期');
+    let supplier = s.supplier_party_id || null;
+    if (b.supplier_party_id !== undefined) {
+      supplier = b.supplier_party_id ? Number(b.supplier_party_id) : null;
+      const pa = supplier && q.party.get(supplier);
+      if (supplier && (!pa || pa.kind !== 'supplier')) throw new HttpError(400, '请选择供应商');
+    }
+    if (b.cost_value !== undefined) {
+      if (b.cost_value === null || b.cost_value === '') q.delPrice.run(p.id, STATION_COST, '');
+      else {
+        const mode = b.cost_mode === 'cny' ? 'cny' : 'discount';
+        const value = Number(b.cost_value);
+        if (!(value > 0) || value > 100) throw new HttpError(400, '成本必须是 0–100 之间的数字');
+        const ex = q.prices.all(p.id).find((pr) => pr.prefix_id === STATION_COST && pr.grp === '');
+        q.putPrice.run(p.id, STATION_COST, '', mode, r4(value), ex ? ex.tiers : '', ex ? ex.date_tiers : '');
+      }
+    }
     const cookie = b.cookie === undefined ? s.cookie : str(b.cookie, 4000);
     const userId = b.user_id === undefined ? s.user_id : str(b.user_id, 20) || '2';
-    db.prepare('UPDATE key_sites SET base_url = ?, cookie = ?, user_id = ?, quota_per_usd = ?, customer_party_id = ?, groups = ?, bill_mode = ?, from_date = ? WHERE project_id = ?')
-      .run(base, cookie, userId, qpu, cust, groups, billMode, fromDate, p.id);
+    db.prepare('UPDATE key_sites SET base_url = ?, cookie = ?, user_id = ?, quota_per_usd = ?, customer_party_id = ?, groups = ?, bill_mode = ?, from_date = ?, supplier_party_id = ? WHERE project_id = ?')
+      .run(base, cookie, userId, qpu, cust, groups, billMode, fromDate, supplier, p.id);
     const st = db.prepare('SELECT s.id FROM stations s JOIN projects p ON p.station_id = s.id WHERE p.id = ?').get(p.id);
     if (st) db.prepare('UPDATE stations SET base_url = ?, user_id = ?, quota_per_usd = ?, credential = ? WHERE id = ?').run(base || '', userId, qpu, cookie || '', st.id);
     accrue(p.id);
@@ -547,7 +570,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     const p = keyProject(req.params.id);
     const b = req.body || {};
     const prefixId = Number(b.prefix_id) || 0;
-    if (prefixId) { const k = q.prefix.get(prefixId); if (!k || k.project_id !== p.id) throw new HttpError(400, '前缀不存在'); }
+    if (prefixId && prefixId !== STATION_COST) { const k = q.prefix.get(prefixId); if (!k || k.project_id !== p.id) throw new HttpError(400, '前缀不存在'); }
     const grp = str(b.grp, 100);
     if (b.value === null || b.value === '' || b.value === undefined) q.delPrice.run(p.id, prefixId, grp);
     else {
