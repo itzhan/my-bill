@@ -61,7 +61,7 @@ export type WalletDraft = {
   custom: boolean;
   custom_ratio: string;
   consume_ratio: string;
-  consume_rates: { from_date: string; ratio: string }[];
+  consume_rates: { from_date: string; custom_ratio: string; ratio: string }[];
   used_adjust: string;
   access_token: string;
   token_user_id: string;
@@ -97,9 +97,10 @@ export function walletDraftError(v: WalletDraft, requireKey: boolean) {
   if (v.custom && v.consume_ratio.trim() && !(Number(v.consume_ratio) > 0)) return "消耗倍率必须大于 0";
   if (v.custom) {
     for (const row of v.consume_rates) {
-      if (!row.from_date && !row.ratio.trim()) continue;
+      if (!row.from_date && !row.ratio.trim() && !row.custom_ratio.trim()) continue;
       if (!/^\d{4}-\d{2}-\d{2}$/.test(row.from_date)) return "分段日期需为 YYYY-MM-DD";
-      if (!(Number(row.ratio) > 0)) return "分段倍率必须大于 0";
+      if (!(Number(row.custom_ratio) > 0)) return "分段充值倍率必须大于 0";
+      if (!(Number(row.ratio) > 0)) return "分段消耗倍率必须大于 0";
     }
   }
   return null;
@@ -114,8 +115,8 @@ export const walletBody = (v: WalletDraft) => ({
   consume_ratio: v.custom ? (Number(v.consume_ratio) > 0 ? Number(v.consume_ratio) : 1) : null,
   consume_rates: v.custom
     ? v.consume_rates
-        .filter((r) => r.from_date && Number(r.ratio) > 0)
-        .map((r) => ({ from_date: r.from_date, ratio: Number(r.ratio) }))
+        .filter((r) => r.from_date && Number(r.custom_ratio) > 0 && Number(r.ratio) > 0)
+        .map((r) => ({ from_date: r.from_date, custom_ratio: Number(r.custom_ratio), ratio: Number(r.ratio) }))
     : [],
   used_adjust: Number(v.used_adjust) > 0 ? Number(v.used_adjust) : 0,
   insecure: v.insecure,
@@ -246,25 +247,33 @@ export function WalletFields({
                 ) : null}
               </div>
               <p className="text-muted-foreground pl-[5.5rem] text-xs">
-                实际消费 = 站点消费 × 消耗倍率；不填默认 1（按站点消费原样计）。下面可按日期改倍率，那天之前仍用这个默认
+                实际消费 = 站点消费 × 消耗倍率；不填默认 1（按站点消费原样计）。下面可按日期同时改充值和消耗倍率，那天之前仍用上面的默认
               </p>
             </div>
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <p className="text-muted-foreground text-xs">从某日起用新倍率</p>
+                <p className="text-muted-foreground text-xs">从某日起用新倍率（充值、消耗都要填）</p>
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
                   className="h-7 px-2"
-                  onClick={() => setV({ ...v, consume_rates: [...v.consume_rates, { from_date: "", ratio: "" }] })}
+                  onClick={() =>
+                    setV({
+                      ...v,
+                      consume_rates: [
+                        ...v.consume_rates,
+                        { from_date: "", custom_ratio: v.custom_ratio, ratio: v.consume_ratio },
+                      ],
+                    })
+                  }
                 >
                   <Plus className="size-3.5" />
                   添加
                 </Button>
               </div>
               {v.consume_rates.map((row, i) => (
-                <div key={i} className="flex items-center gap-2">
+                <div key={i} className="flex flex-wrap items-center gap-2">
                   <Input
                     type="date"
                     className="w-40"
@@ -276,10 +285,23 @@ export function WalletFields({
                     }}
                   />
                   <span className="text-muted-foreground shrink-0 text-xs">起</span>
+                  <Label className="text-muted-foreground shrink-0 text-xs">充</Label>
                   <Input
                     inputMode="decimal"
-                    className="w-24"
-                    placeholder="新倍率"
+                    className="w-20"
+                    placeholder="充值"
+                    value={row.custom_ratio}
+                    onChange={(e) => {
+                      const consume_rates = v.consume_rates.slice();
+                      consume_rates[i] = { ...row, custom_ratio: e.target.value };
+                      setV({ ...v, consume_rates });
+                    }}
+                  />
+                  <Label className="text-muted-foreground shrink-0 text-xs">耗</Label>
+                  <Input
+                    inputMode="decimal"
+                    className="w-20"
+                    placeholder="消耗"
                     value={row.ratio}
                     onChange={(e) => {
                       const consume_rates = v.consume_rates.slice();
@@ -380,7 +402,11 @@ function WalletDialog({
             custom: wallet.custom,
             custom_ratio: wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
             consume_ratio: wallet.consume_ratio == null ? "" : String(wallet.consume_ratio),
-            consume_rates: (wallet.consume_rates ?? []).map((r) => ({ from_date: r.from_date, ratio: String(r.ratio) })),
+            consume_rates: (wallet.consume_rates ?? []).map((r) => ({
+              from_date: r.from_date,
+              custom_ratio: r.custom_ratio != null ? String(r.custom_ratio) : wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
+              ratio: String(r.ratio),
+            })),
             used_adjust: wallet.used_adjust ? String(wallet.used_adjust) : "",
             access_token: "",
             token_user_id: wallet.token_user_id ?? "",
@@ -612,7 +638,10 @@ export function PartyWallets({ party }: { party: Party }) {
                             ? w.consume_rates
                                 .slice()
                                 .sort((a, b) => (a.from_date < b.from_date ? -1 : 1))
-                                .map((r) => ` · ${r.from_date.slice(5)}起 × ${+r.ratio}`)
+                                .map((r) => {
+                                  const cr = r.custom_ratio != null ? +r.custom_ratio : null;
+                                  return ` · ${r.from_date.slice(5)}起 充${cr ?? "—"}/耗${+r.ratio}`;
+                                })
                                 .join("")
                             : ""}
                         </span>

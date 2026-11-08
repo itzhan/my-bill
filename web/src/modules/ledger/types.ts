@@ -235,7 +235,7 @@ export type PartyWallet = {
   custom: boolean;
   custom_ratio: number | null;
   consume_ratio: number | null;
-  consume_rates?: { from_date: string; ratio: number }[];
+  consume_rates?: { from_date: string; ratio: number; custom_ratio?: number | null }[];
   enabled: boolean;
   has_key: boolean;
   key_masked: string;

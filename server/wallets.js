@@ -27,6 +27,12 @@ function consumeRatioOn(w, date, segs) {
   for (const s of segs || []) if (s.from_date && s.from_date <= date) r = Number(s.ratio) || r;
   return r;
 }
+function customRatioOn(w, date, segs) {
+  if (!w.custom) return 1;
+  let r = num(w.custom_ratio) > 0 ? num(w.custom_ratio) : 1;
+  for (const s of segs || []) if (s.from_date && s.from_date <= date && Number(s.custom_ratio) > 0) r = Number(s.custom_ratio);
+  return r;
+}
 
 // ---------- 抓取 ----------
 const baseOf = (u) => String(u || "").trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
@@ -492,30 +498,35 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
       PRIMARY KEY (wallet_id, from_date)
     );
   `);
-  const qRatesOf = db.prepare('SELECT from_date, ratio FROM wallet_consume_rates WHERE wallet_id = ? ORDER BY from_date');
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('wallet_consume_rates') WHERE name = 'custom_ratio'").get()) {
+    db.exec('ALTER TABLE wallet_consume_rates ADD COLUMN custom_ratio REAL');
+  }
+  const qRatesOf = db.prepare('SELECT from_date, ratio, custom_ratio FROM wallet_consume_rates WHERE wallet_id = ? ORDER BY from_date');
   const qDelRates = db.prepare('DELETE FROM wallet_consume_rates WHERE wallet_id = ?');
-  const qInsRate = db.prepare('INSERT INTO wallet_consume_rates (wallet_id, from_date, ratio) VALUES (?, ?, ?)');
+  const qInsRate = db.prepare('INSERT INTO wallet_consume_rates (wallet_id, from_date, ratio, custom_ratio) VALUES (?, ?, ?, ?)');
   function parseConsumeRates(list) {
     if (list == null) return null;
-    if (!Array.isArray(list)) throw new HttpError(400, '消耗倍率按日期格式不对');
+    if (!Array.isArray(list)) throw new HttpError(400, '倍率按日期格式不对');
     const out = [];
     const seen = new Set();
     for (const row of list) {
       const from = String((row && row.from_date) || '').slice(0, 10);
       const ratio = num(row && row.ratio);
-      if (!from && !(ratio > 0)) continue;
+      const custom = num(row && row.custom_ratio);
+      if (!from && !(ratio > 0) && !(custom > 0)) continue;
       if (!RE_DATE.test(from)) throw new HttpError(400, '分段日期需为 YYYY-MM-DD');
-      if (!(ratio > 0)) throw new HttpError(400, '分段倍率必须大于 0');
+      if (!(custom > 0)) throw new HttpError(400, '分段充值倍率必须大于 0');
+      if (!(ratio > 0)) throw new HttpError(400, '分段消耗倍率必须大于 0');
       if (seen.has(from)) throw new HttpError(400, `同一天不能设两个倍率（${from}）`);
       seen.add(from);
-      out.push({ from_date: from, ratio: round(ratio, 4) });
+      out.push({ from_date: from, ratio: round(ratio, 4), custom_ratio: round(custom, 4) });
     }
     out.sort((a, b) => (a.from_date < b.from_date ? -1 : 1));
     return out;
   }
   function replaceConsumeRates(walletId, rows) {
     qDelRates.run(walletId);
-    for (const r of rows) qInsRate.run(walletId, r.from_date, r.ratio);
+    for (const r of rows) qInsRate.run(walletId, r.from_date, r.ratio, r.custom_ratio);
   }
   const getOne = db.prepare('SELECT * FROM party_wallets WHERE id = ?');
   const ofParty = db.prepare('SELECT * FROM party_wallets WHERE party_id = ? ORDER BY id');
@@ -580,8 +591,11 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
       if (!w.api_key && !(w.platform === 'newapi' && w.access_token)) throw new Error('还没有填 API Key');
       const r = await fetchWallet(w);
       const segs = qRatesOf.all(id);
-      const crToday = consumeRatioOn(w, walletToday(), segs);
+      const today = walletToday();
+      const crToday = consumeRatioOn(w, today, segs);
       const todayActual = r.today == null || !w.custom ? r.todayActual : round(r.today * crToday, 4);
+      const actual = r.wallet == null || !w.custom ? r.actual : round(r.wallet * customRatioOn(w, today, segs), 4);
+      const lastRatio = w.custom ? customRatioOn(w, today, segs) : r.ratio;
       // 站点报的累计消费减掉手工扣减（多算的部分），不能减成负数
       const adjust = num(w.used_adjust) || 0;
       let usedActual = r.usedActual === null ? null : Math.max(0, round(r.usedActual - adjust, 4));
@@ -602,7 +616,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
         } catch { /* 按天没抓到就仍用当前默认倍率 × 累计 */ }
       }
       db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_today = ?, last_today_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
-        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, usedActual, r.today, todayActual, r.warning, t, id);
+        .run(r.wallet, r.kind, lastRatio, r.source, actual, r.used, usedActual, r.today, todayActual, r.warning, t, id);
       // 批量试出来的账号密码存下来，以后自动刷新直接用
       if (r.loginUsed && (r.loginUsed.user !== w.login_user || r.loginUsed.pass !== w.login_pass)) {
         db.prepare('UPDATE party_wallets SET login_user = ?, login_pass = ? WHERE id = ?').run(r.loginUsed.user, r.loginUsed.pass, id);
