@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 
 import { del, get, patch, post, put } from "../api";
@@ -37,6 +38,8 @@ type KeyView = {
     quota_per_usd: number;
     customer_party_id: number | null;
     groups: string;
+    bill_mode: "prefix" | "station";
+    from_date: string;
     has_cookie: boolean;
     cookie_from_env: boolean;
     cookie_masked: string;
@@ -73,7 +76,7 @@ type KeyView = {
   daily: { date: string; opening: boolean; usd: number; payable: number; receivable: number; profit: number }[];
 };
 
-const grpName = (g: string) => g || "（无分组）";
+const grpName = (g: string, station = false) => g || (station ? "台子总计" : "（无分组）");
 
 // 上 key 项目：台子设置 + 供应商前缀与价格 + 甲方分组价格 + 结算 + 每日明细
 export function KeySection({ detail }: { detail: ProjectDetail }) {
@@ -140,13 +143,19 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center gap-2">
             台子 {s.effective_base}
+            {s.bill_mode === "station" ? <Badge variant="secondary">包台子</Badge> : null}
             {s.last_error ? <Badge variant="destructive">同步失败</Badge> : null}
           </CardTitle>
           <CardDescription>
             {s.last_sync_at ? `上次同步 ${relTime(s.last_sync_at)}` : "尚未同步"} · 每 {s.interval_min} 分钟自动同步 ·
-            {s.groups ? ` 只统计 ${s.groups} 分组 ·` : ""}
+            {s.bill_mode === "station"
+              ? `按台子总消耗计费${s.from_date ? `（${s.from_date} 起）` : "（未设起始日）"} · `
+              : s.groups
+                ? ` 只统计 ${s.groups} 分组 ·`
+                : ""}
             甲方 {custName ?? <span className="text-expense">未设置</span>}
-            {s.cookie_from_env ? " · Cookie 用服务器默认值" : s.has_cookie ? "" : " · 未配置 Cookie"}
+            {s.cookie_from_env ? " · 凭证用服务器默认值" : s.has_cookie ? "" : " · 未配置凭证"}
+            {data.totals.usd ? ` · 累计 ${usdf(data.totals.usd)} / 应收 ${money(data.totals.receivable)}` : ""}
             {s.last_error ? <span className="text-expense block">{s.last_error}</span> : null}
           </CardDescription>
           <CardAction className="flex gap-2">
@@ -161,7 +170,8 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
         </CardHeader>
       </Card>
 
-      {/* 供应商前缀 */}
+      {/* 供应商前缀：包台子不按前缀 */}
+      {s.bill_mode === "station" ? null : (
       <Card>
         <CardHeader>
           <CardTitle>供应商前缀</CardTitle>
@@ -268,13 +278,16 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
           </Table>
         </CardContent>
       </Card>
+      )}
 
       {/* 甲方分组价格 */}
       <Card>
         <CardHeader>
           <CardTitle>甲方分组价格</CardTitle>
           <CardDescription>
-            应收 = 各分组消耗 × 甲方给的价格。只统计我们供应商前缀下的渠道
+            {s.bill_mode === "station"
+              ? "包台子：应收 = 起始日及以后台子总消耗 × 甲方价格，不按前缀、不按分组"
+              : "应收 = 各分组消耗 × 甲方给的价格。只统计我们供应商前缀下的渠道"}
             {s.customer_party_id ? null : (
               <span className="text-expense block">
                 {customers.length
@@ -309,22 +322,24 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                 <TableHead>甲方价格</TableHead>
                 <TableHead className="text-right">累计消耗</TableHead>
                 <TableHead className="text-right">今日</TableHead>
+                <TableHead className="text-right">应收</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {data.customer.groups.length ? (
                 data.customer.groups.map((g) => (
                   <TableRow key={g.grp}>
-                    <TableCell className="font-medium">{grpName(g.grp)}</TableCell>
+                    <TableCell className="font-medium">{grpName(g.grp, s.bill_mode === "station")}</TableCell>
                     <TableCell className={cn(!g.price && "text-expense")}>{g.price?.label ?? "未定价"}</TableCell>
                     <TableCell className="text-right tabular-nums">{usdf(g.usd)}</TableCell>
                     <TableCell className="text-right tabular-nums">{usdf(g.today_usd)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{money(g.receivable)}</TableCell>
                   </TableRow>
                 ))
               ) : (
                 <TableRow>
-                  <TableCell colSpan={4} className="text-muted-foreground py-8 text-center">
-                    同步到渠道后会列出各分组
+                  <TableCell colSpan={5} className="text-muted-foreground py-8 text-center">
+                    {s.bill_mode === "station" ? "同步后按台子总消耗计费" : "同步到渠道后会列出各分组"}
                   </TableCell>
                 </TableRow>
               )}
@@ -337,7 +352,11 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
       <Card>
         <CardHeader>
           <CardTitle>每日明细</CardTitle>
-          <CardDescription>期初 = 第一次同步时渠道已有的累计额度；之后按每次同步的增量记到当天</CardDescription>
+          <CardDescription>
+            {s.bill_mode === "station"
+              ? `按台子用量日志汇总，只计 ${s.from_date || "起始日"} 及以后`
+              : "期初 = 第一次同步时渠道已有的累计额度；之后按每次同步的增量记到当天"}
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
@@ -345,6 +364,7 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
               <TableRow>
                 <TableHead>日期</TableHead>
                 <TableHead className="text-right">消耗</TableHead>
+                <TableHead className="text-right">应收</TableHead>
                 <TableHead className="text-right">应付</TableHead>
                 <TableHead className="text-right">利润</TableHead>
               </TableRow>
@@ -354,6 +374,7 @@ export function KeySection({ detail }: { detail: ProjectDetail }) {
                 <TableRow key={d.date}>
                   <TableCell>{d.date}</TableCell>
                   <TableCell className="text-right tabular-nums">{usdf(d.usd)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{money(d.receivable)}</TableCell>
                   <TableCell className="text-right tabular-nums">{money(d.payable)}</TableCell>
                   <TableCell className={cn("text-right tabular-nums", d.profit < 0 && "text-expense")}>{signed(d.profit)}</TableCell>
                 </TableRow>
@@ -410,7 +431,7 @@ function SiteDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="台子设置"
-      description="只读访问台子的渠道列表（GET），不会改动台子"
+      description={site.bill_mode === "station" ? "包台子只读用量日志汇总，不会改动台子" : "只读访问台子的渠道列表（GET），不会改动台子"}
     >
       <SiteForm site={site} customers={customers} onSave={onSave} onDone={() => onOpenChange(false)} />
     </ResponsiveDialog>
@@ -433,6 +454,8 @@ function SiteForm({
   const [user, setUser] = useState(site.user_id);
   const [qpu, setQpu] = useState(String(site.quota_per_usd));
   const [groups, setGroups] = useState(site.groups);
+  const [mode, setMode] = useState<"prefix" | "station">(site.bill_mode || "prefix");
+  const [fromDate, setFromDate] = useState(site.from_date || "");
   const [cust, setCust] = useState(site.customer_party_id ? String(site.customer_party_id) : "");
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -441,6 +464,8 @@ function SiteForm({
       user_id: user,
       quota_per_usd: Number(qpu),
       groups,
+      bill_mode: mode,
+      from_date: fromDate,
       customer_party_id: cust ? Number(cust) : null,
     };
     if (cookie.trim()) body.cookie = cookie.trim();
@@ -448,6 +473,33 @@ function SiteForm({
   };
   return (
     <form onSubmit={submit} className="space-y-4">
+      <div className="space-y-2">
+        <Label>计费方式</Label>
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          value={mode}
+          onValueChange={(v) => v && setMode(v as "prefix" | "station")}
+          className="w-full"
+        >
+          <ToggleGroupItem value="prefix" className="flex-1 data-[state=on]:font-semibold">
+            上 key 前缀
+          </ToggleGroupItem>
+          <ToggleGroupItem value="station" className="flex-1 data-[state=on]:font-semibold">
+            包台子
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <p className="text-muted-foreground text-xs">
+          {mode === "station" ? "不看渠道前缀，只统计起始日及以后台子总消耗" : "按供应商前缀匹配渠道消耗"}
+        </p>
+      </div>
+      {mode === "station" ? (
+        <div className="space-y-2">
+          <Label>起始日期</Label>
+          <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+          <p className="text-muted-foreground text-xs">这一天及以后的消耗算我们的，之前的不计</p>
+        </div>
+      ) : null}
       <div className="space-y-2">
         <Label>甲方（本项目的客户）</Label>
         <Select value={cust} onValueChange={setCust}>
@@ -463,27 +515,29 @@ function SiteForm({
           </SelectContent>
         </Select>
       </div>
-      <div className="space-y-2">
-        <Label>只统计这些分组</Label>
-        <Input value={groups} onChange={(e) => setGroups(e.target.value)} placeholder="留空 = 全部分组，例如 azure" />
-        <p className="text-muted-foreground text-xs">
-          多个用逗号隔开，按开头匹配（azure 也包含 azure_eus）。其他分组的渠道不计入本项目，适合 Azure / Vertex
-          分项目记账
-        </p>
-      </div>
+      {mode === "station" ? null : (
+        <div className="space-y-2">
+          <Label>只统计这些分组</Label>
+          <Input value={groups} onChange={(e) => setGroups(e.target.value)} placeholder="留空 = 全部分组，例如 azure" />
+          <p className="text-muted-foreground text-xs">
+            多个用逗号隔开，按开头匹配（azure 也包含 azure_eus）。其他分组的渠道不计入本项目，适合 Azure / Vertex
+            分项目记账
+          </p>
+        </div>
+      )}
       <div className="space-y-2">
         <Label>台子地址</Label>
         <Input value={base} onChange={(e) => setBase(e.target.value)} placeholder={site.effective_base} />
       </div>
       <div className="space-y-2">
-        <Label>Cookie</Label>
+        <Label>凭证</Label>
         <Input
           value={cookie}
           onChange={(e) => setCookie(e.target.value)}
-          placeholder={site.cookie_masked ? `当前：${site.cookie_masked}，留空不改` : "session=…"}
+          placeholder={site.cookie_masked ? `当前：${site.cookie_masked}，留空不改` : "系统访问令牌或 Cookie"}
         />
         <p className="text-muted-foreground text-xs">
-          从浏览器登录台子后复制请求里的 Cookie；过期后同步会失败，重新粘贴即可
+          新版台子填个人设置里的系统访问令牌；老版可粘 Cookie。过期后同步会失败，重新粘贴即可
         </p>
       </div>
       <div className="grid grid-cols-2 gap-3">

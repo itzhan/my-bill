@@ -117,7 +117,7 @@ function StationDialog({
           <Input placeholder="https://" value={d.base_url} onChange={(e) => set("base_url")(e.target.value)} />
         </div>
         <div className="space-y-2">
-          <Label>{d.type === "relay" ? "管理密钥" : "Cookie"}</Label>
+          <Label>{d.type === "relay" ? "管理密钥" : "凭证（Cookie 或系统访问令牌）"}</Label>
           <Input
             type="password"
             autoComplete="off"

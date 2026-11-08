@@ -1,7 +1,7 @@
-// 上 key 项目：甲方给一个 new-api 台子，各供应商把 key 上成渠道，渠道名以供应商的前缀开头（如 ls-xo-1019-148）。
-// 定时按前缀抓台子渠道的累计 used_quota（只读 GET），按渠道存快照、做差得到每日消耗：
-// - 供应商应付 = Σ 消耗 × 前缀价格（可按分组覆盖）
-// - 甲方应收   = Σ 消耗 × 分组价格
+// 上 key 项目：甲方给一个 new-api 台子。两种计费：
+// - prefix（默认）：各供应商把 key 上成渠道，渠道名以前缀开头。定时抓 used_quota 做差得到每日消耗。
+//   供应商应付 = Σ 消耗 × 前缀价格；甲方应收 = Σ 消耗 × 分组价格。
+// - station（包台子）：不看前缀，按 /api/log/stat 取某起始日及以后的台子总消耗，甲方按默认价计应收。
 // 价格两种：discount 折扣（美金 × 折扣 × 汇率）/ cny 人民币单价（美金 × 每刀多少元）。
 // 结果按天写成往来记录（party_records，source = 'key'，幂等），实付 / 实收沿用往来里的记录。
 'use strict';
@@ -60,6 +60,15 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
   try { db.exec("ALTER TABLE key_prices ADD COLUMN date_tiers TEXT NOT NULL DEFAULT ''"); } catch { /* 已有该列 */ }
   // 只统计哪些分组（逗号分隔，空 = 全部）；按开头匹配，azure 也包含 azure_eus 等。用于 Azure / Vertex 项目各算各的
   try { db.exec("ALTER TABLE key_sites ADD COLUMN groups TEXT NOT NULL DEFAULT ''"); } catch { /* 已有该列 */ }
+  // 包台子：不按前缀，按台子总消耗从 from_date 起计费
+  try { db.exec("ALTER TABLE key_sites ADD COLUMN bill_mode TEXT NOT NULL DEFAULT 'prefix'"); } catch { /* 已有该列 */ }
+  try { db.exec("ALTER TABLE key_sites ADD COLUMN from_date TEXT NOT NULL DEFAULT ''"); } catch { /* 已有该列 */ }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS key_station_usage (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, date TEXT NOT NULL,
+      quota INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (project_id, date)
+    )
+  `);
 
   const q = {
     project: db.prepare('SELECT * FROM projects WHERE id = ?'),
@@ -91,6 +100,8 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     insRecord: db.prepare("INSERT INTO party_records (party_id, kind, amount, currency, rate, date, note, source, external_ref, created_at, project_id) VALUES (?, 'due', ?, ?, ?, ?, ?, 'key', ?, ?, ?)"),
     updRecord: db.prepare('UPDATE party_records SET amount = ?, currency = ?, rate = ?, date = ?, note = ?, external_ref = ?, project_id = ? WHERE id = ?'),
     delRecord: db.prepare('DELETE FROM party_records WHERE id = ?'),
+    stationUsage: db.prepare('SELECT date, quota FROM key_station_usage WHERE project_id = ? ORDER BY date'),
+    putStationUsage: db.prepare('INSERT INTO key_station_usage (project_id, date, quota) VALUES (?, ?, ?) ON CONFLICT(project_id, date) DO UPDATE SET quota = excluded.quota'),
   };
 
   const custOfProject = db.prepare("SELECT id FROM parties WHERE project_id = ? AND kind = 'customer' AND archived = 0");
@@ -107,8 +118,14 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     }
     return s;
   };
-  const cookieOf = (s) => s.cookie || process.env.KEY_NEWAPI_COOKIE || '';
   const baseOf = (s) => (s.base_url || process.env.KEY_NEWAPI_BASE || DEFAULT_BASE).replace(/\/+$/, '');
+  // 默认 Cookie 只给默认台子用；包了别的台子时不能把 ethanplum 的 Cookie 发过去
+  const cookieOf = (s) => {
+    if (s.cookie) return s.cookie;
+    const base = baseOf(s);
+    if (base !== (process.env.KEY_NEWAPI_BASE || DEFAULT_BASE).replace(/\/+$/, '')) return '';
+    return process.env.KEY_NEWAPI_COOKIE || '';
+  };
   const qpuOf = (s) => (Number(s.quota_per_usd) > 0 ? Number(s.quota_per_usd) : DEFAULT_QPU);
   const keyProject = (id) => {
     const p = q.project.get(Number(id));
@@ -118,21 +135,59 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
   };
 
   // ---------- 抓取 ----------
+  // 凭证：Cookie（含 =）或系统访问令牌 / JWT（Bearer）
+  function authHeaders(s) {
+    const cred = cookieOf(s);
+    const headers = { Accept: 'application/json', 'Cache-Control': 'no-store' };
+    if (s.user_id) headers['New-Api-User'] = String(s.user_id);
+    if (!cred) return headers;
+    const raw = cred.replace(/^Bearer\s+/i, '');
+    if (raw.startsWith('eyJ') || (!raw.includes('=') && !raw.includes(';'))) headers.Authorization = `Bearer ${raw}`;
+    else headers.Cookie = cred;
+    return headers;
+  }
+  async function keyGet(s, pathAndQuery) {
+    if (!cookieOf(s)) throw new Error('未配置台子凭证（Cookie 或系统访问令牌）');
+    const res = await fetch(`${baseOf(s)}${pathAndQuery}`, { headers: authHeaders(s), signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const text = await res.text();
+    let d; try { d = JSON.parse(text); } catch { throw new Error(`台子返回 ${res.status}：${text.slice(0, 80)}`); }
+    if (!d.success) throw new Error(`台子返回失败：${str(d.message, 120) || res.status}（凭证可能已过期）`);
+    return d;
+  }
   async function searchChannels(s, keyword) {
-    const cookie = cookieOf(s);
-    if (!cookie) throw new Error('未配置台子 Cookie');
     const out = [];
     for (let p = 1; p <= 200; p++) {
-      const url = `${baseOf(s)}/api/channel/search?keyword=${encodeURIComponent(keyword)}&group=&model=&id_sort=false&tag_mode=false&p=${p}&page_size=${PAGE_SIZE}`;
-      const res = await fetch(url, { headers: { Accept: 'application/json', 'New-Api-User': s.user_id || '2', Cookie: cookie, 'Cache-Control': 'no-store' }, signal: AbortSignal.timeout(TIMEOUT_MS) });
-      const text = await res.text();
-      let d; try { d = JSON.parse(text); } catch { throw new Error(`台子返回 ${res.status}：${text.slice(0, 80)}`); }
-      if (!d.success) throw new Error(`台子返回失败：${str(d.message, 120) || res.status}（Cookie 可能已过期）`);
+      const d = await keyGet(s, `/api/channel/search?keyword=${encodeURIComponent(keyword)}&group=&model=&id_sort=false&tag_mode=false&p=${p}&page_size=${PAGE_SIZE}`);
       const items = (d.data && d.data.items) || [];
       out.push(...items);
       if (!items.length || out.length >= Number(d.data.total || 0)) break;
     }
     return out;
+  }
+  // 上海时区当天 00:00–23:59:59 的 unix 秒（与台子用量日志页一致）
+  function dayUnixRange(date) {
+    const start = Math.floor(Date.parse(`${date}T00:00:00+08:00`) / 1000);
+    if (!Number.isFinite(start)) throw new Error(`日期无效：${date}`);
+    return [start, start + 86400 - 1];
+  }
+  const isStation = (s) => s.bill_mode === 'station';
+  // 包台子：按天调 /api/log/stat 取总消耗。历史日已落库的不再重抓，只刷新今天和昨天。
+  async function syncStationUsage(projectId, s) {
+    const from = s.from_date;
+    if (!from) throw new Error('包台子请设置起始日期');
+    const today = todayKey();
+    if (from > today) return;
+    const have = new Set(q.stationUsage.all(projectId).map((r) => r.date));
+    const yest = addDays(today, -1);
+    const days = [];
+    for (let d = from; d <= today; d = addDays(d, 1)) {
+      if (!have.has(d) || d === today || d === yest) days.push(d);
+    }
+    for (const date of days) {
+      const [start, end] = dayUnixRange(date);
+      const d = await keyGet(s, `/api/log/stat?p=1&page_size=1&type=0&start_timestamp=${start}&end_timestamp=${end}`);
+      q.putStationUsage.run(projectId, date, Math.max(0, Math.round(Number(d.data && d.data.quota) || 0)));
+    }
   }
 
   // 渠道名归到最长匹配的前缀（ls-xo-m-… 归 ls-xo-m，不会算进 ls-xo）
@@ -151,6 +206,12 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     const s = siteOf(projectId);
     const stamp = new Date().toISOString();
     try {
+      if (isStation(s)) {
+        await syncStationUsage(projectId, s);
+        db.prepare("UPDATE key_sites SET last_sync_at = ?, last_error = '' WHERE project_id = ?").run(stamp, projectId);
+        accrue(projectId);
+        return;
+      }
       const prefixes = q.prefixes.all(projectId);
       const fetched = new Map(); // channel_id -> { item, prefix }（按前缀搜，名称再精确过滤）
       for (const k of prefixes) {
@@ -228,6 +289,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     const out = new Map();
     const order = [...bs].sort((a, b) => (a.opening !== b.opening ? (a.opening ? -1 : 1) : a.date.localeCompare(b.date)));
     for (const b of order) {
+      if (!b.prefix) { out.set(b, 0); continue; }
       const pr = atDate(price(b.prefix.id, b.grp), b.date);
       if (!pr) { out.set(b, 0); continue; }
       const k = `${b.prefix.id}|${pr.grp}`;
@@ -245,9 +307,22 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     const all = q.channels.all(s.project_id);
     return gs.length ? all.filter((c) => gs.some((g) => c.grp.startsWith(g))) : all;
   };
+  function stationBuckets(projectId) {
+    const s = siteOf(projectId);
+    const qpu = qpuOf(s);
+    const from = s.from_date || '';
+    const out = [];
+    for (const r of q.stationUsage.all(projectId)) {
+      if (from && r.date < from) continue;
+      if (!(r.quota > 0)) continue;
+      out.push({ date: r.date, opening: false, prefix: null, grp: '', usd: r.quota / qpu });
+    }
+    return out;
+  }
   // 汇总成 桶 = (日期, 是否期初, 前缀, 分组) → 美金
   function buckets(projectId) {
     const s = siteOf(projectId);
+    if (isStation(s)) return stationBuckets(projectId);
     const qpu = qpuOf(s);
     const prefixes = q.prefixes.all(projectId);
     const chans = new Map(scopedChannels(s).map((c) => [c.channel_id, c]));
@@ -283,7 +358,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     for (const b of bs) {
       const tag = b.opening ? `opening:${b.date}` : b.date;
       const ur = rateOf(b.date);
-      put(`key:${projectId}:${b.prefix.party_id}:${tag}`, b.prefix.party_id, b.date, cost.get(b), b.usd, b.opening);
+      if (b.prefix && b.prefix.party_id) put(`key:${projectId}:${b.prefix.party_id}:${tag}`, b.prefix.party_id, b.date, cost.get(b), b.usd, b.opening);
       if (cust) put(`key:${projectId}:${cust.id}:${tag}`, cust.id, b.date, toCny(b.usd, atDate(price(0, b.grp), b.date), ur), b.usd, b.opening);
     }
     let changed = false;
@@ -350,9 +425,11 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
       const pay = cost.get(b);
       const rec = s.customer_party_id ? toCny(b.usd, atDate(price(0, b.grp), b.date), ur) : 0;
       const isToday = !b.opening && b.date === today;
-      const pg = perPrefix.get(b.prefix.id).groups;
-      const g1 = pg.get(b.grp) || { grp: b.grp, usd: 0, today_usd: 0, payable: 0 };
-      g1.usd += b.usd; g1.payable += pay; if (isToday) g1.today_usd += b.usd; pg.set(b.grp, g1);
+      const pg = b.prefix && perPrefix.has(b.prefix.id) ? perPrefix.get(b.prefix.id).groups : null;
+      if (pg) {
+        const g1 = pg.get(b.grp) || { grp: b.grp, usd: 0, today_usd: 0, payable: 0 };
+        g1.usd += b.usd; g1.payable += pay; if (isToday) g1.today_usd += b.usd; pg.set(b.grp, g1);
+      }
       const g2 = groups.get(b.grp) || { grp: b.grp, usd: 0, today_usd: 0, receivable: 0 };
       g2.usd += b.usd; g2.receivable += rec; if (isToday) g2.today_usd += b.usd; groups.set(b.grp, g2);
       totals.usd += b.usd; totals.payable += pay; totals.receivable += rec; if (isToday) totals.today_usd += b.usd;
@@ -367,6 +444,7 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
     return {
       site: {
         base_url: s.base_url, effective_base: baseOf(s), user_id: s.user_id, quota_per_usd: qpuOf(s), customer_party_id: s.customer_party_id, groups: s.groups || '',
+        bill_mode: isStation(s) ? 'station' : 'prefix', from_date: s.from_date || '',
         has_cookie: !!s.cookie, cookie_from_env: !s.cookie && !!cookie, cookie_masked: cookie ? `${cookie.slice(0, 10)}…（${cookie.length} 字符）` : '',
         last_sync_at: s.last_sync_at, last_error: s.last_error, interval_min: LOOP_MS / 60000,
       },
@@ -413,8 +491,16 @@ function setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayO
       if (cust && (!pa || pa.project_id !== p.id || pa.kind !== 'customer')) throw new HttpError(400, '甲方必须是本项目的客户');
     }
     const groups = b.groups === undefined ? s.groups : str(b.groups, 200).split(/[,，\s]+/).filter(Boolean).join(',');
-    db.prepare('UPDATE key_sites SET base_url = ?, cookie = ?, user_id = ?, quota_per_usd = ?, customer_party_id = ?, groups = ? WHERE project_id = ?')
-      .run(base, b.cookie === undefined ? s.cookie : str(b.cookie, 4000), b.user_id === undefined ? s.user_id : str(b.user_id, 20) || '2', qpu, cust, groups, p.id);
+    const billMode = b.bill_mode === undefined ? (s.bill_mode === 'station' ? 'station' : 'prefix') : (b.bill_mode === 'station' ? 'station' : 'prefix');
+    let fromDate = b.from_date === undefined ? (s.from_date || '') : str(b.from_date, 10);
+    if (fromDate && !/^\d{4}-\d{2}-\d{2}$/.test(fromDate)) throw new HttpError(400, '起始日期格式为 YYYY-MM-DD');
+    if (billMode === 'station' && !fromDate) throw new HttpError(400, '包台子请填写起始日期');
+    const cookie = b.cookie === undefined ? s.cookie : str(b.cookie, 4000);
+    const userId = b.user_id === undefined ? s.user_id : str(b.user_id, 20) || '2';
+    db.prepare('UPDATE key_sites SET base_url = ?, cookie = ?, user_id = ?, quota_per_usd = ?, customer_party_id = ?, groups = ?, bill_mode = ?, from_date = ? WHERE project_id = ?')
+      .run(base, cookie, userId, qpu, cust, groups, billMode, fromDate, p.id);
+    const st = db.prepare('SELECT s.id FROM stations s JOIN projects p ON p.station_id = s.id WHERE p.id = ?').get(p.id);
+    if (st) db.prepare('UPDATE stations SET base_url = ?, user_id = ?, quota_per_usd = ?, credential = ? WHERE id = ?').run(base || '', userId, qpu, cookie || '', st.id);
     accrue(p.id);
     onChanged(req.user, `修改了上 key 项目「${p.name}」的台子设置`);
     res.json(view(p.id));
