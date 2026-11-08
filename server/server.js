@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 const ExcelJS = require('exceljs');
 const Anthropic = require('@anthropic-ai/sdk');
-const { setupPartyWallets, fetchDailyUsage } = require('./wallets');
+const { setupPartyWallets, fetchDailyUsage, consumeRatioOn } = require('./wallets');
 const { setupKeyAccounting } = require('./keyacct');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -3424,7 +3424,15 @@ app.get('/api/relay/search', auth, async (req, res, next) => {
 });
 app.delete('/api/parties/:id', auth, (req, res) => { ops.deleteParty(req.user, req.params.id); res.json({ ok: true }); });
 app.post('/api/parties/:id/records', auth, (req, res) => { const r = ops.addPartyRecord(req.user, req.params.id, req.body || {}); res.json({ record: recordView(r.record), duplicate: r.duplicate }); });
-partyWallets = setupPartyWallets({ app, db, auth, HttpError, onChanged: (user, text) => dataChanged(user, text) });
+partyWallets = setupPartyWallets({
+  app, db, auth, HttpError,
+  onChanged: (user, text) => dataChanged(user, text),
+  onWalletChanged: () => {
+    supplierCostCache.clear();
+    profitCache = null;
+    refreshRelayForecasts().catch((e) => console.error('[relay] 预估利润更新失败：', e.message));
+  },
+});
 setupKeyAccounting({ app, db, auth, HttpError, getRates, todayKey, dayOf: (d) => dayFmt.format(d), addDays, onChanged: (user, text) => dataChanged(user, text), onAccrued: () => { dataVersion += 1; broadcast('changed', { version: dataVersion, byId: 0, by: '上 key 台子', text: '', at: now() }); } });
 // 一次性：同名供应商合并成全局一条。流水和钱包记上原来的项目，上 key 挂账编号按新 id 重写
 if (!db.prepare("SELECT 1 FROM settings WHERE key = 'suppliers_global_v1'").get()) {
@@ -3738,7 +3746,13 @@ async function supplierDailyCost(onlyProject = null) {
   const hit = supplierCostCache.get(key);
   if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.data;
   const byKey = new Map();
+  const lifetime = new Map();
   const errors = [];
+  const segsBy = new Map();
+  for (const s of db.prepare('SELECT wallet_id, from_date, ratio FROM wallet_consume_rates ORDER BY from_date').all()) {
+    if (!segsBy.has(s.wallet_id)) segsBy.set(s.wallet_id, []);
+    segsBy.get(s.wallet_id).push(s);
+  }
   const walletRows = db.prepare("SELECT w.*, p.name AS party_name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.archived = 0 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
   const seen = new Set();
   const jobs = [];
@@ -3755,18 +3769,33 @@ async function supplierDailyCost(onlyProject = null) {
       const w = queue.shift();
       try {
         const daily = (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
-        const cr = w.custom ? (Number(w.consume_ratio) || 1) : 1;
+        const segs = segsBy.get(w.id) || [];
         // 多算扣减从最早的一天开始减，减完再算进项目
         let adjust = Number(w.used_adjust) || 0;
+        let recentRaw = 0, recentCost = 0;
         for (const x of daily) {
           let usd = x.usd || 0;
           if (adjust > 0) { const cut = Math.min(usd, adjust); usd -= cut; adjust -= cut; }
+          const cr = consumeRatioOn(w, x.date, segs);
+          recentRaw += usd;
+          recentCost += usd * cr;
           byKey.set(`${w.project_id}|${x.date}`, r2((byKey.get(`${w.project_id}|${x.date}`) || 0) + usd * cr));
         }
+        const rawUsed = Number(w.last_used) || 0;
+        let siteLifetime;
+        if (rawUsed > 0) {
+          let earlierRaw = Math.max(0, rawUsed - recentRaw);
+          if (adjust > 0) earlierRaw = Math.max(0, earlierRaw - adjust);
+          const earlierDate = daily.length ? addDays(daily[0].date, -1) : '1970-01-01';
+          siteLifetime = earlierRaw * consumeRatioOn(w, earlierDate, segs) + recentCost;
+        } else {
+          siteLifetime = Number(w.last_used_actual) || recentCost;
+        }
+        lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + siteLifetime));
       } catch (e) { errors.push(`${w.name}：${String(e.message || '').slice(0, 50)}`); }
     }
   }));
-  const data = { byKey, errors };
+  const data = { byKey, lifetime, errors };
   supplierCostCache.set(key, { at: Date.now(), data });
   return data;
 }
@@ -3836,16 +3865,9 @@ async function refreshRelayForecasts() {
   try {
     customerGapCache.clear();
     await refreshCustomerGaps();
-    const { byKey } = await supplierDailyCost();
-    // 按天消耗只有近 30 天，每个站点更早的累计消费（已抓好的 last_used_actual）补在最早那天之前
-    const lifetime = new Map();
-    const seenSite = new Set();
-    for (const w of db.prepare("SELECT w.base_url, w.project_id, w.last_used_actual FROM party_wallets w JOIN parties pa ON pa.id = w.party_id WHERE w.enabled = 1 AND pa.archived = 0 AND w.project_id IS NOT NULL AND w.last_used_actual IS NOT NULL").all()) {
-      const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
-      if (seenSite.has(site)) continue;
-      seenSite.add(site);
-      lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + (w.last_used_actual || 0)));
-    }
+    const { byKey, lifetime: costLifetime } = await supplierDailyCost();
+    // 按天消耗只有近 30 天，更早的用站点累计 − 近 30 天，并按切日前的倍率折算
+    const lifetime = costLifetime || new Map();
     // 归档供应商：消费 = 实际转出 − 退回，不按站点累计（站点送的额度不算）
     for (const e of db.prepare("SELECT e.project_id, e.type, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE pa.kind = 'supplier' AND pa.archived = 1 AND e.project_id IS NOT NULL").all()) {
       const cny = e.currency === 'CNY' ? e.amount : e.amount * (Number(e.rate) || 0);

@@ -13,6 +13,20 @@ const nowIso = () => new Date().toISOString();
 const str = (v, max = 500) => String(v ?? '').trim().slice(0, max);
 const num = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
 const round = (n, d = 6) => (n === null ? null : Math.round(n * 10 ** d) / 10 ** d);
+const RE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const walletDayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.TIMEZONE || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+const walletToday = () => walletDayFmt.format(new Date());
+function addDaysKey(key, n) {
+  const [y, m, d] = String(key).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+// 某天的消耗倍率：默认 consume_ratio；from_date 及以后用分段里最近一条
+function consumeRatioOn(w, date, segs) {
+  if (!w.custom) return 1;
+  let r = num(w.consume_ratio) > 0 ? num(w.consume_ratio) : 1;
+  for (const s of segs || []) if (s.from_date && s.from_date <= date) r = Number(s.ratio) || r;
+  return r;
+}
 
 // ---------- 抓取 ----------
 const baseOf = (u) => String(u || "").trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
@@ -434,7 +448,7 @@ async function fetchWallet(w) {
 }
 
 // ---------- 存储与路由 ----------
-function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
+function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChanged }) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS party_wallets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -470,6 +484,39 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   }
   // 供应商改为全局后，余额监控各自记消耗算进哪个项目
   if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = 'project_id'").get()) db.exec('ALTER TABLE party_wallets ADD COLUMN project_id INTEGER REFERENCES projects(id)');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wallet_consume_rates (
+      wallet_id INTEGER NOT NULL,
+      from_date TEXT NOT NULL,
+      ratio REAL NOT NULL,
+      PRIMARY KEY (wallet_id, from_date)
+    );
+  `);
+  const qRatesOf = db.prepare('SELECT from_date, ratio FROM wallet_consume_rates WHERE wallet_id = ? ORDER BY from_date');
+  const qDelRates = db.prepare('DELETE FROM wallet_consume_rates WHERE wallet_id = ?');
+  const qInsRate = db.prepare('INSERT INTO wallet_consume_rates (wallet_id, from_date, ratio) VALUES (?, ?, ?)');
+  function parseConsumeRates(list) {
+    if (list == null) return null;
+    if (!Array.isArray(list)) throw new HttpError(400, '消耗倍率按日期格式不对');
+    const out = [];
+    const seen = new Set();
+    for (const row of list) {
+      const from = String((row && row.from_date) || '').slice(0, 10);
+      const ratio = num(row && row.ratio);
+      if (!from && !(ratio > 0)) continue;
+      if (!RE_DATE.test(from)) throw new HttpError(400, '分段日期需为 YYYY-MM-DD');
+      if (!(ratio > 0)) throw new HttpError(400, '分段倍率必须大于 0');
+      if (seen.has(from)) throw new HttpError(400, `同一天不能设两个倍率（${from}）`);
+      seen.add(from);
+      out.push({ from_date: from, ratio: round(ratio, 4) });
+    }
+    out.sort((a, b) => (a.from_date < b.from_date ? -1 : 1));
+    return out;
+  }
+  function replaceConsumeRates(walletId, rows) {
+    qDelRates.run(walletId);
+    for (const r of rows) qInsRate.run(walletId, r.from_date, r.ratio);
+  }
   const getOne = db.prepare('SELECT * FROM party_wallets WHERE id = ?');
   const ofParty = db.prepare('SELECT * FROM party_wallets WHERE party_id = ? ORDER BY id');
   const party = db.prepare("SELECT * FROM parties WHERE id = ? AND kind = 'supplier'");
@@ -488,6 +535,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
       has_token: !!access_token,
       // 填了令牌就以令牌为准（优先于密码登录）
       auth_mode: access_token ? 'token' : w.login_user && login_pass ? 'login' : 'key',
+      consume_rates: qRatesOf.all(w.id),
     };
   };
 
@@ -531,11 +579,30 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     try {
       if (!w.api_key && !(w.platform === 'newapi' && w.access_token)) throw new Error('还没有填 API Key');
       const r = await fetchWallet(w);
+      const segs = qRatesOf.all(id);
+      const crToday = consumeRatioOn(w, walletToday(), segs);
+      const todayActual = r.today == null || !w.custom ? r.todayActual : round(r.today * crToday, 4);
       // 站点报的累计消费减掉手工扣减（多算的部分），不能减成负数
       const adjust = num(w.used_adjust) || 0;
-      const usedActual = r.usedActual === null ? null : Math.max(0, round(r.usedActual - adjust, 4));
+      let usedActual = r.usedActual === null ? null : Math.max(0, round(r.usedActual - adjust, 4));
+      // 设了按日期切倍率：累计实际消费 = 切日前 × 默认倍率 + 切日后 × 新倍率，不能整段改成新倍率
+      if (w.custom && segs.length && r.used != null) {
+        try {
+          const daily = (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+          let recentRaw = 0, cost = 0;
+          for (const x of daily) {
+            const usd = Number(x.usd) || 0;
+            recentRaw += usd;
+            cost += usd * consumeRatioOn(w, x.date, segs);
+          }
+          const earlierRaw = Math.max(0, r.used - recentRaw);
+          const earlierDate = daily.length ? addDaysKey(daily[0].date, -1) : '1970-01-01';
+          cost += earlierRaw * consumeRatioOn(w, earlierDate, segs);
+          usedActual = Math.max(0, round(cost - adjust, 4));
+        } catch { /* 按天没抓到就仍用当前默认倍率 × 累计 */ }
+      }
       db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_today = ?, last_today_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
-        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, usedActual, r.today, r.todayActual, r.warning, t, id);
+        .run(r.wallet, r.kind, r.ratio, r.source, r.actual, r.used, usedActual, r.today, todayActual, r.warning, t, id);
       // 批量试出来的账号密码存下来，以后自动刷新直接用
       if (r.loginUsed && (r.loginUsed.user !== w.login_user || r.loginUsed.pass !== w.login_pass)) {
         db.prepare('UPDATE party_wallets SET login_user = ?, login_pass = ? WHERE id = ?').run(r.loginUsed.user, r.loginUsed.pass, id);
@@ -558,8 +625,12 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     const cols = { party_id: pa.id, ...v, created_at: t, updated_at: t };
     const keys = Object.keys(cols);
     const r = db.prepare(`INSERT INTO party_wallets (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`).run(...keys.map((k) => cols[k]));
-    const w = await refresh(Number(r.lastInsertRowid)); // 加完立即抓一次
+    const id = Number(r.lastInsertRowid);
+    const rates = parseConsumeRates((req.body || {}).consume_rates);
+    if (rates) replaceConsumeRates(id, rates);
+    const w = await refresh(id); // 加完立即抓一次
     onChanged(req.user, `给供应商「${pa.name}」添加了余额监控「${w.name}」`);
+    if (typeof onWalletChanged === 'function') onWalletChanged();
     res.json({ wallet: w });
   });
   app.patch('/api/party-wallets/:id', auth, async (req, res) => {
@@ -569,15 +640,20 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
     checkCustom({ ...w, ...v });
     const keys = Object.keys(v);
     if (keys.length) db.prepare(`UPDATE party_wallets SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...keys.map((k) => v[k]), nowIso(), w.id);
+    const rates = parseConsumeRates((req.body || {}).consume_rates);
+    if (rates) replaceConsumeRates(w.id, rates);
     const out = await refresh(w.id); // 改了平台 / Key / 倍率后按新参数重抓
     onChanged(req.user, `修改了余额监控「${out.name}」`);
+    if (typeof onWalletChanged === 'function') onWalletChanged();
     res.json({ wallet: out });
   });
   app.delete('/api/party-wallets/:id', auth, (req, res) => {
     const w = getOne.get(Number(req.params.id));
     if (!w) throw new HttpError(404, '余额监控不存在');
+    qDelRates.run(w.id);
     db.prepare('DELETE FROM party_wallets WHERE id = ?').run(w.id);
     onChanged(req.user, `删除了余额监控「${w.name}」`);
+    if (typeof onWalletChanged === 'function') onWalletChanged();
     res.json({ ok: true });
   });
   app.post('/api/party-wallets/:id/refresh', auth, async (req, res) => res.json({ wallet: await refresh(Number(req.params.id)) }));
@@ -646,4 +722,4 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged }) {
   };
 }
 
-module.exports = { setupPartyWallets, fetchWallet, fetchDailyUsage, PLATFORMS };
+module.exports = { setupPartyWallets, fetchWallet, fetchDailyUsage, consumeRatioOn, PLATFORMS };

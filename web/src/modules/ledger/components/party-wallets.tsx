@@ -61,6 +61,7 @@ export type WalletDraft = {
   custom: boolean;
   custom_ratio: string;
   consume_ratio: string;
+  consume_rates: { from_date: string; ratio: string }[];
   used_adjust: string;
   access_token: string;
   token_user_id: string;
@@ -77,6 +78,7 @@ export const EMPTY_WALLET: WalletDraft = {
   custom: false,
   custom_ratio: "",
   consume_ratio: "",
+  consume_rates: [],
   used_adjust: "",
   access_token: "",
   token_user_id: "",
@@ -93,6 +95,13 @@ export function walletDraftError(v: WalletDraft, requireKey: boolean) {
     return "API Key 必填（new-api 填了访问令牌时可不填）";
   if (v.custom && !(Number(v.custom_ratio) > 0)) return "充值倍率必须大于 0";
   if (v.custom && v.consume_ratio.trim() && !(Number(v.consume_ratio) > 0)) return "消耗倍率必须大于 0";
+  if (v.custom) {
+    for (const row of v.consume_rates) {
+      if (!row.from_date && !row.ratio.trim()) continue;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(row.from_date)) return "分段日期需为 YYYY-MM-DD";
+      if (!(Number(row.ratio) > 0)) return "分段倍率必须大于 0";
+    }
+  }
   return null;
 }
 export const walletBody = (v: WalletDraft) => ({
@@ -103,6 +112,11 @@ export const walletBody = (v: WalletDraft) => ({
   custom_ratio: v.custom ? Number(v.custom_ratio) : null,
   // 消耗倍率：自定义且填了就用，没填默认 1
   consume_ratio: v.custom ? (Number(v.consume_ratio) > 0 ? Number(v.consume_ratio) : 1) : null,
+  consume_rates: v.custom
+    ? v.consume_rates
+        .filter((r) => r.from_date && Number(r.ratio) > 0)
+        .map((r) => ({ from_date: r.from_date, ratio: Number(r.ratio) }))
+    : [],
   used_adjust: Number(v.used_adjust) > 0 ? Number(v.used_adjust) : 0,
   insecure: v.insecure,
   login_user: v.login_user.trim(),
@@ -232,8 +246,58 @@ export function WalletFields({
                 ) : null}
               </div>
               <p className="text-muted-foreground pl-[5.5rem] text-xs">
-                实际消费 = 站点消费 × 消耗倍率；不填默认 1（按站点消费原样计）
+                实际消费 = 站点消费 × 消耗倍率；不填默认 1（按站点消费原样计）。下面可按日期改倍率，那天之前仍用这个默认
               </p>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-muted-foreground text-xs">从某日起用新倍率</p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2"
+                  onClick={() => setV({ ...v, consume_rates: [...v.consume_rates, { from_date: "", ratio: "" }] })}
+                >
+                  <Plus className="size-3.5" />
+                  添加
+                </Button>
+              </div>
+              {v.consume_rates.map((row, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <Input
+                    type="date"
+                    className="w-40"
+                    value={row.from_date}
+                    onChange={(e) => {
+                      const consume_rates = v.consume_rates.slice();
+                      consume_rates[i] = { ...row, from_date: e.target.value };
+                      setV({ ...v, consume_rates });
+                    }}
+                  />
+                  <span className="text-muted-foreground shrink-0 text-xs">起</span>
+                  <Input
+                    inputMode="decimal"
+                    className="w-24"
+                    placeholder="新倍率"
+                    value={row.ratio}
+                    onChange={(e) => {
+                      const consume_rates = v.consume_rates.slice();
+                      consume_rates[i] = { ...row, ratio: e.target.value };
+                      setV({ ...v, consume_rates });
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    title="删除这段"
+                    onClick={() => setV({ ...v, consume_rates: v.consume_rates.filter((_, j) => j !== i) })}
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
+              ))}
             </div>
           </div>
         ) : null}
@@ -316,6 +380,7 @@ function WalletDialog({
             custom: wallet.custom,
             custom_ratio: wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
             consume_ratio: wallet.consume_ratio == null ? "" : String(wallet.consume_ratio),
+            consume_rates: (wallet.consume_rates ?? []).map((r) => ({ from_date: r.from_date, ratio: String(r.ratio) })),
             used_adjust: wallet.used_adjust ? String(wallet.used_adjust) : "",
             access_token: "",
             token_user_id: wallet.token_user_id ?? "",
@@ -543,6 +608,13 @@ export function PartyWallets({ party }: { party: Party }) {
                         充 × {w.custom_ratio == null ? "-" : +w.custom_ratio.toFixed(4)}
                         <span className="text-muted-foreground font-normal">
                           {" · "}耗 × {w.consume_ratio == null ? 1 : +w.consume_ratio.toFixed(4)}
+                          {w.consume_rates?.length
+                            ? w.consume_rates
+                                .slice()
+                                .sort((a, b) => (a.from_date < b.from_date ? -1 : 1))
+                                .map((r) => ` · ${r.from_date.slice(5)}起 × ${+r.ratio}`)
+                                .join("")
+                            : ""}
                         </span>
                       </div>
                     ) : (
