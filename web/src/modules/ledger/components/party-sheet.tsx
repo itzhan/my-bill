@@ -5,7 +5,7 @@ import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { useRouter } from "next/navigation";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, LayoutDashboard, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { ExternalLink, LayoutDashboard, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -1176,7 +1176,16 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   );
 }
 
-// 中转制客户的分组收费：只列这个客户能访问的分组，按分组折扣或元/刀计价
+// 中转制客户的分组收费：只列这个客户能访问的分组，按分组折扣或元/刀计价；可按日期调价（某天及以后按新价）
+type GroupRateRow = { id: string; from_date: string; value: string };
+type GroupPriceState = { mode: "discount" | "cny"; value: string; rates: GroupRateRow[] };
+let groupRateSeq = 0;
+const groupRateRow = (r?: { from_date: string; price: number }): GroupRateRow => ({
+  id: String(++groupRateSeq),
+  from_date: r?.from_date ?? "",
+  value: r ? String(r.price) : "",
+});
+
 function RelayGroups({ party: v }: { party: Party }) {
   const qc = useQueryClient();
   const refresh = useLedgerRefresh();
@@ -1188,18 +1197,29 @@ function RelayGroups({ party: v }: { party: Party }) {
   const saved = useQuery({
     queryKey: ["ledger", "relay-groups", v.id],
     queryFn: () =>
-      get<{ groups: { station_id: number; group_name: string; price: number; price_mode?: string }[] }>(`/parties/${v.id}/relay-groups`).then(
-        (d) => d.groups,
-      ),
+      get<{ groups: { station_id: number; group_name: string; price: number; price_mode?: string; rates?: { from_date: string; price: number; price_mode?: string }[] }[] }>(
+        `/parties/${v.id}/relay-groups`,
+      ).then((d) => d.groups),
   });
   const [stationId, setStationId] = useState("");
-  const [prices, setPrices] = useState<Record<string, { mode: "discount" | "cny"; value: string }>>({});
+  const [prices, setPrices] = useState<Record<string, GroupPriceState>>({});
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!saved.data) return;
     setStationId(saved.data[0] ? String(saved.data[0].station_id) : relays[0] ? String(relays[0].id) : "");
-    setPrices(Object.fromEntries(saved.data.map((g) => [g.group_name, { mode: g.price_mode === "discount" ? "discount" : "cny", value: g.price_mode === "discount" ? String(Math.round(g.price * 10000) / 100) : String(g.price) }])));
+    setPrices(
+      Object.fromEntries(
+        saved.data.map((g) => [
+          g.group_name,
+          {
+            mode: g.price_mode === "discount" ? "discount" : "cny",
+            value: g.price_mode === "discount" ? String(Math.round(g.price * 10000) / 100) : String(g.price),
+            rates: (g.rates ?? []).map(groupRateRow),
+          },
+        ]),
+      ),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved.data]);
 
@@ -1210,8 +1230,20 @@ function RelayGroups({ party: v }: { party: Party }) {
     enabled: sid > 0,
   });
 
+  const setGroup = (name: string, patch: Partial<GroupPriceState>) =>
+    setPrices((x) => ({ ...x, [name]: { ...(x[name] ?? { mode: "discount" as const, value: "", rates: [] }), ...patch } }));
+
   const save = async () => {
     if (!(sid > 0)) return toast.error("请选择中转站");
+    const RE = /^\d{4}-\d{2}-\d{2}$/;
+    for (const [name, p] of Object.entries(prices)) {
+      for (const r of p.rates) {
+        const filled = r.from_date.trim() || r.value.trim();
+        if (!filled) continue;
+        if (!RE.test(r.from_date.trim()) || !(Number(r.value) > 0))
+          return toast.error(`「${name}」的调价要填日期（YYYY-MM-DD）和大于 0 的价格`);
+      }
+    }
     setBusy(true);
     try {
       const visible = new Set((groups.data ?? []).map((g) => g.name));
@@ -1219,7 +1251,14 @@ function RelayGroups({ party: v }: { party: Party }) {
         station_id: sid,
         groups: Object.entries(prices)
           .filter(([name, p]) => p.value.trim() !== "" && visible.has(name))
-          .map(([group_name, p]) => ({ group_name, price: Number(p.value) || 0, mode: p.mode })),
+          .map(([group_name, p]) => ({
+            group_name,
+            price: Number(p.value) || 0,
+            mode: p.mode,
+            rates: p.rates
+              .filter((r) => r.from_date.trim() && r.value.trim())
+              .map((r) => ({ from_date: r.from_date.trim(), price: Number(r.value) || 0, mode: p.mode })),
+          })),
       });
       toast.success("分组收费已保存，应收和预估利润已按分组重算");
       qc.invalidateQueries({ queryKey: ["ledger", "relay-groups", v.id] });
@@ -1240,7 +1279,9 @@ function RelayGroups({ party: v }: { party: Party }) {
     <div className="space-y-3 rounded-lg border p-4">
       <div>
         <b className="text-sm">分组收费</b>
-        <p className="text-muted-foreground text-xs">只显示这个客户在中转站可访问的分组。填折扣（68 = 68 折，按汇率折人民币）或每刀多少元。保存后应收和预估利润按分组重算</p>
+        <p className="text-muted-foreground text-xs">
+          只显示这个客户在中转站可访问的分组。填折扣（68 = 68 折，按汇率折人民币）或每刀多少元；可加按日期调价，某天及以后的消耗按新价
+        </p>
       </div>
       {relays.length ? (
         <Select value={stationId} onValueChange={setStationId}>
@@ -1265,24 +1306,75 @@ function RelayGroups({ party: v }: { party: Party }) {
       {groups.data ? (
         <div className="space-y-2">
           {groups.data.map((g) => {
-            const row = prices[g.name] ?? { mode: "discount" as const, value: "" };
+            const row = prices[g.name] ?? { mode: "discount" as const, value: "", rates: [] };
             return (
-              <div key={g.name} className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-sm">{g.name}</span>
-                <Select value={row.mode} onValueChange={(mode) => setPrices((x) => ({ ...x, [g.name]: { ...row, mode: mode === "cny" ? "cny" : "discount" } }))}>
-                  <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="discount">折扣</SelectItem>
-                    <SelectItem value="cny">元/刀</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Input
-                  inputMode="decimal"
-                  className="w-24"
-                  placeholder={row.mode === "discount" ? "68" : "4.5"}
-                  value={row.value}
-                  onChange={(e) => setPrices((x) => ({ ...x, [g.name]: { ...row, value: e.target.value } }))}
-                />
+              <div key={g.name} className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm">{g.name}</span>
+                  <Select
+                    value={row.mode}
+                    onValueChange={(mode) =>
+                      setGroup(g.name, { mode: mode === "cny" ? "cny" : "discount" })
+                    }
+                  >
+                    <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="discount">折扣</SelectItem>
+                      <SelectItem value="cny">元/刀</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Input
+                    inputMode="decimal"
+                    className="w-24"
+                    placeholder={row.mode === "discount" ? "68" : "4.5"}
+                    value={row.value}
+                    onChange={(e) => setGroup(g.name, { value: e.target.value })}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    title="某天起改用新价"
+                    onClick={() => setGroup(g.name, { rates: [...row.rates, groupRateRow()] })}
+                  >
+                    <Plus className="size-3.5" />
+                  </Button>
+                </div>
+                {row.rates.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2 pl-4">
+                    <span className="text-muted-foreground shrink-0 text-xs">
+                      <Input
+                        type="date"
+                        className="h-7 w-36"
+                        value={r.from_date}
+                        onChange={(e) =>
+                          setGroup(g.name, { rates: row.rates.map((x) => (x.id === r.id ? { ...x, from_date: e.target.value } : x)) })
+                        }
+                      />
+                    </span>
+                    <span className="text-muted-foreground shrink-0 text-xs">起按</span>
+                    <Input
+                      inputMode="decimal"
+                      className="h-7 w-24"
+                      placeholder={row.mode === "discount" ? "新折扣" : "新单价"}
+                      value={r.value}
+                      onChange={(e) =>
+                        setGroup(g.name, { rates: row.rates.map((x) => (x.id === r.id ? { ...x, value: e.target.value } : x)) })
+                      }
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      title="删除这一档"
+                      onClick={() => setGroup(g.name, { rates: row.rates.filter((x) => x.id !== r.id) })}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
+                ))}
               </div>
             );
           })}

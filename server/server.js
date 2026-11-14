@@ -204,7 +204,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS stations (
 )`);
 try { db.exec('ALTER TABLE projects ADD COLUMN station_id INTEGER REFERENCES stations(id)'); } catch { /* 已有该列 */ }
 try { db.exec("ALTER TABLE relay_customer_groups ADD COLUMN price_mode TEXT NOT NULL DEFAULT 'cny'"); } catch { /* 已有该列 */ }
-try { db.exec("ALTER TABLE relay_customer_groups ADD COLUMN price_mode TEXT NOT NULL DEFAULT 'cny'"); } catch { /* 已有该列 */ }
+// 客户分组按日期调价：某日期及以后的消耗按新价（同一分组可多段，取该日之前最近一条）
+db.exec(`CREATE TABLE IF NOT EXISTS relay_customer_group_rates (
+  party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE, group_name TEXT NOT NULL, from_date TEXT NOT NULL,
+  price REAL NOT NULL, price_mode TEXT NOT NULL DEFAULT 'cny', PRIMARY KEY (party_id, group_name, from_date)
+)`);
 // 中转制预估利润：客户按分组收费，上游按 key 计成本
 db.exec(`
   CREATE TABLE IF NOT EXISTS relay_customer_groups (
@@ -1971,6 +1975,7 @@ const relayCostOf = (pa, x) => (pa.kind === 'customer' ? x.cost_usd : x.std_cost
 const qRelayRec = { byRef: () => q.recordByRef, upd: db.prepare('UPDATE party_records SET amount = ?, currency = ?, rate = ?, note = ? WHERE id = ?') };
 const qRelayRecs = db.prepare("SELECT id FROM party_records WHERE party_id = ? AND source = 'relay'");
 const qCustomerGroups = db.prepare('SELECT group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ?');
+const qGroupRates = db.prepare('SELECT group_name, from_date, price, price_mode FROM relay_customer_group_rates WHERE party_id = ? ORDER BY from_date');
 const qGroupUsageOf = db.prepare('SELECT date, group_name, usd FROM relay_group_usage WHERE party_id = ?');
 function customerGroupPrices(partyId) {
   return qCustomerGroups.all(partyId).filter((g) => Number(g.price) > 0);
@@ -1979,16 +1984,33 @@ function groupUsdToCny(usd, g, rates) {
   return g.price_mode === 'discount' ? usd * g.price * rates.USD : usd * g.price;
 }
 function groupPriceNote(g) {
-  return g.price_mode === 'discount' ? `折扣 ${g.price}` : `¥${g.price}/刀`;
+  return (g.from_date ? `${g.from_date} 起 ` : '') + (g.price_mode === 'discount' ? `折扣 ${g.price}` : `¥${g.price}/刀`);
+}
+// 某天的生效价：基础价 + 该日之前最近一条调价（调价沿用分组的基础计价方式之外还带自己的 mode）
+function groupPriceAt(priceByName, ratesByGroup, groupName, date) {
+  const base = priceByName.get(groupName);
+  if (!base) return null;
+  let eff = base;
+  for (const r of ratesByGroup.get(groupName) || []) if (r.from_date && r.from_date <= date && Number(r.price) > 0) eff = { ...base, price: Number(r.price), price_mode: r.price_mode || base.price_mode, from_date: r.from_date };
+  return eff;
+}
+function groupRatesByGroup(partyId) {
+  const m = new Map();
+  for (const r of qGroupRates.all(partyId)) {
+    if (!m.has(r.group_name)) m.set(r.group_name, []);
+    m.get(r.group_name).push(r);
+  }
+  return m;
 }
 function groupBillOf(partyId, rates) {
-  const prices = customerGroupPrices(partyId);
-  if (!prices.length) return null;
-  const byName = new Map(prices.map((g) => [g.group_name, g]));
+  const priceRows = customerGroupPrices(partyId);
+  if (!priceRows.length) return null;
+  const priceByName = new Map(priceRows.map((g) => [g.group_name, g]));
+  const ratesByGroup = groupRatesByGroup(partyId);
   const daily = new Map();
   let totalUsd = 0, totalCny = 0;
   for (const u of qGroupUsageOf.all(partyId)) {
-    const g = byName.get(u.group_name);
+    const g = groupPriceAt(priceByName, ratesByGroup, u.group_name, u.date);
     if (!g) continue;
     const usd = Number(u.usd) || 0;
     if (usd <= 0) continue;
@@ -1999,6 +2021,7 @@ function groupBillOf(partyId, rates) {
     daily.set(u.date, d);
     totalUsd += usd; totalCny += cny;
   }
+  const prices = priceRows.map((g) => ({ ...g, rates: (ratesByGroup.get(g.group_name) || []).map((r) => ({ from_date: r.from_date, price: r.price, price_mode: r.price_mode })) }));
   return { prices, daily, totalUsd: r2(totalUsd), totalCny: r2(totalCny) };
 }
 function syncRelayAccrual(pa, live) {
@@ -3328,7 +3351,12 @@ app.get('/api/stations/:id/groups', auth, async (req, res, next) => {
 app.get('/api/parties/:id/relay-groups', auth, (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa) return fail(res, 404, '往来单位不存在');
-  res.json({ groups: db.prepare('SELECT station_id, group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(pa.id) });
+  const rates = new Map();
+  for (const r of qGroupRates.all(pa.id)) {
+    if (!rates.has(r.group_name)) rates.set(r.group_name, []);
+    rates.get(r.group_name).push({ from_date: r.from_date, price: r.price, price_mode: r.price_mode });
+  }
+  res.json({ groups: db.prepare('SELECT station_id, group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(pa.id).map((g) => ({ ...g, rates: rates.get(g.group_name) || [] })) });
 });
 app.put('/api/parties/:id/relay-groups', auth, async (req, res, next) => {
   try {
@@ -3338,6 +3366,7 @@ app.put('/api/parties/:id/relay-groups', auth, async (req, res, next) => {
     if (!db.prepare('SELECT 1 FROM stations WHERE id = ?').get(stationId)) return fail(res, 400, '请选择中转站');
     const groups = Array.isArray((req.body || {}).groups) ? req.body.groups : [];
     db.prepare('DELETE FROM relay_customer_groups WHERE party_id = ?').run(pa.id);
+    const keepNames = [];
     for (const g of groups) {
       const name = String(g.group_name || '').trim();
       if (!name) continue;
@@ -3346,8 +3375,23 @@ app.put('/api/parties/:id/relay-groups', auth, async (req, res, next) => {
       // 折扣填 68 或 0.68 都按 0.68 存
       if (mode === 'discount' && price > 1) price = price / 100;
       db.prepare('INSERT INTO relay_customer_groups (party_id, station_id, group_name, price, price_mode) VALUES (?, ?, ?, ?, ?)').run(pa.id, stationId, name, price, mode);
+      keepNames.push(name);
+      // 按日期调价：[{ from_date, price, mode? }]，日期 YYYY-MM-DD，价格 > 0；折扣同基础价一样归一
+      const rows = Array.isArray(g.rates) ? g.rates : [];
+      const seen = new Set();
+      for (const r of rows) {
+        const from = String(r.from_date || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || seen.has(from)) continue;
+        let rp = Number(r.price) || 0;
+        const rm = r.mode === 'discount' ? 'discount' : (r.mode === 'cny' ? 'cny' : mode);
+        if (rm === 'discount' && rp > 1) rp = rp / 100;
+        if (!(rp > 0)) continue;
+        seen.add(from);
+        db.prepare('INSERT OR REPLACE INTO relay_customer_group_rates (party_id, group_name, from_date, price, price_mode) VALUES (?, ?, ?, ?, ?)').run(pa.id, name, from, rp, rm);
+      }
     }
     db.prepare('DELETE FROM relay_group_usage WHERE party_id = ? AND group_name NOT IN (SELECT group_name FROM relay_customer_groups WHERE party_id = ?)').run(pa.id, pa.id);
+    db.prepare('DELETE FROM relay_customer_group_rates WHERE party_id = ? AND group_name NOT IN (SELECT group_name FROM relay_customer_groups WHERE party_id = ?)').run(pa.id, pa.id);
     // 改价只重算已有用量，不清空历史；中转站对旧日期经常返回空，清掉就补不回来
     if (!db.prepare('SELECT 1 FROM relay_customer_groups WHERE party_id = ?').get(pa.id)) resetRelayAccrual(pa.id);
     // 先拉近 14 天，应收和预估马上能改；更早的历史后台补完再重算一遍
@@ -3360,7 +3404,8 @@ app.put('/api/parties/:id/relay-groups', auth, async (req, res, next) => {
       profitCache = null;
       await refreshRelayForecasts();
     }).catch((e) => console.error(`[relay] 客户 ${pa.name} 分组用量回补失败：`, e.message));
-    dataChanged(req.user, `设置了客户「${pa.name}」的分组收费（${groups.filter((g) => String(g.group_name || '').trim()).length} 个分组）· ${pa.project_name || ''}`);
+    const segs = qGroupRates.all(pa.id).length;
+    dataChanged(req.user, `设置了客户「${pa.name}」的分组收费（${keepNames.length} 个分组${segs ? `，${segs} 条按日期调价` : ''}）· ${pa.project_name || ''}`);
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
@@ -3970,11 +4015,16 @@ async function computeProfitDaily() {
     byDate.set(d.date, e);
   }
   const daily = [...byDate.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
-  // 预估利润（与上面的记账利润并存）：中转制 = 客户分组收费 − 上游 key 成本；上 key = 甲方应收 − 供应商应付
+  // 预估利润（与上面的记账利润并存）：中转制 = 客户分组收费（含按日期调价）− 上游 key 成本；上 key = 甲方应收 − 供应商应付
   const forecastOf = new Map();
-  for (const r of db.prepare(`SELECT pa.project_id, u.date, SUM(CASE WHEN g.price_mode = 'discount' THEN u.usd * g.price * ${getRates().USD} ELSE u.usd * g.price END) AS n FROM relay_group_usage u JOIN relay_customer_groups g ON g.party_id = u.party_id AND g.group_name = u.group_name JOIN parties pa ON pa.id = u.party_id GROUP BY pa.project_id, u.date`).all()) {
-    const k = `${r.project_id}|${r.date}`;
-    forecastOf.set(k, r2((forecastOf.get(k) || 0) + r.n));
+  const ratesNow = getRates();
+  for (const row of db.prepare('SELECT DISTINCT u.party_id, pa.project_id AS project_id FROM relay_group_usage u JOIN parties pa ON pa.id = u.party_id').all()) {
+    const bill = groupBillOf(row.party_id, ratesNow);
+    if (!bill) continue;
+    for (const d of bill.daily.values()) {
+      const k = `${row.project_id}|${d.date}`;
+      forecastOf.set(k, r2((forecastOf.get(k) || 0) + d.cny));
+    }
   }
   for (const r of db.prepare('SELECT project_id, date, SUM(u.usd * k.ratio) AS n FROM relay_key_usage u JOIN relay_keys k ON k.id = u.key_id WHERE k.project_id IS NOT NULL GROUP BY k.project_id, u.date').all()) {
     const k = `${r.project_id}|${r.date}`;
