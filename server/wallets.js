@@ -983,6 +983,24 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   const sumRowsStmt = db.prepare('SELECT base_url, last_actual, last_used_actual, billed_used, last_error FROM party_wallets WHERE party_id = ? AND enabled = 1');
   return {
     listOf: (partyId) => ofParty.all(partyId).map(view),
+    // 项目期初成本变更后用：立即重抓这个项目下所有行（封存各站点起点），不用等 30 分钟周期
+    async refreshProject(projectId) {
+      const ids = db.prepare('SELECT id FROM party_wallets WHERE project_id = ? AND enabled = 1').all(Number(projectId)).map((r) => r.id);
+      const queue = [...ids];
+      await Promise.all(
+        Array.from({ length: Math.min(4, queue.length) }, async () => {
+          while (queue.length) {
+            const id = queue.shift();
+            try {
+              await refresh(id);
+            } catch {
+              /* 单行失败已记在该行 last_error */
+            }
+          }
+        })
+      );
+      return ids.length;
+    },
     summaryOf(partyId) {
       const rows = sumRowsStmt.all(partyId);
       if (!rows.length) return null;

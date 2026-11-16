@@ -639,11 +639,30 @@ const ops = {
       const pt = patch.ptype !== undefined ? (['short', 'key'].includes(patch.ptype) ? patch.ptype : 'relay') : p.ptype;
       if (pt !== 'relay') throw new HttpError(400, '只有中转制项目支持期初成本');
       const raw = patch.opening_cost;
-      if (raw === null || String(raw).trim() === '') db.prepare('UPDATE projects SET opening_cost = NULL WHERE id = ?').run(p.id);
-      else {
+      let next = null;
+      if (!(raw === null || String(raw).trim() === '')) {
         const n = Number(raw);
         if (!Number.isFinite(n) || n < 0) throw new HttpError(400, '期初成本需为不小于 0 的数字');
-        db.prepare('UPDATE projects SET opening_cost = ? WHERE id = ?').run(r2(n), p.id);
+        next = r2(n);
+      }
+      const before = p.opening_cost == null ? null : r2(Number(p.opening_cost));
+      db.prepare('UPDATE projects SET opening_cost = ? WHERE id = ?').run(next, p.id);
+      if (before !== next) {
+        // 新设或清空时重置封存起点（改金额不挪起点）：下次抓取按当时的累计重新封存
+        if (before == null || next == null) db.prepare('UPDATE party_wallets SET opening_used = NULL WHERE project_id = ? AND opening_cost IS NULL').run(p.id);
+        // 期初立即进应付：重抓各站点封存起点，清掉供应商消耗缓存并重算预估。
+        // 不这样做的话要等缓存周期（10 分钟）,期间旧的「站点累计」会把存量重复算进应付
+        if (next != null) {
+          supplierCostCache.clear();
+          profitCache = null;
+          if (typeof partyWallets?.refreshProject === 'function') {
+            partyWallets.refreshProject(p.id).then(() => refreshRelayForecasts()).catch((e) => console.error('[relay] 期初重算失败：', e.message));
+          } else refreshRelayForecasts().catch(() => {});
+        } else {
+          supplierCostCache.clear();
+          profitCache = null;
+          refreshRelayForecasts().catch(() => {});
+        }
       }
     }
     const what = archived !== p.archived ? `${archived ? '归档' : '恢复'}了项目「${name}」` : `修改了项目「${p.name}」${name !== p.name ? ` → 「${name}」` : ''}${note !== p.note ? `，说明：${note}` : ''}`;
