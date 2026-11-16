@@ -901,6 +901,59 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     res.json({ wallet: out });
   });
 
+  // 批量挂 Key：从站点选多把，每把在这个供应商下新建一行监控（凭据从模板行复制）。
+  // body: { template_wallet_id, key_ids: [...], cost_mode?, project_id? }
+  app.post('/api/parties/:id/wallets-batch', auth, async (req, res) => {
+    const pa = party.get(Number(req.params.id));
+    if (!pa) throw new HttpError(404, '供应商不存在（只有供应商可以绑定余额）');
+    const b = req.body || {};
+    const tw = getOne.get(Number(b.template_wallet_id));
+    if (!tw || tw.party_id !== pa.id) throw new HttpError(400, '模板行（template_wallet_id）必须是这家供应商下的余额监控');
+    const keyIds = Array.isArray(b.key_ids) ? [...new Set(b.key_ids.map((x) => String(x)))] : [];
+    if (!keyIds.length) throw new HttpError(400, '请勾选要添加的 Key');
+    if (keyIds.length > 50) throw new HttpError(400, '一次最多添加 50 把 Key');
+    const costMode = ['account', 'key'].includes(b.cost_mode) ? b.cost_mode : 'key'; // 多把 Key 并存就是为了按 Key 拆成本
+    const projectId = b.project_id !== undefined ? (Number(b.project_id) > 0 ? Number(b.project_id) : null) : tw.project_id;
+    const keys = await listRemoteKeys(tw);
+    const picked = keyIds.map((id) => keys.find((k) => k.id === id)).filter(Boolean);
+    if (!picked.length) throw new HttpError(404, '站点上没有选中的 Key，刷新列表再试');
+    // 这家供应商下已有的 Key 跳过，避免重复挂
+    const existing = new Set(db.prepare('SELECT api_key FROM party_wallets WHERE party_id = ?').all(pa.id).map((r) => r.api_key));
+    const t = nowIso();
+    const created = [];
+    const skipped = [];
+    for (const k of picked) {
+      if (existing.has(k.key_full)) {
+        skipped.push(k.name);
+        continue;
+      }
+      const r = db
+        .prepare(
+          'INSERT INTO party_wallets (party_id, name, platform, base_url, api_key, custom, enabled, insecure, access_token, token_user_id, login_user, login_pass, cost_mode, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        )
+        .run(pa.id, str(k.name, 60) || '默认', tw.platform, tw.base_url, k.key_full, tw.insecure, tw.access_token, tw.token_user_id, tw.login_user, tw.login_pass, costMode, projectId, t, t);
+      created.push(Number(r.lastInsertRowid));
+    }
+    // 并发抓取（每批 4 路），行的抓取结果随创建返回
+    const results = [];
+    const queue = [...created];
+    await Promise.all(
+      Array.from({ length: Math.min(4, queue.length) }, async () => {
+        while (queue.length) {
+          const id = queue.shift();
+          try {
+            results.push(await refresh(id));
+          } catch {
+            /* 单行抓取失败已记在该行 last_error，不挡其余 */
+          }
+        }
+      })
+    );
+    onChanged(req.user, `给供应商「${pa.name}」批量添加了 ${created.length} 个余额监控${skipped.length ? `（跳过已存在的 ${skipped.length} 把）` : ''}`);
+    if (typeof onWalletChanged === 'function') onWalletChanged();
+    res.json({ created: created.length, skipped: skipped.length, wallets: results });
+  });
+
   // 刷新全部（侧栏「供应商」页的「全部刷新」）
   app.post('/api/wallets/refresh', auth, async (req, res) => {
     const ids = db.prepare('SELECT w.id FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.archived = 0 ORDER BY w.id').all().map((r) => r.id);

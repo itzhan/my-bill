@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -459,7 +460,7 @@ export function WalletFields({
   );
 }
 
-// 从供应商站点读取该账户的 API Key 列表，选一把绑定：写入这行监控并切到「绑定 Key 消耗」口径
+// 从供应商站点读取该账户的 API Key 列表：单选绑定到当前行，或勾选多把批量挂成多行监控（凭据从当前行复制）
 function RemoteKeysDialog({
   wallet,
   open,
@@ -475,6 +476,8 @@ function RemoteKeysDialog({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [binding, setBinding] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batching, setBatching] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -482,6 +485,7 @@ function RemoteKeysDialog({
     try {
       const d = await get<{ keys: RemoteStationKey[] }>(`/party-wallets/${wallet.id}/remote-keys`);
       setKeys(d.keys);
+      setSelected(new Set());
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -491,10 +495,20 @@ function RemoteKeysDialog({
   useEffect(() => {
     if (open) {
       setKeys(null);
+      setSelected(new Set());
       load();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, wallet.id]);
+
+  const toggle = (id: string) => {
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  };
 
   const bind = async (keyId: string) => {
     setBinding(keyId);
@@ -514,16 +528,42 @@ function RemoteKeysDialog({
     }
   };
 
+  // 勾选多把批量挂成多行：每把一行，名称用 Key 的名字，凭据 / 项目从当前行复制
+  const addRows = async () => {
+    setBatching(true);
+    setError(null);
+    try {
+      const d = await post<{ created: number; skipped: number }>(`/parties/${wallet.party_id}/wallets-batch`, {
+        template_wallet_id: wallet.id,
+        key_ids: [...selected],
+      });
+      toast.success(`已添加 ${d.created} 行监控${d.skipped ? `，跳过已存在的 ${d.skipped} 把` : ""}`);
+      onOpenChange(false);
+      onBound();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBatching(false);
+    }
+  };
+
   return (
     <ResponsiveDialog
       open={open}
       onOpenChange={onOpenChange}
       title="站点上的 API Key"
-      description={`从 ${wallet.base_url} 读取该账户的所有 Key，选一把绑定。绑定后成本只算这把 Key 的实际消耗。`}
+      description={`从 ${wallet.base_url} 读取该账户的所有 Key。勾选多把可批量挂成多行监控（每把一行，按这把 Key 的实际消耗算成本）；「绑定」则是把这把 Key 换进当前行。`}
     >
       <div className="space-y-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-muted-foreground text-xs">{keys?.length ? `共 ${keys.length} 把 Key` : ""}</p>
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={!!keys?.length && selected.size === keys.length}
+              onCheckedChange={(x) => setSelected(x ? new Set((keys ?? []).map((k) => k.id)) : new Set())}
+              disabled={!keys?.length}
+            />
+            <span className="text-muted-foreground text-xs">全选</span>
+          </label>
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
             <RefreshCw className={cn(loading && "animate-spin")} />
             刷新
@@ -533,6 +573,7 @@ function RemoteKeysDialog({
           <div className="divide-y rounded-md border">
             {keys.map((k) => (
               <div key={k.id} className="flex items-center gap-2 p-3 text-sm">
+                <Checkbox checked={selected.has(k.id)} onCheckedChange={() => toggle(k.id)} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate font-medium">{k.name}</span>
@@ -561,7 +602,15 @@ function RemoteKeysDialog({
         ) : null}
         {loading ? <p className="text-muted-foreground text-sm">正在读取站点 Key 列表…</p> : null}
         <FormError>{error}</FormError>
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between gap-2">
+          {selected.size ? (
+            <Button onClick={addRows} disabled={batching}>
+              <Plus />
+              {batching ? `添加中 0/${selected.size}…` : `添加选中的 ${selected.size} 行监控`}
+            </Button>
+          ) : (
+            <span className="text-muted-foreground text-xs">勾选 Key 后可批量添加为多行监控</span>
+          )}
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             关闭
           </Button>
