@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ExternalLink, KeyRound, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 import { del, get, patch, post } from "../api";
 import { curf, relTime } from "../format";
 import { useLedgerRefresh, useProjects } from "../hooks";
-import type { Party, PartyWallet } from "../types";
+import type { Party, PartyWallet, RemoteStationKey } from "../types";
 
 import { FormError, ResponsiveDialog, useConfirm } from "./shared";
 
@@ -58,6 +58,7 @@ export type WalletDraft = {
   platform: PartyWallet["platform"];
   base_url: string;
   api_key: string;
+  cost_mode: "account" | "key";
   custom: boolean;
   custom_ratio: string;
   consume_ratio: string;
@@ -76,6 +77,7 @@ export const EMPTY_WALLET: WalletDraft = {
   platform: "newapi",
   base_url: "",
   api_key: "",
+  cost_mode: "account",
   custom: false,
   custom_ratio: "",
   consume_ratio: "",
@@ -115,6 +117,7 @@ export const walletBody = (v: WalletDraft) => ({
   name: v.name,
   platform: v.platform,
   base_url: v.base_url.trim(),
+  cost_mode: v.cost_mode,
   custom: v.custom,
   custom_ratio: v.custom ? Number(v.custom_ratio) : null,
   // 消耗倍率：自定义且填了就用，没填默认 1
@@ -142,12 +145,14 @@ export function WalletFields({
   keyHint,
   loginHint,
   tokenHint,
+  onPickKey,
 }: {
   v: WalletDraft;
   setV: (v: WalletDraft) => void;
   keyHint?: string;
   loginHint?: string;
   tokenHint?: string;
+  onPickKey?: () => void;
 }) {
   const { data: pd } = useProjects();
   const projects = (pd?.projects ?? []).filter((p) => !p.archived);
@@ -204,6 +209,32 @@ export function WalletFields({
           value={v.api_key}
           onChange={(e) => setV({ ...v, api_key: e.target.value })}
         />
+      </div>
+      <div className="space-y-2">
+        <Label>成本口径</Label>
+        <Select
+          value={v.cost_mode}
+          onValueChange={(x) => setV({ ...v, cost_mode: x as WalletDraft["cost_mode"] })}
+        >
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="account">账户总消费（整站账户，默认）</SelectItem>
+            <SelectItem value="key">绑定 Key 消耗（只算这把 Key）</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-muted-foreground text-xs">
+          {v.cost_mode === "key"
+            ? "成本 = 绑定的这把 Key 在站点的实际累计消耗。同一站点开了多把 Key 分给不同项目时用这个口径。"
+            : "成本 = 该账户在站点的总消费（和现在一样）。同一账户多把 Key 读到的是同一个数。"}
+        </p>
+        {v.cost_mode === "key" && onPickKey ? (
+          <Button type="button" variant="outline" size="sm" onClick={onPickKey}>
+            <KeyRound />
+            从站点读取 Key 列表
+          </Button>
+        ) : null}
       </div>
       <div className="bg-muted/40 space-y-3 rounded-lg border p-3">
         <label className="flex items-center justify-between gap-3 text-sm">
@@ -384,6 +415,30 @@ export function WalletFields({
           />
         </div>
       ) : null}
+      {v.platform === "sub2api" ? (
+        <div className="bg-muted/40 space-y-3 rounded-lg border p-3">
+          <div>
+            <span className="text-sm font-medium">站点账号密码（sub2api）</span>
+            <span className="text-muted-foreground block text-xs">
+              填我们在供应商 sub2api 站点的登录邮箱和密码，系统用它登录站点面板，读取该账户下所有
+              API Key 供选择绑定（「成本口径 = 绑定 Key 消耗」时用）。只发查询请求，不产生费用。
+              {loginHint ? `当前 ${loginHint}。` : ""}
+            </span>
+          </div>
+          <Input
+            placeholder="登录邮箱"
+            value={v.login_user}
+            onChange={(e) => setV({ ...v, login_user: e.target.value })}
+          />
+          <Input
+            type="password"
+            autoComplete="new-password"
+            placeholder={loginHint ? "登录密码（留空 = 不修改）" : "登录密码"}
+            value={v.login_pass}
+            onChange={(e) => setV({ ...v, login_pass: e.target.value })}
+          />
+        </div>
+      ) : null}
       <label className="flex items-center justify-between gap-3 text-sm">
         <span>
           <span className="font-medium">跳过证书校验</span>
@@ -392,6 +447,118 @@ export function WalletFields({
         <Switch checked={v.insecure} onCheckedChange={(x) => setV({ ...v, insecure: x })} />
       </label>
     </>
+  );
+}
+
+// 从供应商站点读取该账户的 API Key 列表，选一把绑定：写入这行监控并切到「绑定 Key 消耗」口径
+function RemoteKeysDialog({
+  wallet,
+  open,
+  onOpenChange,
+  onBound,
+}: {
+  wallet: PartyWallet;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  onBound: () => void;
+}) {
+  const [keys, setKeys] = useState<RemoteStationKey[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [binding, setBinding] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const d = await get<{ keys: RemoteStationKey[] }>(`/party-wallets/${wallet.id}/remote-keys`);
+      setKeys(d.keys);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (open) {
+      setKeys(null);
+      load();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, wallet.id]);
+
+  const bind = async (keyId: string) => {
+    setBinding(keyId);
+    setError(null);
+    try {
+      const { wallet: r } = await post<{ wallet: PartyWallet }>(`/party-wallets/${wallet.id}/bind-remote-key`, {
+        key_id: keyId,
+      });
+      if (r.last_error) toast.error(`已绑定，但抓取失败：${r.last_error}`);
+      else toast.success(`已绑定「${r.name}」· 实际余额 ${amt(r.last_actual)}`);
+      onOpenChange(false);
+      onBound();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBinding("");
+    }
+  };
+
+  return (
+    <ResponsiveDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="站点上的 API Key"
+      description={`从 ${wallet.base_url} 读取该账户的所有 Key，选一把绑定。绑定后成本只算这把 Key 的实际消耗。`}
+    >
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-muted-foreground text-xs">{keys?.length ? `共 ${keys.length} 把 Key` : ""}</p>
+          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+            <RefreshCw className={cn(loading && "animate-spin")} />
+            刷新
+          </Button>
+        </div>
+        {keys?.length ? (
+          <div className="divide-y rounded-md border">
+            {keys.map((k) => (
+              <div key={k.id} className="flex items-center gap-2 p-3 text-sm">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-medium">{k.name}</span>
+                    <Badge variant="outline">{k.status}</Badge>
+                  </div>
+                  <div className="text-muted-foreground truncate font-mono text-xs">{k.key_masked}</div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className="text-muted-foreground text-xs">累计消耗</div>
+                  <div className="font-semibold tabular-nums">{amt(k.used)}</div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  disabled={binding === k.id}
+                  onClick={() => bind(k.id)}
+                >
+                  {binding === k.id ? "绑定中…" : "绑定"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : !loading && !error ? (
+          <p className="text-muted-foreground text-sm">站点上没有读到 Key。先在站点控制台创建，再回来刷新。</p>
+        ) : null}
+        {loading ? <p className="text-muted-foreground text-sm">正在读取站点 Key 列表…</p> : null}
+        <FormError>{error}</FormError>
+        <div className="flex justify-end">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            关闭
+          </Button>
+        </div>
+      </div>
+    </ResponsiveDialog>
   );
 }
 
@@ -412,10 +579,12 @@ function WalletDialog({
   const [v, setV] = useState<WalletDraft>(EMPTY_WALLET);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [remoteOpen, setRemoteOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setError(null);
+    setRemoteOpen(false);
     setV(
       wallet
         ? {
@@ -423,6 +592,7 @@ function WalletDialog({
             platform: wallet.platform,
             base_url: wallet.base_url,
             api_key: "",
+            cost_mode: wallet.cost_mode === "key" ? "key" : "account",
             custom: wallet.custom,
             custom_ratio: wallet.custom_ratio == null ? "" : String(wallet.custom_ratio),
             consume_ratio: wallet.consume_ratio == null ? "" : String(wallet.consume_ratio),
@@ -487,7 +657,15 @@ function WalletDialog({
           keyHint={wallet ? (wallet.has_key ? `（当前 ${wallet.key_masked}，留空 = 不修改）` : "") : undefined}
           loginHint={wallet?.has_login ? `已绑定账号 ${wallet.login_user}` : undefined}
           tokenHint={wallet?.has_token ? "已绑定令牌" : undefined}
+          onPickKey={wallet ? () => setRemoteOpen(true) : undefined}
         />
+        {wallet && v.cost_mode === "key" ? (
+          <p className="text-muted-foreground text-xs">
+            {wallet.cost_mode === "key"
+              ? `当前绑定 ${wallet.key_masked || "（还没有 Key）"}，点上面的按钮可换成站点上的其他 Key`
+              : "保存后可用「从站点读取 Key 列表」绑定具体的 Key"}
+          </p>
+        ) : null}
         <FormError>{error}</FormError>
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -498,6 +676,14 @@ function WalletDialog({
           </Button>
         </div>
       </div>
+      {wallet ? (
+        <RemoteKeysDialog
+          wallet={wallet}
+          open={remoteOpen}
+          onOpenChange={setRemoteOpen}
+          onBound={onSaved}
+        />
+      ) : null}
     </ResponsiveDialog>
   );
 }
@@ -618,6 +804,7 @@ export function PartyWallets({ party }: { party: Party }) {
                 <div className="flex items-center gap-1.5 text-sm">
                   <span className="font-medium">{w.name}</span>
                   <Badge variant="outline">{w.platform === "sub2api" ? "sub2api" : "new-api"}</Badge>
+                  {w.cost_mode === "key" ? <Badge variant="secondary">按 Key 计费</Badge> : null}
                   {w.custom ? <Badge variant="secondary">自定义倍率</Badge> : null}
                   <span className="ml-auto flex items-center gap-0.5">
                     <Switch checked={w.enabled} onCheckedChange={(x) => toggle(w, x)} className="mr-1 scale-90" />

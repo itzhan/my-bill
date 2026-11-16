@@ -203,6 +203,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS stations (
   quota_per_usd REAL NOT NULL DEFAULT 500000, created_at TEXT NOT NULL
 )`);
 try { db.exec('ALTER TABLE projects ADD COLUMN station_id INTEGER REFERENCES stations(id)'); } catch { /* 已有该列 */ }
+// 项目级期初成本（中转制）：项目上直接设总期初，各供应商站点只算封存起点之后的新增消耗
+try { db.exec('ALTER TABLE projects ADD COLUMN opening_cost REAL'); } catch { /* 已有该列 */ }
 try { db.exec("ALTER TABLE relay_customer_groups ADD COLUMN price_mode TEXT NOT NULL DEFAULT 'cny'"); } catch { /* 已有该列 */ }
 // 客户分组按日期调价：某日期及以后的消耗按新价（同一分组可多段，取该日之前最近一条）
 db.exec(`CREATE TABLE IF NOT EXISTS relay_customer_group_rates (
@@ -633,6 +635,17 @@ const ops = {
     if (patch.ptype !== undefined) db.prepare('UPDATE projects SET ptype = ? WHERE id = ?').run(['short', 'key'].includes(patch.ptype) ? patch.ptype : 'relay', p.id);
     if (patch.category !== undefined) db.prepare('UPDATE projects SET category = ? WHERE id = ?').run(patch.category === 'company' ? 'company' : 'customer', p.id);
     if (patch.station_id !== undefined) db.prepare('UPDATE projects SET station_id = ? WHERE id = ?').run(Number(patch.station_id) > 0 ? Number(patch.station_id) : null, p.id);
+    if (patch.opening_cost !== undefined) {
+      const pt = patch.ptype !== undefined ? (['short', 'key'].includes(patch.ptype) ? patch.ptype : 'relay') : p.ptype;
+      if (pt !== 'relay') throw new HttpError(400, '只有中转制项目支持期初成本');
+      const raw = patch.opening_cost;
+      if (raw === null || String(raw).trim() === '') db.prepare('UPDATE projects SET opening_cost = NULL WHERE id = ?').run(p.id);
+      else {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) throw new HttpError(400, '期初成本需为不小于 0 的数字');
+        db.prepare('UPDATE projects SET opening_cost = ? WHERE id = ?').run(r2(n), p.id);
+      }
+    }
     const what = archived !== p.archived ? `${archived ? '归档' : '恢复'}了项目「${name}」` : `修改了项目「${p.name}」${name !== p.name ? ` → 「${name}」` : ''}${note !== p.note ? `，说明：${note}` : ''}`;
     dataChanged(user, `${via}${what}`);
     return q.project.get(p.id);
@@ -3164,7 +3177,7 @@ function usageEstimate(p) {
     const f = relayForecastCache.get(p.id);
     // 缓存还没算出来时返回空，让没有消耗数据的项目先按记账收支显示
     if (!f) return null;
-    return { receivable: r2(f.customer), payable: r2(f.supplier), profit: r2(f.profit), note: '分组收费 − 站点累计消费' };
+    return { receivable: r2(f.customer), payable: r2(f.supplier), profit: r2(f.profit), note: p.opening_cost != null ? '项目期初 + 站点新增消耗' : '分组收费 − 站点累计消费' };
   }
   if (p.ptype === 'key') {
     const rows = db.prepare("SELECT pa.kind, COALESCE(SUM(r.amount * CASE WHEN r.currency = 'CNY' THEN 1 ELSE r.rate END), 0) AS n FROM party_records r JOIN parties pa ON pa.id = r.party_id WHERE r.project_id = ? AND r.source = 'key' AND r.kind = 'due' GROUP BY pa.kind").all(p.id);
@@ -3799,6 +3812,8 @@ async function supplierDailyCost(onlyProject = null) {
     segsBy.get(s.wallet_id).push(s);
   }
   const walletRows = db.prepare("SELECT w.*, p.name AS party_name, pr.ptype AS ptype FROM party_wallets w JOIN parties p ON p.id = w.party_id LEFT JOIN projects pr ON pr.id = w.project_id WHERE w.enabled = 1 AND p.archived = 0 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
+  // 项目级期初成本：项目上直接设的总期初（中转制）。行没单独设期初时，这行只算起点后新增，期初由项目层扛
+  const projOpenings = new Map(db.prepare("SELECT id, opening_cost FROM projects WHERE ptype = 'relay' AND opening_cost IS NOT NULL").all().map((r) => [r.id, Number(r.opening_cost)]));
   const seen = new Set();
   const jobs = [];
   for (const w of walletRows) {
@@ -3813,13 +3828,14 @@ async function supplierDailyCost(onlyProject = null) {
     while (queue.length) {
       const w = queue.shift();
       try {
-        const daily = (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+        // new-api 绑定 Key 模式没有 key 级按天接口（账户级按天是整个账户的，不能拿来拆这把 Key），不拉按天，新增全部落在「历史」行
+        const daily = w.platform === 'newapi' && w.cost_mode === 'key' ? [] : (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
         const segs = segsBy.get(w.id) || [];
-        // 中转且设了期初：只把起点之后的消耗算进按天，期初和窗口前的新增放进 lifetime，由预估的「历史」行带上
-        if (w.ptype === 'relay' && w.opening_cost != null) {
+        // 中转且设了期初（行级期初或项目级期初）：只把起点之后的消耗算进按天，期初和窗口前的新增放进 lifetime，由预估的「历史」行带上
+        if (w.ptype === 'relay' && (w.opening_cost != null || projOpenings.has(w.project_id))) {
           const rawUsed = Number(w.last_used);
-          const bill = w.opening_used != null && Number.isFinite(rawUsed) ? billSinceOpening(w, segs, rawUsed, daily) : null;
-          const total = bill ? bill.total : r2(Number(w.opening_cost));
+          const bill = w.opening_used != null && Number.isFinite(rawUsed) ? billSinceOpening(w, segs, rawUsed, daily, w.opening_cost != null ? null : 0) : null;
+          const total = bill ? bill.total : w.opening_cost != null ? r2(Number(w.opening_cost)) : 0;
           if (bill) for (const [date, cost] of bill.byDate) {
             if (!cost) continue;
             byKey.set(`${w.project_id}|${date}`, r2((byKey.get(`${w.project_id}|${date}`) || 0) + cost));
@@ -3852,10 +3868,10 @@ async function supplierDailyCost(onlyProject = null) {
       } catch (e) {
         errors.push(`${w.name}：${String(e.message || '').slice(0, 50)}`);
         // 按天抓失败时仍保留期初计费，避免预估应付掉回 0
-        if (w.ptype === 'relay' && w.opening_cost != null && w.project_id) {
+        if (w.ptype === 'relay' && (w.opening_cost != null || projOpenings.has(w.project_id)) && w.project_id) {
           const rawUsed = Number(w.last_used);
-          const bill = w.opening_used != null && Number.isFinite(rawUsed) ? billSinceOpening(w, segsBy.get(w.id) || [], rawUsed, []) : null;
-          const total = bill ? bill.total : r2(Number(w.opening_cost) || 0);
+          const bill = w.opening_used != null && Number.isFinite(rawUsed) ? billSinceOpening(w, segsBy.get(w.id) || [], rawUsed, [], w.opening_cost != null ? null : 0) : null;
+          const total = bill ? bill.total : w.opening_cost != null ? r2(Number(w.opening_cost) || 0) : 0;
           lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + total));
         }
       }
@@ -3950,6 +3966,13 @@ async function refreshRelayForecasts() {
         f.daily.push({ date: '历史（30天前）', customer: 0, supplier: earlier, profit: r2(-earlier) });
         f.supplier = r2(f.supplier + earlier);
         f.profit = r2(f.profit - earlier);
+      }
+      // 项目级期初成本：单独一行，应付 = 期初 + 各站点起点后新增
+      if (p.opening_cost != null) {
+        const oc = r2(Number(p.opening_cost));
+        f.daily.push({ date: '项目期初', customer: 0, supplier: oc, profit: r2(-oc) });
+        f.supplier = r2(f.supplier + oc);
+        f.profit = r2(f.profit - oc);
       }
       relayForecastCache.set(p.id, f);
     }

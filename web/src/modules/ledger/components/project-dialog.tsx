@@ -42,6 +42,7 @@ export function ProjectDialog({
   const [ptype, setPtype] = useState<"relay" | "short" | "key">("relay");
   const [category, setCategory] = useState<"customer" | "company">("customer");
   const [stationId, setStationId] = useState("");
+  const [openingCost, setOpeningCost] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -52,6 +53,7 @@ export function ProjectDialog({
     setPtype(project?.ptype ?? "relay");
     setCategory(project?.category === "company" ? "company" : "customer");
     setStationId(project?.station_id ? String(project.station_id) : "");
+    setOpeningCost(project?.opening_cost == null ? "" : String(project.opening_cost));
     setError(null);
   }, [open, project]);
 
@@ -75,6 +77,9 @@ export function ProjectDialog({
           ptype,
           category,
           station_id: ptype === "short" ? null : Number(stationId) || null,
+          ...(ptype === "relay"
+            ? { opening_cost: openingCost.trim() === "" ? null : Number(openingCost) }
+            : {}),
         });
         toast.success("项目已更新");
         onOpenChange(false);
@@ -225,6 +230,26 @@ export function ProjectDialog({
                 {stationChoices.length
                   ? "台子在侧边栏「台子管理」里统一配置"
                   : "还没有这个类型的台子，先到侧边栏「台子管理」里添加"}
+              </p>
+            </div>
+          ) : null}
+          {project && ptype === "relay" ? (
+            <div className="space-y-2">
+              <Label htmlFor="project-opening-cost">项目期初成本（可选）</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="project-opening-cost"
+                  inputMode="decimal"
+                  className="w-32"
+                  placeholder="不填"
+                  value={openingCost}
+                  onChange={(e) => setOpeningCost(e.target.value)}
+                />
+                <span className="text-muted-foreground text-xs">元</span>
+              </div>
+              <p className="text-muted-foreground text-xs">
+                接管项目时已在别处记的供应商成本总额。填了之后：应付 = 项目期初 + 各站点封存起点之后的新增消耗，
+                不用再逐站点填期初成本（站点上单独填的期初仍然优先）。清空恢复按站点累计消费。
               </p>
             </div>
           ) : null}

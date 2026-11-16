@@ -79,6 +79,8 @@ export type Project = {
   ptype?: "relay" | "short" | "key";
   category?: "customer" | "company";
   station_id?: number | null;
+  // 项目级期初成本（中转制）：各供应商站点只算封存起点之后的新增消耗
+  opening_cost?: number | null;
 };
 export type ProjectWithSummary = Project & {
   summary: Summary;
@@ -254,6 +256,8 @@ export type PartyWallet = {
   last_used: number | null;
   last_used_actual: number | null;
   used_adjust?: number;
+  // 成本口径：account = 账户总消费（原样）；key = 只算绑定的这把 Key 的实际消耗
+  cost_mode?: "account" | "key";
   // 期初成本（人民币）。空 = 按站点累计计费；有值时 billed_used = 期初 + 起点之后的新增消耗
   opening_cost?: number | null;
   opening_used?: number | null;
@@ -289,6 +293,16 @@ export type MemberDetail = {
   rates: Rates;
 };
 export type WalletGroup = { name: string; ratio: number | null; desc: string; model_count: number; types: string[] };
+// 站点上读到的 API Key（供应商站点 key 列表，绑定后按它的实际消耗算成本）
+export type RemoteStationKey = {
+  id: string;
+  name: string;
+  key_masked: string;
+  used: number | null;
+  remain: number | null;
+  status: string;
+  last_used_at: string | null;
+};
 export type ConsumePoint = { date: string; usd: number; count: number };
 export type ConsumeGroup = { group: string; usd: number; count: number; tokens: number };
 export type ConsumeModel = { model: string; usd: number; count: number; tokens: number };
