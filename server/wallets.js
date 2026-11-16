@@ -179,7 +179,7 @@ async function newapiSelf(base, token, userId, qpu, insecure) {
 // sub2api：/v1/usage 拿钱包（balance），/v1/sub2api/billing 拿倍率；老版本没有 billing 接口时用 实际扣费 / 标准费用 反推
 async function fetchSub2api(base, key, wantRatio, insecure) {
   const u = await httpJson(`${base}/v1/usage`, { key, insecure });
-  if (!u.ok) throw new Error(`读取余额失败：${u.status === 401 ? "Key 无效或已禁用" : u.error}`);
+  if (!u.ok) throw new Error(`读取余额失败：${u.status === 401 ? "Key 无效或已禁用（编辑里点「从站点读取 Key 列表」重新绑定一把）" : u.error}`);
   const d = u.json;
   let wallet = null;
   let kind = "";
@@ -703,11 +703,19 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   }
 
   async function refresh(id) {
-    const w = getOne.get(id);
+    let w = getOne.get(id);
     if (!w) throw new HttpError(404, '余额监控不存在');
     const t = nowIso();
     try {
-      if (!w.api_key && !(w.platform === 'newapi' && w.access_token)) throw new Error('还没有填 API Key');
+      if (!w.api_key && !(w.platform === 'newapi' && w.access_token)) {
+        // sub2api 只填了站点账号密码：自动从站点绑一把可用的 Key（恰好一把时），多把让用户去列表里选
+        if (!(w.platform === 'sub2api' && w.login_user && w.login_pass)) throw new Error('还没有填 API Key（new-api 填访问令牌、sub2api 填账号密码时可不填）');
+        const active = (await listRemoteKeys(w)).filter((k) => k.status === '启用' && k.key_full);
+        if (!active.length) throw new Error('站点账号下还没有可用的 Key，先去站点创建，再回来刷新');
+        if (active.length > 1) throw new Error(`站点账号下有 ${active.length} 把 Key，在编辑里点「从站点读取 Key 列表」选择要绑定的一把`);
+        db.prepare('UPDATE party_wallets SET api_key = ?, updated_at = ? WHERE id = ?').run(active[0].key_full, t, id);
+        w = { ...w, api_key: active[0].key_full };
+      }
       const r = await fetchWallet(w);
       const segs = qRatesOf.all(id);
       const today = walletToday();
@@ -781,8 +789,10 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     const pa = party.get(Number(req.params.id));
     if (!pa) throw new HttpError(404, '供应商不存在（只有供应商可以绑定余额）');
     const v = input(req.body || {}, false);
-    // new-api 填了访问令牌就能按账户读余额 / 消耗，API Key 可不填
-    if (!v.api_key && !(v.platform === 'newapi' && v.access_token)) throw new HttpError(400, 'API Key 必填（new-api 填了访问令牌时可不填）');
+    // new-api 填了访问令牌就能按账户读余额 / 消耗；sub2api 填了站点账号密码就能自动绑 Key，都不用先填 API Key
+    if (!v.api_key && !(v.platform === 'newapi' && v.access_token) && !(v.platform === 'sub2api' && v.login_user && v.login_pass)) {
+      throw new HttpError(400, 'API Key 必填（new-api 填了访问令牌、sub2api 填了站点账号密码时可不填）');
+    }
     checkCustom(v);
     readOpening(req.body || {});
     const t = nowIso();

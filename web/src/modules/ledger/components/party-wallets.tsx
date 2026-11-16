@@ -95,8 +95,14 @@ export const EMPTY_WALLET: WalletDraft = {
 // 校验：返回错误文案，没问题返回 null
 export function walletDraftError(v: WalletDraft, requireKey: boolean) {
   if (!/^https?:\/\//i.test(v.base_url.trim())) return "站点地址需以 http:// 或 https:// 开头";
-  if (requireKey && !v.api_key.trim() && !(v.platform === "newapi" && v.access_token.trim()))
-    return "API Key 必填（new-api 填了访问令牌时可不填）";
+  // new-api 填了访问令牌、sub2api 填了站点账号密码时，都不用先填 API Key
+  if (
+    requireKey &&
+    !v.api_key.trim() &&
+    !(v.platform === "newapi" && v.access_token.trim()) &&
+    !(v.platform === "sub2api" && v.login_user.trim() && v.login_pass.trim())
+  )
+    return "API Key 必填（new-api 填访问令牌、sub2api 填站点账号密码时可不填）";
   if (v.custom && !(Number(v.custom_ratio) > 0)) return "充值倍率必须大于 0";
   if (v.custom && v.consume_ratio.trim() && !(Number(v.consume_ratio) > 0)) return "消耗倍率必须大于 0";
   if (v.opening_cost.trim()) {
@@ -201,11 +207,14 @@ export function WalletFields({
         </div>
       </div>
       <div className="space-y-2">
-        <Label>API Key {keyHint ?? "*"}</Label>
+        <Label>
+          API Key{" "}
+          {keyHint ?? (v.platform === "sub2api" ? "（填了站点账号密码可不填）" : "*")}
+        </Label>
         <Input
           type="password"
           autoComplete="new-password"
-          placeholder="sk-..."
+          placeholder={v.platform === "sub2api" ? "sk-...（留空 = 用账号密码自动绑）" : "sk-..."}
           value={v.api_key}
           onChange={(e) => setV({ ...v, api_key: e.target.value })}
         />
@@ -229,7 +238,7 @@ export function WalletFields({
             ? "成本 = 绑定的这把 Key 在站点的实际累计消耗。同一站点开了多把 Key 分给不同项目时用这个口径。"
             : "成本 = 该账户在站点的总消费（和现在一样）。同一账户多把 Key 读到的是同一个数。"}
         </p>
-        {v.cost_mode === "key" && onPickKey ? (
+        {onPickKey ? (
           <Button type="button" variant="outline" size="sm" onClick={onPickKey}>
             <KeyRound />
             从站点读取 Key 列表
