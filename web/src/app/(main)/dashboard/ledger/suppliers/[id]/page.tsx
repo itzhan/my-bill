@@ -242,6 +242,7 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
   const totalUsed = wallets.reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
   const topup = totalActual + totalUsed; // 充值总额度 ≈ 当前余额 + 累计消耗
   const rc = party.recharge;
+  const openingOn = wallets.some((w) => w.billed_used != null);
 
   const kpis = [
     { label: "充值总额度", value: amt(topup), sub: "站点累计充入 ≈ 当前余额 + 累计消耗", cls: "" },
@@ -255,7 +256,9 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
     {
       label: rc && rc.unsettled > 0 ? "未结算（我们还欠）" : "未结算（预付结余）",
       value: rc ? (rc.unsettled < 0 ? "−" : "") + curf(Math.abs(rc.unsettled), rc.currency) : "-",
-      sub: "累计消费 − 已结算 + 实际余额（正=我们还欠，负=多付/预付结余）",
+      sub: openingOn
+        ? "期初成本 + 之后的站点消耗 − 已结算 + 实际余额"
+        : "累计消费 − 已结算 + 实际余额（正=我们还欠，负=多付/预付结余）",
       cls: rc && rc.unsettled > 0 ? "text-warning" : "text-income",
     },
   ];

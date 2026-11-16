@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 const ExcelJS = require('exceljs');
 const Anthropic = require('@anthropic-ai/sdk');
-const { setupPartyWallets, fetchDailyUsage, consumeRatioOn } = require('./wallets');
+const { setupPartyWallets, fetchDailyUsage, consumeRatioOn, billSinceOpening } = require('./wallets');
 const { setupKeyAccounting } = require('./keyacct');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -3798,7 +3798,7 @@ async function supplierDailyCost(onlyProject = null) {
     if (!segsBy.has(s.wallet_id)) segsBy.set(s.wallet_id, []);
     segsBy.get(s.wallet_id).push(s);
   }
-  const walletRows = db.prepare("SELECT w.*, p.name AS party_name FROM party_wallets w JOIN parties p ON p.id = w.party_id WHERE w.enabled = 1 AND p.archived = 0 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
+  const walletRows = db.prepare("SELECT w.*, p.name AS party_name, pr.ptype AS ptype FROM party_wallets w JOIN parties p ON p.id = w.party_id LEFT JOIN projects pr ON pr.id = w.project_id WHERE w.enabled = 1 AND p.archived = 0 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
   const seen = new Set();
   const jobs = [];
   for (const w of walletRows) {
@@ -3815,6 +3815,18 @@ async function supplierDailyCost(onlyProject = null) {
       try {
         const daily = (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
         const segs = segsBy.get(w.id) || [];
+        // 中转且设了期初：只把起点之后的消耗算进按天，期初和窗口前的新增放进 lifetime，由预估的「历史」行带上
+        if (w.ptype === 'relay' && w.opening_cost != null) {
+          const rawUsed = Number(w.last_used);
+          const bill = w.opening_used != null && Number.isFinite(rawUsed) ? billSinceOpening(w, segs, rawUsed, daily) : null;
+          const total = bill ? bill.total : r2(Number(w.opening_cost));
+          if (bill) for (const [date, cost] of bill.byDate) {
+            if (!cost) continue;
+            byKey.set(`${w.project_id}|${date}`, r2((byKey.get(`${w.project_id}|${date}`) || 0) + cost));
+          }
+          lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + total));
+          continue;
+        }
         // 多算扣减从最早的一天开始减，减完再算进项目
         let adjust = Number(w.used_adjust) || 0;
         let recentRaw = 0, recentCost = 0;
@@ -3837,7 +3849,16 @@ async function supplierDailyCost(onlyProject = null) {
           siteLifetime = Number(w.last_used_actual) || recentCost;
         }
         lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + siteLifetime));
-      } catch (e) { errors.push(`${w.name}：${String(e.message || '').slice(0, 50)}`); }
+      } catch (e) {
+        errors.push(`${w.name}：${String(e.message || '').slice(0, 50)}`);
+        // 按天抓失败时仍保留期初计费，避免预估应付掉回 0
+        if (w.ptype === 'relay' && w.opening_cost != null && w.project_id) {
+          const rawUsed = Number(w.last_used);
+          const bill = w.opening_used != null && Number.isFinite(rawUsed) ? billSinceOpening(w, segsBy.get(w.id) || [], rawUsed, []) : null;
+          const total = bill ? bill.total : r2(Number(w.opening_cost) || 0);
+          lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + total));
+        }
+      }
     }
   }));
   const data = { byKey, lifetime, errors };

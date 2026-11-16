@@ -27,6 +27,52 @@ function consumeRatioOn(w, date, segs) {
   for (const s of segs || []) if (s.from_date && s.from_date <= date) r = Number(s.ratio) || r;
   return r;
 }
+// 设了期初成本时的计费：期初 + 起点之后新增的站点消耗（按消耗倍率）。未设期初返回 null。
+// daily 是站点按天消耗（与 last_used 同单位），不够覆盖的差额算在日窗口之前。
+// used_adjust 只减新增消耗，不减期初；减完不能小于 0。
+function billSinceOpening(w, segs, rawUsed, daily) {
+  if (num(w.opening_cost) == null || num(w.opening_used) == null || rawUsed == null || !Number.isFinite(Number(rawUsed))) return null;
+  const opening = Number(w.opening_cost);
+  const delta = Math.max(0, Number(rawUsed) - Number(w.opening_used));
+  const days = [...(daily || [])].filter((x) => x && x.date).sort((a, b) => (a.date < b.date ? -1 : 1));
+  let left = delta;
+  const taken = [];
+  for (let i = days.length - 1; i >= 0 && left > 1e-9; i--) {
+    const usd = Number(days[i].usd) || 0;
+    if (usd <= 0) continue;
+    const take = Math.min(usd, left);
+    taken.push({ date: days[i].date, usd: take });
+    left -= take;
+  }
+  taken.reverse();
+  const earlierDate = days.length ? addDaysKey(days[0].date, -1) : '1970-01-01';
+  let earlierCost = left * consumeRatioOn(w, earlierDate, segs);
+  const byDate = new Map();
+  let since = earlierCost;
+  for (const x of taken) {
+    const c = x.usd * consumeRatioOn(w, x.date, segs);
+    since += c;
+    byDate.set(x.date, (byDate.get(x.date) || 0) + c);
+  }
+  const adjust = Number(w.used_adjust) || 0;
+  if (adjust > 0 && since > 0) {
+    let rest = adjust;
+    const cutEarlier = Math.min(earlierCost, rest);
+    earlierCost -= cutEarlier;
+    rest -= cutEarlier;
+    for (const d of [...byDate.keys()].sort()) {
+      if (rest <= 1e-9) break;
+      const c = byDate.get(d);
+      const cut = Math.min(c, rest);
+      rest -= cut;
+      const next = c - cut;
+      if (next <= 1e-9) byDate.delete(d);
+      else byDate.set(d, next);
+    }
+    since = Math.max(0, since - adjust);
+  }
+  return { total: round(opening + since, 4), byDate, earlierCost: round(Math.max(0, earlierCost), 4) };
+}
 function customRatioOn(w, date, segs) {
   if (!w.custom) return 1;
   let r = num(w.custom_ratio) > 0 ? num(w.custom_ratio) : 1;
@@ -484,6 +530,10 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   }
   // 多算扣减：站点累计消费里多计的部分，显示和算利润时减掉。站点每次重抓不会覆盖它
   if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = 'used_adjust'").get()) db.exec('ALTER TABLE party_wallets ADD COLUMN used_adjust REAL NOT NULL DEFAULT 0');
+  // 期初成本：空 = 仍按站点累计消费计费。有值时应付 = 期初 + 封存起点之后新增的 key 消耗
+  for (const col of ['opening_cost', 'opening_used', 'billed_used']) {
+    if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} REAL`);
+  }
   // 迁移：new-api 账号密码登录（读账户钱包与总消费，用户视角）、跳过证书校验
   for (const [col, ddl] of [['login_user', "TEXT NOT NULL DEFAULT ''"], ['login_pass', "TEXT NOT NULL DEFAULT ''"], ['insecure', 'INTEGER NOT NULL DEFAULT 0'], ['access_token', "TEXT NOT NULL DEFAULT ''"], ['token_user_id', "TEXT NOT NULL DEFAULT ''"]]) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = ?").get(col)) db.exec(`ALTER TABLE party_wallets ADD COLUMN ${col} ${ddl}`);
@@ -582,6 +632,43 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     return out;
   }
   const checkCustom = (w) => { if (w.custom && !(num(w.custom_ratio) > 0)) throw new HttpError(400, '自定义倍率必须大于 0'); };
+  const relayProject = (projectId) => {
+    if (!(Number(projectId) > 0)) return false;
+    const p = db.prepare('SELECT ptype FROM projects WHERE id = ?').get(Number(projectId));
+    return !!(p && p.ptype === 'relay');
+  };
+  // 缺省表示这次请求没带这个字段。空字符串 / null = 关闭。0 也算打开。
+  function readOpening(body) {
+    if (!body || !Object.prototype.hasOwnProperty.call(body, 'opening_cost')) return undefined;
+    const raw = body.opening_cost;
+    const blank = raw === null || raw === undefined || String(raw).trim() === '';
+    if (blank) return null;
+    const cost = num(raw);
+    if (cost == null) throw new HttpError(400, '期初成本需为数字');
+    if (cost < 0) throw new HttpError(400, '期初成本不能为负');
+    return round(cost, 4);
+  }
+  // 第一次打开不在这里封存起点：等紧接着的刷新用刚抓到的累计封存，历史消费不算进新增。
+  // 已经封存过的，只改金额不挪起点。清空则恢复按累计消费计费。
+  function applyOpening(id, body) {
+    const cost = readOpening(body);
+    if (cost === undefined) return;
+    const cur = getOne.get(id);
+    if (!cur) return;
+    if (cost == null) {
+      db.prepare('UPDATE party_wallets SET opening_cost = NULL, opening_used = NULL, billed_used = NULL WHERE id = ?').run(id);
+      return;
+    }
+    const keep = cur.opening_cost != null;
+    const openingUsed = keep ? cur.opening_used : null;
+    // 刷新前先按期初计，避免抓取失败时退回整段累计消费。只改金额时保留已计入的新增消耗。
+    let billed = null;
+    if (relayProject(cur.project_id)) {
+      const since = keep && num(cur.billed_used) != null ? Math.max(0, Number(cur.billed_used) - Number(cur.opening_cost)) : 0;
+      billed = round(cost + since, 4);
+    }
+    db.prepare('UPDATE party_wallets SET opening_cost = ?, opening_used = ?, billed_used = ? WHERE id = ?').run(cost, openingUsed, billed, id);
+  }
 
   async function refresh(id) {
     const w = getOne.get(id);
@@ -596,27 +683,50 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
       const todayActual = r.today == null || !w.custom ? r.todayActual : round(r.today * crToday, 4);
       const actual = r.wallet == null || !w.custom ? r.actual : round(r.wallet * customRatioOn(w, today, segs), 4);
       const lastRatio = w.custom ? customRatioOn(w, today, segs) : r.ratio;
-      // 站点报的累计消费减掉手工扣减（多算的部分），不能减成负数
+      // 站点报的累计消费减掉手工扣减（多算的部分），不能减成负数。这列仍是站点实际累计，不掺期初
       const adjust = num(w.used_adjust) || 0;
       let usedActual = r.usedActual === null ? null : Math.max(0, round(r.usedActual - adjust, 4));
-      // 设了按日期切倍率：累计实际消费 = 切日前 × 默认倍率 + 切日后 × 新倍率，不能整段改成新倍率
-      if (w.custom && segs.length && r.used != null) {
+      const openingOn = num(w.opening_cost) != null && relayProject(w.project_id);
+      const needDaily = r.used != null && ((w.custom && segs.length) || openingOn);
+      let daily = null;
+      if (needDaily) {
         try {
-          const daily = (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
-          let recentRaw = 0, cost = 0;
-          for (const x of daily) {
-            const usd = Number(x.usd) || 0;
-            recentRaw += usd;
-            cost += usd * consumeRatioOn(w, x.date, segs);
-          }
-          const earlierRaw = Math.max(0, r.used - recentRaw);
-          const earlierDate = daily.length ? addDaysKey(daily[0].date, -1) : '1970-01-01';
-          cost += earlierRaw * consumeRatioOn(w, earlierDate, segs);
-          usedActual = Math.max(0, round(cost - adjust, 4));
-        } catch { /* 按天没抓到就仍用当前默认倍率 × 累计 */ }
+          daily = (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+        } catch { daily = null; }
       }
-      db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_today = ?, last_today_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
-        .run(r.wallet, r.kind, lastRatio, r.source, actual, r.used, usedActual, r.today, todayActual, r.warning, t, id);
+      // 设了按日期切倍率：累计实际消费 = 切日前 × 默认倍率 + 切日后 × 新倍率，不能整段改成新倍率
+      if (w.custom && segs.length && r.used != null && daily) {
+        let recentRaw = 0, cost = 0;
+        for (const x of daily) {
+          const usd = Number(x.usd) || 0;
+          recentRaw += usd;
+          cost += usd * consumeRatioOn(w, x.date, segs);
+        }
+        const earlierRaw = Math.max(0, r.used - recentRaw);
+        const earlierDate = daily.length ? addDaysKey(daily[0].date, -1) : '1970-01-01';
+        cost += earlierRaw * consumeRatioOn(w, earlierDate, segs);
+        usedActual = Math.max(0, round(cost - adjust, 4));
+      }
+      // 期初计费：起点没封存时，用这次抓到的累计封存，避免把历史整段当成新增
+      let billed = null;
+      if (openingOn) {
+        let openingUsed = num(w.opening_used);
+        if (openingUsed == null && r.used != null) {
+          openingUsed = r.used;
+          db.prepare('UPDATE party_wallets SET opening_used = ? WHERE id = ?').run(openingUsed, id);
+        }
+        if (openingUsed != null && r.used != null) {
+          if (daily) {
+            const bill = billSinceOpening({ ...w, opening_used: openingUsed }, segs, r.used, daily);
+            billed = bill ? bill.total : null;
+          } else {
+            const delta = Math.max(0, r.used - openingUsed);
+            billed = round(Number(w.opening_cost) + Math.max(0, delta * consumeRatioOn(w, today, segs) - adjust), 4);
+          }
+        } else billed = num(w.billed_used) != null ? num(w.billed_used) : round(Number(w.opening_cost), 4);
+      }
+      db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, billed_used = ?, last_today = ?, last_today_actual = ?, last_error = ?, last_checked_at = ? WHERE id = ?")
+        .run(r.wallet, r.kind, lastRatio, r.source, actual, r.used, usedActual, billed, r.today, todayActual, r.warning, t, id);
       // 批量试出来的账号密码存下来，以后自动刷新直接用
       if (r.loginUsed && (r.loginUsed.user !== w.login_user || r.loginUsed.pass !== w.login_pass)) {
         db.prepare('UPDATE party_wallets SET login_user = ?, login_pass = ? WHERE id = ?').run(r.loginUsed.user, r.loginUsed.pass, id);
@@ -635,6 +745,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     // new-api 填了访问令牌就能按账户读余额 / 消耗，API Key 可不填
     if (!v.api_key && !(v.platform === 'newapi' && v.access_token)) throw new HttpError(400, 'API Key 必填（new-api 填了访问令牌时可不填）');
     checkCustom(v);
+    readOpening(req.body || {});
     const t = nowIso();
     const cols = { party_id: pa.id, ...v, created_at: t, updated_at: t };
     const keys = Object.keys(cols);
@@ -642,6 +753,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     const id = Number(r.lastInsertRowid);
     const rates = parseConsumeRates((req.body || {}).consume_rates);
     if (rates) replaceConsumeRates(id, rates);
+    applyOpening(id, req.body || {});
     const w = await refresh(id); // 加完立即抓一次
     onChanged(req.user, `给供应商「${pa.name}」添加了余额监控「${w.name}」`);
     if (typeof onWalletChanged === 'function') onWalletChanged();
@@ -652,10 +764,12 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     if (!w) throw new HttpError(404, '余额监控不存在');
     const v = input(req.body || {}, true);
     checkCustom({ ...w, ...v });
+    readOpening(req.body || {});
     const keys = Object.keys(v);
     if (keys.length) db.prepare(`UPDATE party_wallets SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...keys.map((k) => v[k]), nowIso(), w.id);
     const rates = parseConsumeRates((req.body || {}).consume_rates);
     if (rates) replaceConsumeRates(w.id, rates);
+    applyOpening(w.id, req.body || {});
     const out = await refresh(w.id); // 改了平台 / Key / 倍率后按新参数重抓
     onChanged(req.user, `修改了余额监控「${out.name}」`);
     if (typeof onWalletChanged === 'function') onWalletChanged();
@@ -697,7 +811,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   // 往来单位卡片用：每家供应商的余额汇总。
   // 钱包余额和累计消费是「账户级」的：同一站点（base_url）下的多把 Key 读到的是同一个账户，
   // 数值完全一样——Key 多只是为了各自追踪倍率。所以按站点去重，余额/消费每个账户只算一次。
-  const sumRowsStmt = db.prepare('SELECT base_url, last_actual, last_used_actual, last_error FROM party_wallets WHERE party_id = ? AND enabled = 1');
+  const sumRowsStmt = db.prepare('SELECT base_url, last_actual, last_used_actual, billed_used, last_error FROM party_wallets WHERE party_id = ? AND enabled = 1');
   return {
     listOf: (partyId) => ofParty.all(partyId).map(view),
     summaryOf(partyId) {
@@ -713,7 +827,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
         const vals = uniq.map(f).filter((v) => v !== null && v !== undefined);
         return vals.length ? round(vals.reduce((a, b) => a + b, 0), 4) : null;
       };
-      return { count: rows.length, actual: sumOf((r) => r.last_actual), used: sumOf((r) => r.last_used_actual), errors: rows.filter((r) => r.last_error).length };
+      return { count: rows.length, actual: sumOf((r) => r.last_actual), used: sumOf((r) => (r.billed_used != null ? r.billed_used : r.last_used_actual)), errors: rows.filter((r) => r.last_error).length };
     },
     // 详情页用：某把 Key 在供应商站点的分组 / 每组消耗 / 每日消耗（实时抓，不入库）
     async detailOf(walletId) {
@@ -724,6 +838,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
         id: w.id, name: w.name, platform: w.platform, base_url: w.base_url, custom: !!w.custom, ratio,
         consume_ratio: w.custom ? (num(w.consume_ratio) ?? 1) : 1, // 每日消耗 × 这个 = 实际消费
         last_wallet: num(w.last_wallet), last_used: num(w.last_used), last_used_actual: num(w.last_used_actual),
+        opening_cost: num(w.opening_cost), opening_used: num(w.opening_used), billed_used: num(w.billed_used),
         last_actual: num(w.last_actual), has_token: !!w.access_token,
       };
       try {
@@ -736,4 +851,4 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   };
 }
 
-module.exports = { setupPartyWallets, fetchWallet, fetchDailyUsage, consumeRatioOn, PLATFORMS };
+module.exports = { setupPartyWallets, fetchWallet, fetchDailyUsage, consumeRatioOn, billSinceOpening, PLATFORMS };

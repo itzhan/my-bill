@@ -63,6 +63,7 @@ export type WalletDraft = {
   consume_ratio: string;
   consume_rates: { from_date: string; custom_ratio: string; ratio: string }[];
   used_adjust: string;
+  opening_cost: string;
   access_token: string;
   token_user_id: string;
   login_user: string;
@@ -80,6 +81,7 @@ export const EMPTY_WALLET: WalletDraft = {
   consume_ratio: "",
   consume_rates: [],
   used_adjust: "",
+  opening_cost: "",
   access_token: "",
   token_user_id: "",
   login_user: "",
@@ -95,6 +97,10 @@ export function walletDraftError(v: WalletDraft, requireKey: boolean) {
     return "API Key 必填（new-api 填了访问令牌时可不填）";
   if (v.custom && !(Number(v.custom_ratio) > 0)) return "充值倍率必须大于 0";
   if (v.custom && v.consume_ratio.trim() && !(Number(v.consume_ratio) > 0)) return "消耗倍率必须大于 0";
+  if (v.opening_cost.trim()) {
+    const n = Number(v.opening_cost);
+    if (!Number.isFinite(n) || n < 0) return "期初成本需为不小于 0 的数字";
+  }
   if (v.custom) {
     for (const row of v.consume_rates) {
       if (!row.from_date && !row.ratio.trim() && !row.custom_ratio.trim()) continue;
@@ -119,6 +125,7 @@ export const walletBody = (v: WalletDraft) => ({
         .map((r) => ({ from_date: r.from_date, custom_ratio: Number(r.custom_ratio), ratio: Number(r.ratio) }))
     : [],
   used_adjust: Number(v.used_adjust) > 0 ? Number(v.used_adjust) : 0,
+  opening_cost: v.opening_cost.trim() === "" ? null : Number(v.opening_cost),
   insecure: v.insecure,
   login_user: v.login_user.trim(),
   token_user_id: v.token_user_id.trim(),
@@ -143,6 +150,8 @@ export function WalletFields({
   tokenHint?: string;
 }) {
   const { data: pd } = useProjects();
+  const projects = (pd?.projects ?? []).filter((p) => !p.archived);
+  const relay = projects.some((p) => String(p.id) === v.project_id && p.ptype === "relay");
   return (
     <>
       <div className="space-y-2">
@@ -153,9 +162,7 @@ export function WalletFields({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="none">不计入项目利润</SelectItem>
-            {(pd?.projects ?? [])
-              .filter((p) => !p.archived)
-              .map((p) => (
+            {projects.map((p) => (
                 <SelectItem key={p.id} value={String(p.id)}>
                   {p.name}
                 </SelectItem>
@@ -334,6 +341,23 @@ export function WalletFields({
           />
           <span className="text-muted-foreground text-xs">站点累计消费里多算的金额，累计消费和利润都会减掉</span>
         </div>
+        {relay ? (
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <Label className="w-20 shrink-0">期初成本</Label>
+              <Input
+                inputMode="decimal"
+                className="w-28"
+                placeholder="不填"
+                value={v.opening_cost}
+                onChange={(e) => setV({ ...v, opening_cost: e.target.value })}
+              />
+            </div>
+            <p className="text-muted-foreground text-xs">
+              填写后应付 = 期初成本 + 保存时点之后该站点新增的 key 消耗（按消耗倍率）。清空恢复按站点累计消费计。改金额不重置起点，清空再保存才重新封存。
+            </p>
+          </div>
+        ) : null}
       </div>
       {v.platform === "newapi" ? (
         <div className="bg-muted/40 space-y-3 rounded-lg border p-3">
@@ -408,6 +432,7 @@ function WalletDialog({
               ratio: String(r.ratio),
             })),
             used_adjust: wallet.used_adjust ? String(wallet.used_adjust) : "",
+            opening_cost: wallet.opening_cost == null ? "" : String(wallet.opening_cost),
             access_token: "",
             token_user_id: wallet.token_user_id ?? "",
             login_user: wallet.login_user ?? "",
@@ -545,7 +570,9 @@ export function PartyWallets({ party }: { party: Party }) {
           <b className="text-sm">结算</b>
           <div className="grid grid-cols-3 gap-2">
             <div className="bg-muted/50 rounded-md p-2">
-              <div className="text-muted-foreground text-xs">应付（累计消费）</div>
+              <div className="text-muted-foreground text-xs">
+                {list.some((w) => w.billed_used != null) ? "应付（期初 + 之后消耗）" : "应付（累计消费）"}
+              </div>
               <div className="font-semibold tabular-nums">{curf(r.payable, r.currency)}</div>
             </div>
             <div className="bg-muted/50 rounded-md p-2">
@@ -659,6 +686,15 @@ export function PartyWallets({ party }: { party: Party }) {
                     </div>
                     {w.used_adjust ? (
                       <div className="text-muted-foreground text-xs">已扣多算 {amt(w.used_adjust)}</div>
+                    ) : null}
+                    {w.opening_cost != null && w.billed_used != null ? (
+                      <div className="text-muted-foreground text-xs">
+                        计费 {amt(w.billed_used)}（期初 {amt(w.opening_cost)}
+                        {w.opening_used == null
+                          ? "，起点未封存"
+                          : ` + 之后 ${amt((w.billed_used ?? 0) - w.opening_cost)}`}
+                        ）
+                      </div>
                     ) : null}
                   </div>
                   <div className="bg-muted/50 rounded-md p-2">

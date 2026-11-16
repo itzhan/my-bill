@@ -254,6 +254,10 @@ export type PartyWallet = {
   last_used: number | null;
   last_used_actual: number | null;
   used_adjust?: number;
+  // 期初成本（人民币）。空 = 按站点累计计费；有值时 billed_used = 期初 + 起点之后的新增消耗
+  opening_cost?: number | null;
+  opening_used?: number | null;
+  billed_used?: number | null;
   // 今日消费（自定义倍率时 last_today_actual = 今日消费 × 倍率）
   last_today: number | null;
   last_today_actual: number | null;
@@ -298,6 +302,9 @@ export type WalletDetail = {
   last_wallet: number | null;
   last_used: number | null;
   last_used_actual: number | null;
+  opening_cost?: number | null;
+  opening_used?: number | null;
+  billed_used?: number | null;
   last_actual: number | null;
   has_token: boolean;
   ok: boolean;
