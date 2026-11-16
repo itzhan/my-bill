@@ -80,7 +80,7 @@ function AccountTab() {
           <CardTitle>
             团队成员 <span className="text-muted-foreground text-sm font-normal">{me.members.length}</span>
           </CardTitle>
-          <CardDescription>用同一个网址注册即可加入。</CardDescription>
+          <CardDescription>注册已关闭，新成员需管理员添加。</CardDescription>
         </CardHeader>
         <CardContent className="divide-y">
           {me.members.map((m) => (

@@ -151,7 +151,7 @@ $('#form-register').addEventListener('submit', (e) => {
   if (!/^[\w一-龥]{2,20}$/.test(username)) return showErr(err, '用户名为 2–20 位中文、字母、数字或下划线');
   if (!/^\+?\d{6,20}$/.test(phone.replace(/[\s-]/g, ''))) return showErr(err, '手机号格式不正确');
   if (password.length < 6) return showErr(err, '密码至少 6 位');
-  submitAuth(e.target, '/api/auth/register', { username, phone, password }, err);
+  return showErr(err, '已停止开放注册');
 });
 
 function enter(d) {
@@ -739,7 +739,7 @@ function renderMe() {
       </section>
       <section class="card">
         <h2>团队成员<span class="count">${state.members.length}</span></h2>
-        <p class="muted">用同一个网址注册即可加入。</p>
+        <p class="muted">注册已关闭，新成员需管理员添加。</p>
         <ul class="mlist">${state.members.map((m) => `<li>${avatar(m.username)}<span>${esc(m.username)}${m.id === u.id ? ' <span class="tag">我</span>' : ''}</span><span class="muted">${esc(maskPhone(m.phone))}</span></li>`).join('')}</ul>
       </section>
       <button class="btn ghost danger big" id="logout">退出登录</button>

@@ -3121,24 +3121,7 @@ app.use(express.static(PUBLIC_DIR, { index: false }));
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ---- 认证
-app.post('/api/auth/register', limit, (req, res) => {
-  const body = req.body || {};
-  const username = String(body.username || '').trim();
-  const phone = normPhone(body.phone);
-  const password = String(body.password || '');
-  if (!RE_USERNAME.test(username)) return fail(res, 400, '用户名为 2–20 位中文、字母、数字或下划线');
-  if (!RE_PHONE.test(phone)) return fail(res, 400, '手机号格式不正确');
-  if (password.length < 6 || password.length > 72) return fail(res, 400, '密码至少 6 位');
-  if (q.userByName.get(username)) return fail(res, 409, '用户名已被使用');
-  if (q.userByPhone.get(phone)) return fail(res, 409, '手机号已注册');
-  const r = q.insertUser.run(username, phone, hashPassword(password), now());
-  const uid = Number(r.lastInsertRowid);
-  setSession(req, res, uid);
-  kbLog(`${username} 注册加入团队`);
-  broadcast('members', { version: ++dataVersion });
-  postSystemMessage('group', `${username} 加入了团队`);
-  res.json(bootstrap(uid));
-});
+app.post('/api/auth/register', limit, (req, res) => fail(res, 403, '已停止开放注册'));
 app.post('/api/auth/login', limit, (req, res) => {
   const body = req.body || {};
   const account = String(body.account || '').trim();
