@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 import { del, get, patch, post, put } from "../api";
 import { CUR, CURRENCIES, PL, curf, fmt, fmtCompact, fmtTime, parseAmount, relTime, todayLocal, usdf } from "../format";
 import { qk, useLedgerRefresh, useMe, useParty } from "../hooks";
-import type { Currency, Party, PartyKind, PartyWallet, RelayLive, Station } from "../types";
+import type { Currency, Party, PartyKind, PartyWallet, RelayLive, RelayUserKey, Station } from "../types";
 
 import {
   EMPTY_WALLET,
@@ -488,7 +488,7 @@ function PartyDetailView({
           <RelayBlock party={v} live={liveData} loading={live.isFetching} onRefresh={() => live.refetch()} />
         ) : null}
 
-        {v.kind === "customer" && v.relay ? <RelayGroups party={v} /> : null}
+        {v.kind === "customer" && v.relay && v.relay.track_mode !== "key" ? <RelayGroups party={v} /> : null}
 
         {v.archived ? <p className="text-muted-foreground text-sm">已归档，只能查看</p> : <RecordForm party={v} />}
 
@@ -531,6 +531,12 @@ function RelayBlock({
   const [ref, setRef] = useState(v.external_id || "");
   const [ratio, setRatio] = useState(String(v.ratio));
   const [cur, setCur] = useState<Currency>(v.currency);
+  // 甲方挂账追踪方式：user = 按中转站用户；key = 按我们的某把 Key（消耗按该 Key 绑定的分组统计）
+  const [mode, setMode] = useState<"user" | "key">("user");
+  const [keys, setKeys] = useState<RelayUserKey[] | null>(null);
+  const [keysBusy, setKeysBusy] = useState(false);
+  const [keyId, setKeyId] = useState("");
+  const [panelPass, setPanelPass] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -540,14 +546,36 @@ function RelayBlock({
     refresh();
   };
 
+  const loadKeys = async () => {
+    if (!ref.trim()) return setError("请先填写账号的邮箱 / 用户名");
+    setKeysBusy(true);
+    setError(null);
+    try {
+      const d = await post<{ keys: RelayUserKey[] }>(`/parties/${v.id}/relay-user-keys`, { ref: ref.trim(), password: panelPass });
+      setKeys(d.keys);
+      setKeyId("");
+      if (!d.keys.length) setError("这个账号名下没有 API Key");
+    } catch (ex) {
+      setError((ex as Error).message);
+    } finally {
+      setKeysBusy(false);
+    }
+  };
+
   const link = async () => {
     if (!ref.trim()) return setError(v.kind === "customer" ? "请填写中转站邮箱" : "请填写中转站账号名称");
+    if (mode === "key" && !keyId) return setError("请先读取 Key 列表并选择要追踪的 Key");
     const r = Number(ratio);
     if (!(r > 0)) return setError(`${rl}必须大于 0`);
     setBusy(true);
     setError(null);
     try {
-      await post(`/parties/${v.id}/relay-link`, { ref: ref.trim(), ratio: r, currency: cur });
+      await post(`/parties/${v.id}/relay-link`, {
+        ref: ref.trim(),
+        ratio: r,
+        currency: cur,
+        ...(mode === "key" ? { mode: "key", key_id: Number(keyId), panel_pass: panelPass } : {}),
+      });
       toast.success("已绑定并开始自动挂账");
       reload();
     } catch (ex) {
@@ -581,19 +609,73 @@ function RelayBlock({
           <b className="text-sm">中转站</b>
           <p className="text-muted-foreground text-xs">
             {v.kind === "customer"
-              ? "填客户在中转站的邮箱；没设分组价时应收 = 消耗 × 折扣，设了分组价按分组收费"
+              ? mode === "key"
+                ? "填这把 Key 所属账号的邮箱；应收 = 该 Key 绑定分组的消耗 × 折扣（Key 需在站点上绑专属分组）"
+                : "填客户在中转站的邮箱；没设分组价时应收 = 消耗 × 折扣，设了分组价按分组收费"
               : "填中转站「账号管理」里的账号名；应付 = 消耗 × 倍率，按结算币种自动逐日挂账"}
           </p>
         </div>
-        <Input
-          placeholder={v.kind === "customer" ? "邮箱 / 用户名" : "账号名称"}
-          value={ref}
-          onChange={(e) => setRef(e.target.value)}
-        />
+        {v.kind === "customer" && (
+          <div className="flex gap-1 rounded-md border p-1 text-xs w-fit">
+            <button
+              type="button"
+              onClick={() => { setMode("user"); setKeys(null); setKeyId(""); setError(null); }}
+              className={cn("rounded px-2 py-1", mode === "user" ? "bg-primary text-primary-foreground" : "text-muted-foreground")}
+            >
+              按站点用户追踪
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMode("key"); setKeys(null); setKeyId(""); setError(null); }}
+              className={cn("rounded px-2 py-1", mode === "key" ? "bg-primary text-primary-foreground" : "text-muted-foreground")}
+            >
+              按我们的 Key 追踪
+            </button>
+          </div>
+        )}
+        <div className="flex gap-2">
+          <Input
+            placeholder={v.kind === "customer" ? "邮箱 / 用户名" : "账号名称"}
+            value={ref}
+            onChange={(e) => setRef(e.target.value)}
+          />
+          {v.kind === "customer" && mode === "key" && (
+            <Button variant="outline" onClick={loadKeys} disabled={keysBusy} className="shrink-0">
+              {keysBusy ? "读取中…" : "读取 Key 列表"}
+            </Button>
+          )}
+        </div>
+        {v.kind === "customer" && mode === "key" && (
+          <div className="space-y-2">
+            <Label>
+              账号的站点登录密码{" "}
+              <span className="text-muted-foreground font-normal">（站点管理密钥无权读取 Key 列表时用来登录面板读取）</span>
+            </Label>
+            <Input type="password" value={panelPass} onChange={(e) => setPanelPass(e.target.value)} placeholder="选填，读取失败时必填" autoComplete="off" />
+          </div>
+        )}
+        {v.kind === "customer" && mode === "key" && keys && keys.length > 0 && (
+          <div className="space-y-2">
+            <Label>选择要追踪的 Key</Label>
+            <Select value={keyId} onValueChange={setKeyId}>
+              <SelectTrigger>
+                <SelectValue placeholder="选择 Key" />
+              </SelectTrigger>
+              <SelectContent>
+                {keys.map((k) => (
+                  <SelectItem key={k.id} value={String(k.id)} disabled={!k.group_id}>
+                    {k.name || k.key_masked || `Key ${k.id}`}
+                    {k.group_name ? `（分组：${k.group_name}）` : "（未绑分组，需先在站点绑专属分组）"}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-2">
             <Label>
-              {rl}（{L.due} = 消耗 × {rl}）
+              {rl}（{L.due} = {mode === "key" && v.kind === "customer" ? "分组消耗" : "消耗"} × {rl}）
             </Label>
             <Input inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
           </div>
@@ -615,6 +697,11 @@ function RelayBlock({
     <div className="flex flex-wrap items-center justify-between gap-2">
       <b className="text-sm">
         中转站{v.kind === "supplier" ? "账号" : ""} · {v.relay.ref}
+        {v.kind === "customer" && v.relay.track_mode === "key" && (
+          <Badge variant="outline" className="ml-2 font-normal">
+            按 Key 追踪：{v.relay.key_name || `Key ${v.relay.group_id ?? ""}`}
+          </Badge>
+        )}
       </b>
       <div className="text-muted-foreground flex items-center gap-1 text-xs">
         {live?.fetched_at ? `${relTime(live.fetched_at)}更新 · 30 秒自动刷新` : "获取中…"}

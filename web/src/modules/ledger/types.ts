@@ -193,7 +193,7 @@ export type Party = {
   archived: boolean;
   created_at: string;
   ratio: number;
-  relay: { id: number; ref: string } | null;
+  relay: { id: number; ref: string; track_mode?: "user" | "key"; key_name?: string; group_id?: number | null } | null;
   totals: { due: number; paid: number; open: number; count: number; last_at: string | null };
   settle: Settle;
   // 供应商余额汇总（只有绑定了 new-api / sub2api Key 的供应商才有）
@@ -302,6 +302,15 @@ export type RemoteStationKey = {
   remain: number | null;
   status: string;
   last_used_at: string | null;
+};
+// 中转站客户的 Key（按 Key 追踪用）：id 为站点数字 id，group_name 为该 Key 在站点上绑定的分组名
+export type RelayUserKey = {
+  id: number;
+  name: string;
+  key_masked: string;
+  status: number;
+  group_id: number | null;
+  group_name: string;
 };
 export type ConsumePoint = { date: string; usd: number; count: number };
 export type ConsumeGroup = { group: string; usd: number; count: number; tokens: number };
