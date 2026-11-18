@@ -205,7 +205,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS stations (
 try { db.exec('ALTER TABLE projects ADD COLUMN station_id INTEGER REFERENCES stations(id)'); } catch { /* 已有该列 */ }
 // 项目级期初成本（中转制）：项目上直接设总期初，各供应商站点只算封存起点之后的新增消耗
 try { db.exec('ALTER TABLE projects ADD COLUMN opening_cost REAL'); } catch { /* 已有该列 */ }
-// 甲方挂账追踪方式：'' = 按中转站用户（原样）；'key' = 按我们的 Key 追踪（消耗按该 Key 所属分组统计，Key 须绑专属分组）
+// 甲方挂账追踪方式：'' = 按中转站用户（邮箱）；'key' = 按管理员 Key 追踪（消耗按该 Key 的 api_key_id 统计）
 for (const [col, ddl] of [['relay_track_mode', "TEXT NOT NULL DEFAULT ''"], ['relay_key_id', 'INTEGER'], ['relay_key_name', "TEXT NOT NULL DEFAULT ''"], ['relay_group_id', 'INTEGER']]) {
   try { db.exec(`ALTER TABLE parties ADD COLUMN ${col} ${ddl}`); } catch { /* 已有该列 */ }
 }
@@ -993,7 +993,7 @@ const partyView = (p, records, projectId = null) => {
       settle = { ...settle, paid, paid_cny: paidCny, open: open > 0 ? open : 0, credit: open < 0 ? -open : 0, open_cny: r2(settle.due_cny - paidCny) };
     }
   }
-  return { wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p, projectId) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref, track_mode: p.relay_track_mode === 'key' ? 'key' : 'user', key_name: p.relay_key_name || '', group_id: p.relay_group_id == null ? null : Number(p.relay_group_id) } : null, totals: partyTotals(recs), settle };
+  return { wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p, projectId) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref, track_mode: p.relay_track_mode === 'key' ? 'key' : 'user', key_id: p.relay_key_id == null ? null : Number(p.relay_key_id), key_name: p.relay_key_name || '', group_id: p.relay_group_id == null ? null : Number(p.relay_group_id) } : null, totals: partyTotals(recs), settle };
 };
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId, ptype) {
@@ -1852,6 +1852,18 @@ async function relayFindUser(ref) {
   const lower = str.toLowerCase();
   return items.find((u) => (u.email || '').toLowerCase() === lower || (u.username || '').toLowerCase() === lower) || items[0];
 }
+// 中转站管理员账号（给客户的 Key 建在这个账号下）
+async function relayAdminUser() {
+  const d = await relayGet('/admin/users', { page: 1, page_size: 20, role: 'admin' });
+  const items = d.items || [];
+  const hit = items.find((u) => u.role === 'admin') || items[0];
+  if (!hit) throw new HttpError(404, '中转站没有管理员账号，无法列出管理员 Key');
+  return hit;
+}
+function relayTrackOf(pa) {
+  if (pa.relay_track_mode !== 'key' || !pa.relay_key_id) return null;
+  return { key_id: Number(pa.relay_key_id), key_name: pa.relay_key_name || '', group_id: pa.relay_group_id == null ? null : Number(pa.relay_group_id) };
+}
 // 列某个中转站用户的 API Key：管理接口优先；管理密钥无权列 Key 时（前面 relayFindUser 刚成功过，
 // 报「管理密钥无效或已过期」就是权限受限）用该账号的登录密码走面板登录兜底，需要时传 panelPass
 async function relayUserKeys(u, panelPass = '') {
@@ -2000,20 +2012,23 @@ function hourlySeries(trend) {
 }
 const daySeries = (trend) => (trend || []).map((x) => ({ date: String(x.date).slice(0, 10), cost_usd: r2(x.actual_cost ?? x.cost), std_cost_usd: r2(x.cost), requests: x.requests })).filter((x) => RE_DATE.test(x.date));
 // 客户：累计 / 今日 / 本小时消耗、余额、实时 RPM / TPM、近 3 天每日消耗
-// 客户实时消耗。track 为空 = 按中转站用户追踪（原样）；
-// track = { group_id, key_name } = 按我们的 Key 追踪：sub2api 管理接口不支持按单把 Key 统计消耗，
-// 但支持按分组过滤（已实测 stats / trend 都生效），所以按这把 Key 所属分组的消耗统计——Key 需绑专属分组。
+// 客户实时消耗。track 为空 = 按中转站用户（邮箱）追踪；
+// track = { key_id, key_name } = 按管理员 Key 追踪：/admin/usage/stats 与 trend 支持 api_key_id 过滤（已实测）。
 function relayCustomerLive(userId, ref, track = null) {
-  return relayCached(`cust:${userId}:${track ? `k${track.group_id}` : 'u'}`, 20000, async () => {
+  const keyId = track && track.key_id ? Number(track.key_id) : 0;
+  return relayCached(`cust:${userId}:${keyId ? `k${keyId}` : 'u'}`, 20000, async () => {
     const today = todayKey();
-    if (track && track.group_id) {
-      const gid = Number(track.group_id);
-      const [allTime, todayStats, trend] = await Promise.all([
-        relayGet('/admin/usage/stats', { group_id: gid, start_date: ALL_TIME, end_date: today }),
-        relayGet('/admin/usage/stats', { group_id: gid, start_date: today, end_date: today }),
-        relayGet('/admin/dashboard/trend', { granularity: 'day', days: 3, group_id: gid }).catch(() => ({ trend: [] })),
+    if (keyId) {
+      const filt = { api_key_id: keyId };
+      const [allTime, todayStats, trend, live, days] = await Promise.all([
+        relayGet('/admin/usage/stats', { ...filt, start_date: ALL_TIME, end_date: today }),
+        relayGet('/admin/usage/stats', { ...filt, start_date: today, end_date: today }),
+        relayGet('/admin/dashboard/trend', { granularity: 'hour', days: 1, ...filt }).catch(() => ({ trend: [] })),
+        relayLiveRateBy(filt).catch(() => null),
+        relayGet('/admin/dashboard/trend', { granularity: 'day', days: 3, ...filt }).catch(() => ({ trend: [] })),
       ]);
-      return { kind: 'customer', fetched_at: now(), key_track: { key_name: track.key_name || '', group_id: gid }, user: { id: userId, email: ref || track.key_name }, total: { requests: allTime.total_requests, cost_usd: r2(allTime.total_actual_cost), tokens: allTime.total_tokens }, today: { requests: todayStats.total_requests, cost_usd: r2(todayStats.total_actual_cost), tokens: todayStats.total_tokens, input_tokens: todayStats.total_input_tokens, output_tokens: todayStats.total_output_tokens }, this_hour: { this_hour: null, hourly: [] }, hourly: [], daily: daySeries(trend.trend).slice(-3), live: null };
+      const h = hourlySeries(trend.trend);
+      return { kind: 'customer', fetched_at: now(), key_track: { key_id: keyId, key_name: (track && track.key_name) || '' }, user: { id: userId, email: ref || (track && track.key_name) }, total: { requests: allTime.total_requests, cost_usd: r2(allTime.total_actual_cost), tokens: allTime.total_tokens }, today: { requests: todayStats.total_requests, cost_usd: r2(todayStats.total_actual_cost), tokens: todayStats.total_tokens, input_tokens: todayStats.total_input_tokens, output_tokens: todayStats.total_output_tokens }, this_hour: h.this_hour, hourly: h.hourly, daily: daySeries(days.trend).slice(-3), live };
     }
     const [users, allTime, todayStats, trend, live, days] = await Promise.all([
       relayGet('/admin/users', { page: 1, page_size: 20, search: ref || String(userId) }).catch(() => ({ items: [] })),
@@ -2182,7 +2197,7 @@ function settlementView(pa, live) {
 async function partyLive(pa) {
   if (!pa.relay_id) return { party_id: pa.id, linked: false, settlement: settlementView(pa, null) };
   try {
-    const track = pa.relay_track_mode === 'key' && pa.relay_group_id ? { group_id: pa.relay_group_id, key_name: pa.relay_key_name } : null;
+    const track = relayTrackOf(pa);
     const live = pa.kind === 'customer' ? await relayCustomerLive(pa.relay_id, pa.relay_ref, track) : await relaySupplierLive(pa.relay_id);
     try { syncRelayAccrual(pa, live); } catch (e) { console.error('[relay] 自动挂账失败：', e.message); }
     return { party_id: pa.id, linked: true, ...live, settlement: settlementView(pa, live) };
@@ -2298,18 +2313,25 @@ async function linkPartyRelay(user, partyId, ref, opts = {}) {
   const pa = q.party.get(pa0.id);
   const target = String(ref || pa.relay_ref || pa.external_id || pa.name).trim();
   if (pa.kind === 'customer') {
-    const u = await relayFindUser(target);
     if (opts.mode === 'key') {
-      // 按我们的 Key 追踪：消耗按这把 Key 所属分组的统计（管理接口不支持按单把 Key 统计），Key 必须绑了分组
-      const ks = await relayUserKeys(u, String(opts.panel_pass || ''));
-      const k = ks.find((x) => String(x.id) === String(opts.key_id));
-      if (!k) throw new HttpError(404, '这个用户名下没有这把 Key，刷新列表再试');
-      if (!k.group_id) throw new HttpError(400, `Key「${k.name || k.id}」还没有绑定分组：请在站点上建一个只有它在用的专属分组并把这把 Key 绑上去（按 Key 追踪按分组消耗统计），再回来绑定`);
-      const g = await relayGet('/admin/groups', { page: 1, page_size: 100 }).catch(() => ({ items: [] }));
-      const gname = ((g.items || []).find((x) => x.id === k.group_id) || {}).name || `分组 ${k.group_id}`;
-      db.prepare("UPDATE parties SET relay_id = ?, relay_ref = ?, relay_track_mode = 'key', relay_key_id = ?, relay_key_name = ?, relay_group_id = ? WHERE id = ?").run(u.id, u.email || u.username || target, k.id, (String(k.name || "") || "未命名").slice(0, 60), k.group_id, pa.id);
-      dataChanged(user, `把客户「${pa.name}」改为按 Key 追踪：${u.email || u.username} 的 Key「${(String(k.name || "") || "未命名").slice(0, 60)}」（${gname}，id ${k.id}）· ${pa.project_name}`);
+      const u = await relayAdminUser();
+      const id = Number(opts.key_id);
+      if (!(id > 0)) throw new HttpError(400, '请选择要追踪的管理员 Key');
+      let k = null;
+      try {
+        const ks = await relayUserKeys(u, String(opts.panel_pass || ''));
+        k = ks.find((x) => String(x.id) === String(id));
+        if (!k) throw new HttpError(404, '管理员账号下没有这把 Key，刷新列表再试');
+      } catch (e) {
+        if (e instanceof HttpError && (e.status === 401 || e.status === 404)) throw e;
+        // 管理密钥无权列 Key 时：沿用前端已选的 id/名称，消耗按 api_key_id 统计
+        k = { id, name: String(opts.key_name || '').slice(0, 60) || `Key ${id}`, group_id: opts.group_id || null };
+      }
+      const kname = (String(k.name || '') || `Key ${k.id}`).slice(0, 60);
+      db.prepare("UPDATE parties SET relay_id = ?, relay_ref = ?, relay_track_mode = 'key', relay_key_id = ?, relay_key_name = ?, relay_group_id = ? WHERE id = ?").run(u.id, u.email || u.username || 'admin', k.id, kname, k.group_id || null, pa.id);
+      dataChanged(user, `把客户「${pa.name}」改为按管理员 Key 追踪：「${kname}」（id ${k.id}）· ${pa.project_name}`);
     } else {
+      const u = await relayFindUser(target);
       q.linkParty.run(u.id, u.email || u.username || target, pa.id);
       db.prepare("UPDATE parties SET relay_track_mode = '', relay_key_id = NULL, relay_key_name = '', relay_group_id = NULL WHERE id = ?").run(pa.id);
       dataChanged(user, `把客户「${pa.name}」绑定到中转站用户 ${u.email || u.username}（id ${u.id}）· ${pa.project_name}`);
@@ -3436,7 +3458,7 @@ app.put('/api/parties/:id/relay-groups', auth, async (req, res, next) => {
   try {
     const pa = q.party.get(Number(req.params.id));
     if (!pa || pa.kind !== 'customer') return fail(res, 404, '客户不存在');
-    if (pa.relay_track_mode === 'key') return fail(res, 400, '按 Key 追踪的客户按折扣计费，不支持分组报价；如需分组报价请先解绑或改回按用户追踪');
+    if (pa.relay_track_mode === 'key') return fail(res, 400, '按管理员 Key 追踪的客户按折扣计费，不支持分组报价；如需分组报价请先解绑或改回按邮箱追踪');
     const stationId = Number((req.body || {}).station_id);
     if (!db.prepare('SELECT 1 FROM stations WHERE id = ?').get(stationId)) return fail(res, 400, '请选择中转站');
     const groups = Array.isArray((req.body || {}).groups) ? req.body.groups : [];
@@ -3519,7 +3541,15 @@ app.get('/api/parties/:id', auth, (req, res) => {
   res.json({ party: partyView(pa, records), records: records.map(recordView), labels: PARTY_LABEL[pa.kind], relay_configured: relayConfigured() });
 });
 app.patch('/api/parties/:id', auth, (req, res) => res.json({ party: partyView(ops.updateParty(req.user, req.params.id, req.body || {})) }));
-app.post('/api/parties/:id/relay-link', auth, async (req, res, next) => { try { const b = req.body || {}; res.json({ live: await linkPartyRelay(req.user, req.params.id, b.ref, { ratio: b.ratio, currency: b.currency, mode: b.mode, key_id: b.key_id, panel_pass: b.panel_pass }) }); } catch (e) { next(e); } });
+app.post('/api/parties/:id/relay-link', auth, async (req, res, next) => { try { const b = req.body || {}; res.json({ live: await linkPartyRelay(req.user, req.params.id, b.ref, { ratio: b.ratio, currency: b.currency, mode: b.mode, key_id: b.key_id, key_name: b.key_name, group_id: b.group_id, panel_pass: b.panel_pass }) }); } catch (e) { next(e); } });
+app.post('/api/relay/admin-keys', auth, async (req, res, next) => {
+  try {
+    if (!relayConfigured()) return fail(res, 400, '未配置中转站接口');
+    const u = await relayAdminUser();
+    const keys = await relayUserKeys(u, String((req.body || {}).password || ''));
+    res.json({ user: { id: u.id, email: u.email || u.username }, keys });
+  } catch (e) { next(e); }
+});
 app.post('/api/parties/:id/relay-user-keys', auth, async (req, res, next) => {
   try {
     const pa = q.party.get(Number(req.params.id));
@@ -3817,7 +3847,7 @@ app.get('/api/customers/:id/detail', auth, async (req, res) => {
   // 实时：取第一个绑定了中转站的 party
   let live = null;
   const relaySib = siblings.find((s) => s.relay_id != null);
-  if (relaySib && relayConfigured()) { const trk = relaySib.relay_track_mode === 'key' && relaySib.relay_group_id ? { group_id: relaySib.relay_group_id, key_name: relaySib.relay_key_name } : null; try { live = await relayCustomerLive(relaySib.relay_id, relaySib.relay_ref, trk); } catch { /* ignore */ } }
+  if (relaySib && relayConfigured()) { const trk = relayTrackOf(relaySib); try { live = await relayCustomerLive(relaySib.relay_id, relaySib.relay_ref, trk); } catch { /* ignore */ } }
   const v = partyView(pa);
   const balance_usd = projects.some((p) => p.balance_usd != null) ? r2(projects.reduce((a, p) => a + (p.balance_usd ?? 0), 0)) : null;
   const agg = { due: 0, paid: 0, open: 0, due_cny: 0, paid_cny: 0, open_cny: 0 };
@@ -4001,7 +4031,7 @@ async function refreshCustomerGaps() {
     try {
       // 已设分组收费的客户，用量表覆盖全部历史，不再按单一折扣补差额
       if (customerGroupPrices(pa.id).length) continue;
-      const track = pa.relay_track_mode === 'key' && pa.relay_group_id ? { group_id: pa.relay_group_id, key_name: pa.relay_key_name } : null;
+      const track = relayTrackOf(pa);
       const live = await relayCustomerLive(pa.relay_id, pa.relay_ref, track);
       const total = Number(live.total && live.total.cost_usd) || 0;
       // 已挂账的人民币 ÷ 汇率还原成美元消耗，和中转站累计比较，差额就是挂账前的历史

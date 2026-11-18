@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 import { del, get, patch, post, put } from "../api";
 import { CUR, CURRENCIES, PL, curf, fmt, fmtCompact, fmtTime, parseAmount, relTime, todayLocal, usdf } from "../format";
 import { qk, useLedgerRefresh, useMe, useParty } from "../hooks";
-import type { Currency, Party, PartyKind, PartyWallet, RelayLive, RelayUserKey, Station } from "../types";
+import type { Currency, Party, PartyKind, PartyWallet, ProjectDetail, RelayLive, RelayUserKey, Station } from "../types";
 
 import {
   EMPTY_WALLET,
@@ -43,6 +43,99 @@ export type PartySheetState =
   | { open: true; mode: "new"; projectId: number; kind: PartyKind };
 
 const SOURCE_TXT: Record<string, string> = { api: "接口同步", ai: "AI", relay: "中转站自动" };
+
+function TrackModeToggle({ mode, onChange }: { mode: "user" | "key"; onChange: (m: "user" | "key") => void }) {
+  return (
+    <ToggleGroup
+      type="single"
+      variant="outline"
+      className="w-full"
+      value={mode}
+      onValueChange={(v) => v && onChange(v as "user" | "key")}
+    >
+      <ToggleGroupItem value="user" className="flex-1 data-[state=on]:font-semibold">
+        中转站邮箱
+      </ToggleGroupItem>
+      <ToggleGroupItem value="key" className="flex-1 data-[state=on]:font-semibold">
+        管理员 Key
+      </ToggleGroupItem>
+    </ToggleGroup>
+  );
+}
+
+function AdminKeyPicker({
+  keys,
+  setKeys,
+  keyId,
+  setKeyId,
+  panelPass,
+  setPanelPass,
+  setError,
+}: {
+  keys: RelayUserKey[] | null;
+  setKeys: (k: RelayUserKey[] | null) => void;
+  keyId: string;
+  setKeyId: (s: string) => void;
+  panelPass: string;
+  setPanelPass: (s: string) => void;
+  setError: (s: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const d = await post<{ keys: RelayUserKey[] }>("/relay/admin-keys", { password: panelPass });
+      setKeys(d.keys);
+      setKeyId("");
+      if (!d.keys.length) setError("管理员账号下没有 API Key");
+    } catch (ex) {
+      setError((ex as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-2">
+      <div className="space-y-2">
+        <Label>
+          管理员面板密码{" "}
+          <span className="text-muted-foreground font-normal">（站点管理密钥无权读取 Key 列表时必填，不会保存）</span>
+        </Label>
+        <div className="flex gap-2">
+          <Input
+            type="password"
+            value={panelPass}
+            onChange={(e) => setPanelPass(e.target.value)}
+            placeholder="选填，读取失败时必填"
+            autoComplete="off"
+          />
+          <Button type="button" variant="outline" onClick={load} disabled={busy} className="shrink-0">
+            {busy ? "读取中…" : "读取管理员 Key"}
+          </Button>
+        </div>
+      </div>
+      {keys && keys.length > 0 ? (
+        <div className="space-y-2">
+          <Label>选择要追踪的 Key</Label>
+          <Select value={keyId} onValueChange={setKeyId}>
+            <SelectTrigger>
+              <SelectValue placeholder="选择 Key" />
+            </SelectTrigger>
+            <SelectContent>
+              {keys.map((k) => (
+                <SelectItem key={k.id} value={String(k.id)}>
+                  {k.name || k.key_masked || `Key ${k.id}`}
+                  {k.group_name ? `（${k.group_name}）` : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function CurrencySelect({ value, onChange, id }: { value: Currency; onChange: (c: Currency) => void; id?: string }) {
   return (
@@ -120,14 +213,25 @@ function NewPartyForm({
   const { data: me } = useMe();
   const refresh = useLedgerRefresh();
   const L = PL[kind];
-  // 中转站绑定（一键获取消耗、自动挂账）只用于客户；供应商改用下面的「抓取供应商余额」
-  const relayOn = !!me?.ai.relay && kind === "customer";
+  const projQ = useQuery({
+    queryKey: qk.project(projectId),
+    queryFn: () => get<ProjectDetail>(`/projects/${projectId}`),
+    enabled: kind === "customer" && projectId > 0,
+    retry: false,
+  });
+  // 中转站绑定只用于中转项目的客户：邮箱（整账号）或管理员 Key（单把 Key 消耗）
+  const isRelayProject = (projQ.data?.project.ptype ?? "relay") === "relay";
+  const relayOn = !!me?.ai.relay && kind === "customer" && isRelayProject;
   const [name, setName] = useState("");
   const [contact, setContact] = useState("");
   const [currency, setCurrency] = useState<Currency>("CNY");
   const [note, setNote] = useState("");
+  const [trackMode, setTrackMode] = useState<"user" | "key">("user");
   const [relayRef, setRelayRef] = useState("");
   const [ratio, setRatio] = useState("1");
+  const [adminKeys, setAdminKeys] = useState<RelayUserKey[] | null>(null);
+  const [keyId, setKeyId] = useState("");
+  const [panelPass, setPanelPass] = useState("");
   const [ext, setExt] = useState("");
   const [settleType, setSettleType] = useState<"prepaid" | "credit">("prepaid");
   // 客户：预付余额提醒阈值（美元）、后付账期天数、起始使用时间
@@ -150,6 +254,7 @@ function NewPartyForm({
     }
     const r = relayOn ? Number(ratio) : undefined;
     if (relayOn && !(Number(r) > 0)) return setError(`${kind === "customer" ? "折扣" : "倍率"}必须大于 0`);
+    if (relayOn && trackMode === "key" && !keyId) return setError("请先读取并选择要追踪的管理员 Key");
     setBusy(true);
     setError(null);
     try {
@@ -172,9 +277,25 @@ function NewPartyForm({
           : {}),
       });
       toast.success(`已添加${L.name}「${d.party.name}」`);
-      if (relayRef.trim()) {
+      if (relayOn && trackMode === "key" && keyId) {
         try {
-          await post(`/parties/${d.party.id}/relay-link`, { ref: relayRef.trim() });
+          const picked = adminKeys?.find((k) => String(k.id) === keyId);
+          await post(`/parties/${d.party.id}/relay-link`, {
+            mode: "key",
+            key_id: Number(keyId),
+            key_name: picked?.name || picked?.key_masked || "",
+            group_id: picked?.group_id,
+            panel_pass: panelPass,
+            ratio: r,
+            currency,
+          });
+          toast.success("已绑定管理员 Key，开始自动挂账");
+        } catch (ex) {
+          toast.error(`绑定管理员 Key 失败：${(ex as Error).message}`);
+        }
+      } else if (relayRef.trim()) {
+        try {
+          await post(`/parties/${d.party.id}/relay-link`, { ref: relayRef.trim(), ratio: r, currency });
           toast.success("已绑定中转站，开始自动挂账");
         } catch (ex) {
           toast.error(`绑定中转站失败：${(ex as Error).message}`);
@@ -295,19 +416,48 @@ function NewPartyForm({
         />
       </div>
       {relayOn ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="pty-relay">中转站邮箱（一键获取消耗）</Label>
-            <Input
-              id="pty-relay"
-              maxLength={120}
-              placeholder="客户在中转站的登录邮箱"
-              value={relayRef}
-              onChange={(e) => setRelayRef(e.target.value)}
-            />
+        <div className="space-y-3 rounded-lg border p-3">
+          <div>
+            <div className="text-sm font-medium">挂账追踪</div>
+            <p className="text-muted-foreground text-xs">
+              {trackMode === "key"
+                ? "把我们管理员账号下的一把 Key 给客户，应收 = 这把 Key 的消耗 × 折扣"
+                : "填客户在中转站的登录邮箱，应收 = 该账号消耗 × 折扣（可再设分组价）"}
+            </p>
           </div>
+          <TrackModeToggle
+            mode={trackMode}
+            onChange={(m) => {
+              setTrackMode(m);
+              setAdminKeys(null);
+              setKeyId("");
+              setError(null);
+            }}
+          />
+          {trackMode === "user" ? (
+            <div className="space-y-2">
+              <Label htmlFor="pty-relay">中转站邮箱</Label>
+              <Input
+                id="pty-relay"
+                maxLength={120}
+                placeholder="客户在中转站的登录邮箱"
+                value={relayRef}
+                onChange={(e) => setRelayRef(e.target.value)}
+              />
+            </div>
+          ) : (
+            <AdminKeyPicker
+              keys={adminKeys}
+              setKeys={setAdminKeys}
+              keyId={keyId}
+              setKeyId={setKeyId}
+              panelPass={panelPass}
+              setPanelPass={setPanelPass}
+              setError={setError}
+            />
+          )}
           <div className="space-y-2">
-            <Label htmlFor="pty-ratio">默认折扣（没填分组价时用）</Label>
+            <Label htmlFor="pty-ratio">{trackMode === "key" ? "折扣（应收 = Key 消耗 × 折扣）" : "默认折扣（没填分组价时用）"}</Label>
             <Input id="pty-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
           </div>
         </div>
@@ -531,10 +681,9 @@ function RelayBlock({
   const [ref, setRef] = useState(v.external_id || "");
   const [ratio, setRatio] = useState(String(v.ratio));
   const [cur, setCur] = useState<Currency>(v.currency);
-  // 甲方挂账追踪方式：user = 按中转站用户；key = 按我们的某把 Key（消耗按该 Key 绑定的分组统计）
+  // 甲方挂账：user = 中转站邮箱；key = 管理员 Key（消耗按该 Key 的 api_key_id 统计）
   const [mode, setMode] = useState<"user" | "key">("user");
   const [keys, setKeys] = useState<RelayUserKey[] | null>(null);
-  const [keysBusy, setKeysBusy] = useState(false);
   const [keyId, setKeyId] = useState("");
   const [panelPass, setPanelPass] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -546,35 +695,25 @@ function RelayBlock({
     refresh();
   };
 
-  const loadKeys = async () => {
-    if (!ref.trim()) return setError("请先填写账号的邮箱 / 用户名");
-    setKeysBusy(true);
-    setError(null);
-    try {
-      const d = await post<{ keys: RelayUserKey[] }>(`/parties/${v.id}/relay-user-keys`, { ref: ref.trim(), password: panelPass });
-      setKeys(d.keys);
-      setKeyId("");
-      if (!d.keys.length) setError("这个账号名下没有 API Key");
-    } catch (ex) {
-      setError((ex as Error).message);
-    } finally {
-      setKeysBusy(false);
-    }
-  };
-
   const link = async () => {
-    if (!ref.trim()) return setError(v.kind === "customer" ? "请填写中转站邮箱" : "请填写中转站账号名称");
-    if (mode === "key" && !keyId) return setError("请先读取 Key 列表并选择要追踪的 Key");
+    if (v.kind === "customer" && mode === "key") {
+      if (!keyId) return setError("请先读取并选择要追踪的管理员 Key");
+    } else if (!ref.trim()) {
+      return setError(v.kind === "customer" ? "请填写中转站邮箱" : "请填写中转站账号名称");
+    }
     const r = Number(ratio);
     if (!(r > 0)) return setError(`${rl}必须大于 0`);
     setBusy(true);
     setError(null);
     try {
+      const picked = keys?.find((k) => String(k.id) === keyId);
       await post(`/parties/${v.id}/relay-link`, {
         ref: ref.trim(),
         ratio: r,
         currency: cur,
-        ...(mode === "key" ? { mode: "key", key_id: Number(keyId), panel_pass: panelPass } : {}),
+        ...(mode === "key"
+          ? { mode: "key", key_id: Number(keyId), key_name: picked?.name || picked?.key_masked || "", group_id: picked?.group_id, panel_pass: panelPass }
+          : {}),
       });
       toast.success("已绑定并开始自动挂账");
       reload();
@@ -610,72 +749,43 @@ function RelayBlock({
           <p className="text-muted-foreground text-xs">
             {v.kind === "customer"
               ? mode === "key"
-                ? "填这把 Key 所属账号的邮箱；应收 = 该 Key 绑定分组的消耗 × 折扣（Key 需在站点上绑专属分组）"
+                ? "选我们管理员账号下的一把 Key；应收 = 这把 Key 的消耗 × 折扣"
                 : "填客户在中转站的邮箱；没设分组价时应收 = 消耗 × 折扣，设了分组价按分组收费"
               : "填中转站「账号管理」里的账号名；应付 = 消耗 × 倍率，按结算币种自动逐日挂账"}
           </p>
         </div>
-        {v.kind === "customer" && (
-          <div className="flex gap-1 rounded-md border p-1 text-xs w-fit">
-            <button
-              type="button"
-              onClick={() => { setMode("user"); setKeys(null); setKeyId(""); setError(null); }}
-              className={cn("rounded px-2 py-1", mode === "user" ? "bg-primary text-primary-foreground" : "text-muted-foreground")}
-            >
-              按站点用户追踪
-            </button>
-            <button
-              type="button"
-              onClick={() => { setMode("key"); setKeys(null); setKeyId(""); setError(null); }}
-              className={cn("rounded px-2 py-1", mode === "key" ? "bg-primary text-primary-foreground" : "text-muted-foreground")}
-            >
-              按我们的 Key 追踪
-            </button>
-          </div>
-        )}
-        <div className="flex gap-2">
+        {v.kind === "customer" ? (
+          <TrackModeToggle
+            mode={mode}
+            onChange={(m) => {
+              setMode(m);
+              setKeys(null);
+              setKeyId("");
+              setError(null);
+            }}
+          />
+        ) : null}
+        {v.kind === "customer" && mode === "key" ? (
+          <AdminKeyPicker
+            keys={keys}
+            setKeys={setKeys}
+            keyId={keyId}
+            setKeyId={setKeyId}
+            panelPass={panelPass}
+            setPanelPass={setPanelPass}
+            setError={setError}
+          />
+        ) : (
           <Input
             placeholder={v.kind === "customer" ? "邮箱 / 用户名" : "账号名称"}
             value={ref}
             onChange={(e) => setRef(e.target.value)}
           />
-          {v.kind === "customer" && mode === "key" && (
-            <Button variant="outline" onClick={loadKeys} disabled={keysBusy} className="shrink-0">
-              {keysBusy ? "读取中…" : "读取 Key 列表"}
-            </Button>
-          )}
-        </div>
-        {v.kind === "customer" && mode === "key" && (
-          <div className="space-y-2">
-            <Label>
-              账号的站点登录密码{" "}
-              <span className="text-muted-foreground font-normal">（站点管理密钥无权读取 Key 列表时用来登录面板读取）</span>
-            </Label>
-            <Input type="password" value={panelPass} onChange={(e) => setPanelPass(e.target.value)} placeholder="选填，读取失败时必填" autoComplete="off" />
-          </div>
-        )}
-        {v.kind === "customer" && mode === "key" && keys && keys.length > 0 && (
-          <div className="space-y-2">
-            <Label>选择要追踪的 Key</Label>
-            <Select value={keyId} onValueChange={setKeyId}>
-              <SelectTrigger>
-                <SelectValue placeholder="选择 Key" />
-              </SelectTrigger>
-              <SelectContent>
-                {keys.map((k) => (
-                  <SelectItem key={k.id} value={String(k.id)} disabled={!k.group_id}>
-                    {k.name || k.key_masked || `Key ${k.id}`}
-                    {k.group_name ? `（分组：${k.group_name}）` : "（未绑分组，需先在站点绑专属分组）"}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
         )}
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-2">
             <Label>
-              {rl}（{L.due} = {mode === "key" && v.kind === "customer" ? "分组消耗" : "消耗"} × {rl}）
+              {rl}（{L.due} = {mode === "key" && v.kind === "customer" ? "Key 消耗" : "消耗"} × {rl}）
             </Label>
             <Input inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
           </div>
@@ -699,7 +809,7 @@ function RelayBlock({
         中转站{v.kind === "supplier" ? "账号" : ""} · {v.relay.ref}
         {v.kind === "customer" && v.relay.track_mode === "key" && (
           <Badge variant="outline" className="ml-2 font-normal">
-            按 Key 追踪：{v.relay.key_name || `Key ${v.relay.group_id ?? ""}`}
+            管理员 Key：{v.relay.key_name || `Key ${v.relay.key_id ?? ""}`}
           </Badge>
         )}
       </b>

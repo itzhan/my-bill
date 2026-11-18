@@ -193,7 +193,7 @@ export type Party = {
   archived: boolean;
   created_at: string;
   ratio: number;
-  relay: { id: number; ref: string; track_mode?: "user" | "key"; key_name?: string; group_id?: number | null } | null;
+  relay: { id: number; ref: string; track_mode?: "user" | "key"; key_id?: number | null; key_name?: string; group_id?: number | null } | null;
   totals: { due: number; paid: number; open: number; count: number; last_at: string | null };
   settle: Settle;
   // 供应商余额汇总（只有绑定了 new-api / sub2api Key 的供应商才有）
