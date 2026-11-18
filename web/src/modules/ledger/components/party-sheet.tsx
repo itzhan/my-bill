@@ -57,7 +57,7 @@ function TrackModeToggle({ mode, onChange }: { mode: "user" | "key"; onChange: (
         中转站邮箱
       </ToggleGroupItem>
       <ToggleGroupItem value="key" className="flex-1 data-[state=on]:font-semibold">
-        管理员 Key
+        API Key
       </ToggleGroupItem>
     </ToggleGroup>
   );
@@ -81,46 +81,56 @@ function AdminKeyPicker({
   setError: (s: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const load = async () => {
+  const [needPass, setNeedPass] = useState(false);
+  const load = async (pass = panelPass) => {
     setBusy(true);
     setError(null);
     try {
-      const d = await post<{ keys: RelayUserKey[] }>("/relay/admin-keys", { password: panelPass });
+      const d = await post<{ keys: RelayUserKey[] }>("/relay/admin-keys", { password: pass });
       setKeys(d.keys);
-      setKeyId("");
-      if (!d.keys.length) setError("管理员账号下没有 API Key");
+      setNeedPass(false);
+      if (!d.keys.length) setError("站点上没有 API Key");
     } catch (ex) {
-      setError((ex as Error).message);
+      const msg = (ex as Error).message;
+      setError(msg);
+      if (/密码|无权/.test(msg)) setNeedPass(true);
     } finally {
       setBusy(false);
     }
   };
+  useEffect(() => {
+    if (keys == null) void load("");
+    // 进入 API Key 模式时用财务系统管理密钥直接拉列表
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <div className="space-y-2">
-      <div className="space-y-2">
-        <Label>
-          管理员面板密码{" "}
-          <span className="text-muted-foreground font-normal">（站点管理密钥无权读取 Key 列表时必填，不会保存）</span>
-        </Label>
-        <div className="flex gap-2">
+      <div className="flex gap-2">
+        <Button type="button" variant="outline" onClick={() => load()} disabled={busy} className="shrink-0">
+          {busy ? "读取中…" : keys?.length ? "刷新 API Key" : "读取 API Key"}
+        </Button>
+      </div>
+      {needPass ? (
+        <div className="space-y-2">
+          <Label>
+            管理员面板密码{" "}
+            <span className="text-muted-foreground font-normal">（管理密钥列 Key 失败时才需要，不会保存）</span>
+          </Label>
           <Input
             type="password"
             value={panelPass}
             onChange={(e) => setPanelPass(e.target.value)}
-            placeholder="选填，读取失败时必填"
+            placeholder="站点管理员登录密码"
             autoComplete="off"
           />
-          <Button type="button" variant="outline" onClick={load} disabled={busy} className="shrink-0">
-            {busy ? "读取中…" : "读取管理员 Key"}
-          </Button>
         </div>
-      </div>
+      ) : null}
       {keys && keys.length > 0 ? (
         <div className="space-y-2">
-          <Label>选择要追踪的 Key</Label>
+          <Label>选择要追踪的 API Key（{keys.length}）</Label>
           <Select value={keyId} onValueChange={setKeyId}>
             <SelectTrigger>
-              <SelectValue placeholder="选择 Key" />
+              <SelectValue placeholder="选择 API Key" />
             </SelectTrigger>
             <SelectContent>
               {keys.map((k) => (
@@ -219,7 +229,7 @@ function NewPartyForm({
     enabled: kind === "customer" && projectId > 0,
     retry: false,
   });
-  // 中转站绑定只用于中转项目的客户：邮箱（整账号）或管理员 Key（单把 Key 消耗）
+  // 中转站绑定只用于中转项目的客户：邮箱（整账号）或 API Key（单把 Key 消耗）
   const isRelayProject = (projQ.data?.project.ptype ?? "relay") === "relay";
   const relayOn = !!me?.ai.relay && kind === "customer" && isRelayProject;
   const [name, setName] = useState("");
@@ -254,7 +264,7 @@ function NewPartyForm({
     }
     const r = relayOn ? Number(ratio) : undefined;
     if (relayOn && !(Number(r) > 0)) return setError(`${kind === "customer" ? "折扣" : "倍率"}必须大于 0`);
-    if (relayOn && trackMode === "key" && !keyId) return setError("请先读取并选择要追踪的管理员 Key");
+    if (relayOn && trackMode === "key" && !keyId) return setError("请先读取并选择要追踪的 API Key");
     setBusy(true);
     setError(null);
     try {
@@ -289,9 +299,9 @@ function NewPartyForm({
             ratio: r,
             currency,
           });
-          toast.success("已绑定管理员 Key，开始自动挂账");
+          toast.success("已绑定 API Key，开始自动挂账");
         } catch (ex) {
-          toast.error(`绑定管理员 Key 失败：${(ex as Error).message}`);
+          toast.error(`绑定 API Key 失败：${(ex as Error).message}`);
         }
       } else if (relayRef.trim()) {
         try {
@@ -421,7 +431,7 @@ function NewPartyForm({
             <div className="text-sm font-medium">挂账追踪</div>
             <p className="text-muted-foreground text-xs">
               {trackMode === "key"
-                ? "把我们管理员账号下的一把 Key 给客户，应收 = 这把 Key 的消耗 × 折扣"
+                ? "选一把站点上的 API Key 给客户，应收 = 这把 Key 的消耗 × 折扣"
                 : "填客户在中转站的登录邮箱，应收 = 该账号消耗 × 折扣（可再设分组价）"}
             </p>
           </div>
@@ -681,7 +691,7 @@ function RelayBlock({
   const [ref, setRef] = useState(v.external_id || "");
   const [ratio, setRatio] = useState(String(v.ratio));
   const [cur, setCur] = useState<Currency>(v.currency);
-  // 甲方挂账：user = 中转站邮箱；key = 管理员 Key（消耗按该 Key 的 api_key_id 统计）
+  // 甲方挂账：user = 中转站邮箱；key = API Key（消耗按该 Key 的 api_key_id 统计）
   const [mode, setMode] = useState<"user" | "key">("user");
   const [keys, setKeys] = useState<RelayUserKey[] | null>(null);
   const [keyId, setKeyId] = useState("");
@@ -697,7 +707,7 @@ function RelayBlock({
 
   const link = async () => {
     if (v.kind === "customer" && mode === "key") {
-      if (!keyId) return setError("请先读取并选择要追踪的管理员 Key");
+      if (!keyId) return setError("请先读取并选择要追踪的 API Key");
     } else if (!ref.trim()) {
       return setError(v.kind === "customer" ? "请填写中转站邮箱" : "请填写中转站账号名称");
     }
@@ -749,7 +759,7 @@ function RelayBlock({
           <p className="text-muted-foreground text-xs">
             {v.kind === "customer"
               ? mode === "key"
-                ? "选我们管理员账号下的一把 Key；应收 = 这把 Key 的消耗 × 折扣"
+                ? "选一把站点上的 API Key；应收 = 这把 Key 的消耗 × 折扣"
                 : "填客户在中转站的邮箱；没设分组价时应收 = 消耗 × 折扣，设了分组价按分组收费"
               : "填中转站「账号管理」里的账号名；应付 = 消耗 × 倍率，按结算币种自动逐日挂账"}
           </p>
@@ -809,7 +819,7 @@ function RelayBlock({
         中转站{v.kind === "supplier" ? "账号" : ""} · {v.relay.ref}
         {v.kind === "customer" && v.relay.track_mode === "key" && (
           <Badge variant="outline" className="ml-2 font-normal">
-            管理员 Key：{v.relay.key_name || `Key ${v.relay.key_id ?? ""}`}
+            API Key：{v.relay.key_name || `Key ${v.relay.key_id ?? ""}`}
           </Badge>
         )}
       </b>

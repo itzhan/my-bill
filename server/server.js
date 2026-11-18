@@ -1864,8 +1864,8 @@ function relayTrackOf(pa) {
   if (pa.relay_track_mode !== 'key' || !pa.relay_key_id) return null;
   return { key_id: Number(pa.relay_key_id), key_name: pa.relay_key_name || '', group_id: pa.relay_group_id == null ? null : Number(pa.relay_group_id) };
 }
-// 列某个中转站用户的 API Key：管理接口优先；管理密钥无权列 Key 时（前面 relayFindUser 刚成功过，
-// 报「管理密钥无效或已过期」就是权限受限）用该账号的登录密码走面板登录兜底，需要时传 panelPass
+// 列某个中转站用户的 API Key：管理接口优先（财务系统 scoped key 已开通列 Key 权限）；
+// 若仍 403，用该账号的登录密码走面板登录兜底。
 async function relayUserKeys(u, panelPass = '') {
   const norm = (items, gmap) => items.map((k) => ({
     id: k.id,
@@ -1876,9 +1876,15 @@ async function relayUserKeys(u, panelPass = '') {
     group_name: k.group && k.group.name ? k.group.name : (gmap && k.group_id != null ? gmap.get(Number(k.group_id)) || '' : ''),
   }));
   try {
-    const d = await relayGet(`/admin/users/${u.id}/api-keys`);
+    const items = [];
+    for (let page = 1; page <= 20; page++) {
+      const d = await relayGet(`/admin/users/${u.id}/api-keys`, { page, page_size: 100 });
+      const batch = d.items || [];
+      items.push(...batch);
+      if (batch.length < 100 || items.length >= Number(d.total || 0)) break;
+    }
     const groups = await relayGet('/admin/groups', { page: 1, page_size: 100 }).catch(() => ({ items: [] }));
-    return norm(d.items || [], new Map((groups.items || []).map((x) => [x.id, x.name])));
+    return norm(items, new Map((groups.items || []).map((x) => [x.id, x.name])));
   } catch (e) {
     console.error('[relay-user-keys] 管理接口列 Key 失败：', JSON.stringify({ msg: e.message, status: e.status }));
     if (e.message !== '中转站管理密钥无效或已过期') throw e;
