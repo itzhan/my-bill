@@ -2,14 +2,16 @@
 
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, LayoutDashboard, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ExternalLink, LayoutDashboard, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -23,17 +25,22 @@ import { cn } from "@/lib/utils";
 import { del, get, patch, post, put } from "../api";
 import { CUR, CURRENCIES, PL, curf, fmt, fmtCompact, fmtTime, parseAmount, relTime, todayLocal, usdf } from "../format";
 import { qk, useLedgerRefresh, useMe, useParty } from "../hooks";
-import type { Currency, Party, PartyKind, PartyWallet, ProjectDetail, RelayLive, RelayUserKey, Station } from "../types";
+import type {
+  Currency,
+  CustomerOption,
+  Party,
+  PartyKind,
+  PartyWallet,
+  ProjectDetail,
+  RelayLive,
+  RelayStationUser,
+  RelayUserKey,
+  RemoteStationKey,
+  Station,
+  SupplierSite,
+} from "../types";
 
-import {
-  EMPTY_WALLET,
-  PartyWallets,
-  WalletFields,
-  amt,
-  walletBody,
-  walletDraftError,
-  type WalletDraft,
-} from "./party-wallets";
+import { PartyWallets, amt } from "./party-wallets";
 import { FormError, useConfirm } from "./shared";
 
 export type PartySheetState =
@@ -174,7 +181,9 @@ export function PartySheet({
 }) {
   const close = () => setState({ open: false });
   let title = "往来单位";
-  if (state.open && state.mode === "new") title = `添加${PL[state.kind].name}`;
+  if (state.open && state.mode === "new") {
+    title = state.projectId > 0 ? `关联${PL[state.kind].name}` : `添加${PL[state.kind].name}`;
+  }
   return (
     <Sheet open={state.open} onOpenChange={(o) => !o && close()}>
       <SheetContent className="w-full gap-0 overflow-y-auto sm:max-w-xl">
@@ -184,11 +193,15 @@ export function PartySheet({
               <SheetTitle>{title}</SheetTitle>
             </SheetHeader>
             <div className="px-4 pb-6">
-              <NewPartyForm
-                projectId={state.projectId}
-                kind={state.kind}
-                onDone={(id) => setState({ open: true, mode: "view", id })}
-              />
+              {state.kind === "supplier" ? (
+                <LinkProjectSupplierForm projectId={state.projectId} onDone={close} />
+              ) : (
+                <LinkProjectCustomerForm
+                  projectId={state.projectId}
+                  onDone={(id) => setState({ open: true, mode: "view", id })}
+                  onClose={close}
+                />
+              )}
             </div>
           </>
         ) : null}
@@ -211,117 +224,138 @@ export function PartySheet({
   );
 }
 
-function NewPartyForm({
+// 项目往来 -> 关联已有客户：只选已有客户；若是中转项目，挂账追踪按「选台子 → 搜索选择客户账户 → 显示该账户可用分组并设折扣」
+function LinkProjectCustomerForm({
   projectId,
-  kind,
   onDone,
+  onClose,
 }: {
   projectId: number;
-  kind: PartyKind;
   onDone: (id: number) => void;
+  onClose: () => void;
 }) {
-  const { data: me } = useMe();
   const refresh = useLedgerRefresh();
-  const L = PL[kind];
   const projQ = useQuery({
     queryKey: qk.project(projectId),
     queryFn: () => get<ProjectDetail>(`/projects/${projectId}`),
-    enabled: kind === "customer" && projectId > 0,
+    enabled: projectId > 0,
     retry: false,
   });
-  // 中转站绑定只用于中转项目的客户：邮箱（整账号）或 API Key（单把 Key 消耗）
+  const custOptsQ = useQuery({
+    queryKey: ["ledger", "customer-options"],
+    queryFn: () => get<{ customers: CustomerOption[] }>("/customers/options").then((d) => d.customers),
+  });
+  const stationsQ = useQuery({
+    queryKey: ["ledger", "stations"],
+    queryFn: () => get<{ stations: Station[] }>("/stations").then((d) => d.stations),
+  });
+
   const isRelayProject = (projQ.data?.project.ptype ?? "relay") === "relay";
-  const relayOn = !!me?.ai.relay && kind === "customer" && isRelayProject;
-  const [name, setName] = useState("");
-  const [contact, setContact] = useState("");
-  const [currency, setCurrency] = useState<Currency>("CNY");
-  const [note, setNote] = useState("");
-  const [trackMode, setTrackMode] = useState<"user" | "key">("user");
-  const [relayRef, setRelayRef] = useState("");
-  const [ratio, setRatio] = useState("1");
-  const [adminKeys, setAdminKeys] = useState<RelayUserKey[] | null>(null);
-  const [keyId, setKeyId] = useState("");
-  const [panelPass, setPanelPass] = useState("");
-  const [ext, setExt] = useState("");
-  const [settleType, setSettleType] = useState<"prepaid" | "credit">("prepaid");
-  // 客户：预付余额提醒阈值（美元）、后付账期天数、起始使用时间
-  const [balThreshold, setBalThreshold] = useState("");
-  const [termDays, setTermDays] = useState("");
-  const [startDate, setStartDate] = useState("");
-  const [profile, setProfile] = useState("");
-  // 供应商余额：绑定我们在供应商站点（new-api / sub2api）的 Key，添加后立即抓钱包额度和倍率
-  const [walletOn, setWalletOn] = useState(false);
-  const [wallet, setWallet] = useState<WalletDraft>(EMPTY_WALLET);
+  const relayStations = (stationsQ.data ?? []).filter((s) => s.type === "relay");
+
+  const [customerKey, setCustomerKey] = useState("");
+  const [stationId, setStationId] = useState("");
+  const [userQuery, setUserQuery] = useState("");
+  const [searchingUsers, setSearchingUsers] = useState(false);
+  const [userResults, setUserResults] = useState<RelayStationUser[] | null>(null);
+  const [selectedUser, setSelectedUser] = useState<RelayStationUser | null>(null);
+  const [groupPrices, setGroupPrices] = useState<Record<string, { mode: "discount" | "cny"; value: string }>>({});
+  const [defaultRatio, setDefaultRatio] = useState("1");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // 自动预选项目默认台子或第一个中转站
+  useEffect(() => {
+    if (stationId || !relayStations.length) return;
+    const pid = projQ.data?.project.station_id;
+    const hit = (pid ? relayStations.find((s) => s.id === pid) : null) ?? relayStations[0];
+    if (hit) setStationId(String(hit.id));
+  }, [relayStations, projQ.data?.project.station_id, stationId]);
+
+  const searchStationUsers = async (kw = userQuery, sid = stationId) => {
+    if (!sid) return;
+    setSearchingUsers(true);
+    setError(null);
+    try {
+      const d = await get<{ users: RelayStationUser[] }>(`/stations/${sid}/users?q=${encodeURIComponent(kw.trim())}`);
+      setUserResults(d.users);
+    } catch (ex) {
+      setError((ex as Error).message);
+    } finally {
+      setSearchingUsers(false);
+    }
+  };
+
+  // 切换台子时重置已选账户与搜索结果
+  const onStationChange = (sid: string) => {
+    setStationId(sid);
+    setSelectedUser(null);
+    setUserResults(null);
+    setGroupPrices({});
+  };
+
+  // 选中账户后自动拉取该账户可用的分组
+  const sidNum = Number(stationId);
+  const userGroupsQ = useQuery({
+    queryKey: ["ledger", "station-user-groups", sidNum, selectedUser?.id ?? 0],
+    queryFn: () =>
+      get<{ groups: { name: string }[] }>(`/stations/${sidNum}/users/${selectedUser!.id}/groups`).then((d) => d.groups),
+    enabled: isRelayProject && sidNum > 0 && !!selectedUser,
+  });
+
+  const setGroupPrice = (name: string, patchVal: Partial<{ mode: "discount" | "cny"; value: string }>) =>
+    setGroupPrices((prev) => ({
+      ...prev,
+      [name]: { ...(prev[name] ?? { mode: "discount" as const, value: "" }), ...patchVal },
+    }));
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return setError("请填写名称");
-    if (kind === "supplier" && walletOn) {
-      const werr = walletDraftError(wallet, true);
-      if (werr) return setError(werr);
-    }
-    const r = relayOn ? Number(ratio) : undefined;
-    if (relayOn && !(Number(r) > 0)) return setError(`${kind === "customer" ? "折扣" : "倍率"}必须大于 0`);
-    if (relayOn && trackMode === "key" && !keyId) return setError("请先读取并选择要追踪的 API Key");
+    const picked = (custOptsQ.data ?? []).find((c) => c.key === customerKey);
+    if (!picked) return setError("请选择要关联的已有客户");
+    const r = Number(defaultRatio) > 0 ? Number(defaultRatio) : 1;
     setBusy(true);
     setError(null);
     try {
       const d = await post<{ party: Party }>(`/projects/${projectId}/parties`, {
-        kind,
-        name: name.trim(),
-        contact,
-        note,
-        currency,
-        external_id: ext,
+        kind: "customer",
+        name: picked.name,
+        customer_group: picked.group,
+        contact: picked.contact,
+        currency: "CNY",
         ratio: r,
-        settle_type: settleType,
-        profile,
-        ...(kind === "customer"
-          ? {
-              balance_threshold: settleType === "prepaid" ? balThreshold : "",
-              term_days: settleType === "credit" ? termDays : "",
-              start_date: settleType === "credit" ? startDate : "",
-            }
-          : {}),
       });
-      toast.success(`已添加${L.name}「${d.party.name}」`);
-      if (relayOn && trackMode === "key" && keyId) {
+      if (isRelayProject && selectedUser && sidNum > 0) {
         try {
-          const picked = adminKeys?.find((k) => String(k.id) === keyId);
           await post(`/parties/${d.party.id}/relay-link`, {
-            mode: "key",
-            key_id: Number(keyId),
-            key_name: picked?.name || picked?.key_masked || "",
-            group_id: picked?.group_id,
-            panel_pass: panelPass,
+            station_id: sidNum,
+            user_id: selectedUser.id,
+            ref: selectedUser.email || selectedUser.username || String(selectedUser.id),
             ratio: r,
-            currency,
+            currency: "CNY",
           });
-          toast.success("已绑定 API Key，开始自动挂账");
-        } catch (ex) {
-          toast.error(`绑定 API Key 失败：${(ex as Error).message}`);
-        }
-      } else if (relayRef.trim()) {
-        try {
-          await post(`/parties/${d.party.id}/relay-link`, { ref: relayRef.trim(), ratio: r, currency });
-          toast.success("已绑定中转站，开始自动挂账");
-        } catch (ex) {
-          toast.error(`绑定中转站失败：${(ex as Error).message}`);
-        }
-      }
-      if (kind === "supplier" && walletOn) {
-        try {
-          const { wallet: w } = await post<{ wallet: { last_error: string; last_actual: number | null } }>(
-            `/parties/${d.party.id}/wallets`,
-            walletBody(wallet),
+          const visible = new Set((userGroupsQ.data ?? []).map((g) => g.name));
+          const groupsPayload = Object.entries(groupPrices)
+            .filter(([name, p]) => p.value.trim() !== "" && Number(p.value) > 0 && visible.has(name))
+            .map(([group_name, p]) => ({
+              group_name,
+              price: Number(p.value),
+              mode: p.mode,
+            }));
+          if (groupsPayload.length) {
+            await put(`/parties/${d.party.id}/relay-groups`, {
+              station_id: sidNum,
+              groups: groupsPayload,
+            });
+          }
+          toast.success(
+            `已关联客户「${picked.name}」并开启挂账追踪${groupsPayload.length ? `（${groupsPayload.length} 个分组）` : ""}`,
           );
-          if (w.last_error) toast.error(`已绑定 Key，但抓取失败：${w.last_error}`);
-          else toast.success(`已抓取供应商余额：实际余额 ${amt(w.last_actual)}`);
         } catch (ex) {
-          toast.error(`绑定 Key 失败：${(ex as Error).message}`);
+          toast.error(`已关联客户，但绑定挂账追踪失败：${(ex as Error).message}`);
         }
+      } else {
+        toast.success(`已关联客户「${picked.name}」到本项目`);
       }
       refresh();
       onDone(d.party.id);
@@ -332,167 +366,495 @@ function NewPartyForm({
     }
   };
 
+  const customers = custOptsQ.data ?? [];
+
   return (
     <form onSubmit={submit} className="space-y-4">
       <div className="space-y-2">
-        <Label htmlFor="pty-name">{L.name}名称</Label>
-        <Input
-          id="pty-name"
-          autoFocus
-          maxLength={60}
-          placeholder={kind === "supplier" ? "例如：XX 广告代理" : "例如：XX 科技有限公司"}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
+        <Label>选择已有客户 *</Label>
+        {custOptsQ.isLoading ? (
+          <Skeleton className="h-9" />
+        ) : customers.length ? (
+          <Select value={customerKey} onValueChange={setCustomerKey}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="请选择已有客户" />
+            </SelectTrigger>
+            <SelectContent>
+              {customers.map((c) => (
+                <SelectItem key={c.key} value={c.key}>
+                  {c.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <p className="text-muted-foreground rounded-md border p-3 text-sm">
+            还没有已建档的客户，请先前往{" "}
+            <Link href="/dashboard/ledger/customers" onClick={onClose} className="text-primary underline">
+              客户管理
+            </Link>{" "}
+            添加客户。
+          </p>
+        )}
+        <p className="text-muted-foreground text-xs">
+          项目里只关联已有客户；如需新建客户请前往{" "}
+          <Link href="/dashboard/ledger/customers" onClick={onClose} className="text-primary hover:underline">
+            客户页
+          </Link>
+        </p>
       </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-2">
-          <Label htmlFor="pty-contact">联系方式（可选）</Label>
-          <Input id="pty-contact" maxLength={100} value={contact} onChange={(e) => setContact(e.target.value)} />
-        </div>
-        <div className="space-y-2">
-          <Label>
-            结算币种（{L.due} / {L.paid} 按此币种记）
-          </Label>
-          <CurrencySelect value={currency} onChange={setCurrency} />
-        </div>
-      </div>
-      <div className="space-y-2">
-        <Label>结算方式</Label>
-        <Select value={settleType} onValueChange={(v) => setSettleType(v as "prepaid" | "credit")}>
-          <SelectTrigger className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {kind === "supplier" ? (
-              <>
-                <SelectItem value="prepaid">预付（先充值后使用，看钱包余额）</SelectItem>
-                <SelectItem value="credit">授信（先使用后付费，余额按 0，只看消费）</SelectItem>
-              </>
-            ) : (
-              <>
-                <SelectItem value="prepaid">预付（先充值后使用，余额不足发邮件提醒）</SelectItem>
-                <SelectItem value="credit">后付（先使用后付费，按账期跟踪欠费）</SelectItem>
-              </>
-            )}
-          </SelectContent>
-        </Select>
-      </div>
-      {kind === "customer" && settleType === "prepaid" ? (
-        <div className="space-y-2">
-          <Label htmlFor="pty-threshold">余额提醒阈值（美元，可选）</Label>
-          <Input
-            id="pty-threshold"
-            inputMode="decimal"
-            placeholder="如 50，余额低于此值发邮件提醒团队"
-            value={balThreshold}
-            onChange={(e) => setBalThreshold(e.target.value)}
-          />
-        </div>
-      ) : null}
-      {kind === "customer" && settleType === "credit" ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="pty-term">账期（天）</Label>
-            <Input
-              id="pty-term"
-              inputMode="numeric"
-              placeholder="如 30"
-              value={termDays}
-              onChange={(e) => setTermDays(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="pty-start">起始使用时间</Label>
-            <Input id="pty-start" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-          </div>
-        </div>
-      ) : null}
-      <div className="space-y-2">
-        <Label htmlFor="pty-note">备注（可选）</Label>
-        <Input id="pty-note" maxLength={200} value={note} onChange={(e) => setNote(e.target.value)} />
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="pty-profile">画像 / 介绍（可选）</Label>
-        <Textarea
-          id="pty-profile"
-          maxLength={1000}
-          rows={3}
-          placeholder={
-            kind === "supplier" ? "这家供应商的特点、渠道、稳定性、合作方式等" : "这个客户的来源、规模、合作方式等"
-          }
-          value={profile}
-          onChange={(e) => setProfile(e.target.value)}
-        />
-      </div>
-      {relayOn ? (
-        <div className="space-y-3 rounded-lg border p-3">
+
+      {isRelayProject ? (
+        <div className="space-y-4 rounded-lg border p-3.5">
           <div>
             <div className="text-sm font-medium">挂账追踪</div>
             <p className="text-muted-foreground text-xs">
-              {trackMode === "key"
-                ? "选一把站点上的 API Key 给客户，应收 = 这把 Key 的消耗 × 折扣"
-                : "填客户在中转站的登录邮箱，应收 = 该账号消耗 × 折扣（可再设分组价）"}
+              先选择我们的中转台子，搜索选择客户的账户，再为该账户可用分组设置各自折扣
             </p>
           </div>
-          <TrackModeToggle
-            mode={trackMode}
-            onChange={(m) => {
-              setTrackMode(m);
-              setAdminKeys(null);
-              setKeyId("");
-              setError(null);
-            }}
-          />
-          {trackMode === "user" ? (
+
+          <div className="space-y-1.5">
+            <Label>1. 选择台子</Label>
+            {relayStations.length ? (
+              <Select value={stationId} onValueChange={onStationChange}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择中转站台子" />
+                </SelectTrigger>
+                <SelectContent>
+                  {relayStations.map((s) => (
+                    <SelectItem key={s.id} value={String(s.id)}>
+                      {s.name}
+                      {s.base_url ? `（${s.base_url.replace(/^https?:\/\//, "")}）` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <p className="text-muted-foreground text-xs">
+                还没有中转站台子，请先到侧边栏「台子管理」里添加
+              </p>
+            )}
+          </div>
+
+          {stationId ? (
             <div className="space-y-2">
-              <Label htmlFor="pty-relay">中转站邮箱</Label>
-              <Input
-                id="pty-relay"
-                maxLength={120}
-                placeholder="客户在中转站的登录邮箱"
-                value={relayRef}
-                onChange={(e) => setRelayRef(e.target.value)}
-              />
+              <Label>2. 搜索并选择客户账户</Label>
+              {selectedUser ? (
+                <div className="bg-primary/5 border-primary/30 flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 font-medium">
+                      <Check className="text-primary size-4 shrink-0" />
+                      <span className="truncate">{selectedUser.email || selectedUser.username}</span>
+                    </div>
+                    <div className="text-muted-foreground text-xs">
+                      ID {selectedUser.id}
+                      {selectedUser.username && selectedUser.email ? ` · ${selectedUser.username}` : ""} · 余额{" "}
+                      {usdf(selectedUser.balance_usd)}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedUser(null);
+                      setGroupPrices({});
+                    }}
+                  >
+                    重选
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Search className="text-muted-foreground absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
+                      <Input
+                        placeholder="输入邮箱 / 用户名关键词"
+                        className="pl-8"
+                        value={userQuery}
+                        onChange={(e) => setUserQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void searchStationUsers();
+                          }
+                        }}
+                      />
+                    </div>
+                    <Button type="button" variant="outline" onClick={() => searchStationUsers()} disabled={searchingUsers}>
+                      {searchingUsers ? "搜索中…" : "搜索"}
+                    </Button>
+                  </div>
+                  {userResults ? (
+                    userResults.length ? (
+                      <div className="max-h-48 divide-y overflow-y-auto rounded-md border">
+                        {userResults.map((u) => (
+                          <button
+                            key={u.id}
+                            type="button"
+                            onClick={() => setSelectedUser(u)}
+                            className="hover:bg-muted/60 flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">{u.email || u.username || `用户 #${u.id}`}</div>
+                              <div className="text-muted-foreground truncate text-xs">
+                                ID {u.id}
+                                {u.username && u.email ? ` · ${u.username}` : ""}
+                              </div>
+                            </div>
+                            <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
+                              {usdf(u.balance_usd)}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-muted-foreground text-xs">没有找到匹配的客户账户</p>
+                    )
+                  ) : null}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {selectedUser ? (
+            <div className="space-y-2.5 border-t pt-3">
+              <div>
+                <Label>3. 设置各分组折扣</Label>
+                <p className="text-muted-foreground text-xs">
+                  以下为该账户在台子上可用的分组；填折扣（如 68 = 68 折）或元/刀
+                </p>
+              </div>
+              {userGroupsQ.isLoading ? (
+                <Skeleton className="h-16" />
+              ) : userGroupsQ.data?.length ? (
+                <div className="space-y-2">
+                  {userGroupsQ.data.map((g) => {
+                    const row = groupPrices[g.name] ?? { mode: "discount" as const, value: "" };
+                    return (
+                      <div key={g.name} className="flex items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate text-sm font-medium">{g.name}</span>
+                        <Select
+                          value={row.mode}
+                          onValueChange={(m) => setGroupPrice(g.name, { mode: m === "cny" ? "cny" : "discount" })}
+                        >
+                          <SelectTrigger className="w-24">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="discount">折扣</SelectItem>
+                            <SelectItem value="cny">元/刀</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Input
+                          inputMode="decimal"
+                          className="w-24"
+                          placeholder={row.mode === "discount" ? "如 68" : "如 4.5"}
+                          value={row.value}
+                          onChange={(e) => setGroupPrice(g.name, { value: e.target.value })}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-muted-foreground text-xs">该账户暂未查到可用分组，可填写下方默认折扣兜底</p>
+              )}
+              <div className="flex items-center gap-2 pt-1">
+                <Label htmlFor="cust-def-ratio" className="text-muted-foreground shrink-0 text-xs font-normal">
+                  未设分组价时默认折扣
+                </Label>
+                <Input
+                  id="cust-def-ratio"
+                  inputMode="decimal"
+                  className="h-8 w-24"
+                  value={defaultRatio}
+                  onChange={(e) => setDefaultRatio(e.target.value)}
+                />
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <FormError>{error}</FormError>
+      <Button type="submit" className="w-full" disabled={busy || !customers.length}>
+        {busy ? "关联中…" : "关联客户"}
+      </Button>
+    </form>
+  );
+}
+
+// 项目往来 -> 关联已有供应商：只选已有供应商；若是中转项目，再选该供应商的站点与站点里的 Key（多选），自动继承站点自定义倍率
+function LinkProjectSupplierForm({ projectId, onDone }: { projectId: number; onDone: () => void }) {
+  const refresh = useLedgerRefresh();
+  const projQ = useQuery({
+    queryKey: qk.project(projectId),
+    queryFn: () => get<ProjectDetail>(`/projects/${projectId}`),
+    enabled: projectId > 0,
+    retry: false,
+  });
+  const suppliersQ = useQuery({
+    queryKey: ["ledger", "suppliers"],
+    queryFn: () =>
+      get<{ suppliers: (Party & { sites?: SupplierSite[] })[] }>("/suppliers").then((d) =>
+        d.suppliers.filter((s) => !s.archived),
+      ),
+  });
+
+  const isRelayProject = (projQ.data?.project.ptype ?? "relay") === "relay";
+  const [supplierId, setSupplierId] = useState("");
+  const [siteWalletId, setSiteWalletId] = useState("");
+  const [remoteKeys, setRemoteKeys] = useState<RemoteStationKey[] | null>(null);
+  const [loadingKeys, setLoadingKeys] = useState(false);
+  const [selectedKeyIds, setSelectedKeyIds] = useState<Set<string>>(new Set());
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const suppliers = suppliersQ.data ?? [];
+  const selectedSupplier = suppliers.find((s) => String(s.id) === supplierId) ?? null;
+  const sites = selectedSupplier?.sites ?? [];
+  const selectedSite = sites.find((s) => String(s.template_wallet_id) === siteWalletId) ?? null;
+
+  const loadSiteKeys = async (wid: string) => {
+    if (!wid) return;
+    setLoadingKeys(true);
+    setKeyError(null);
+    setRemoteKeys(null);
+    setSelectedKeyIds(new Set());
+    try {
+      const d = await get<{ keys: RemoteStationKey[] }>(`/party-wallets/${wid}/remote-keys`);
+      setRemoteKeys(d.keys);
+    } catch (ex) {
+      setKeyError((ex as Error).message);
+    } finally {
+      setLoadingKeys(false);
+    }
+  };
+
+  const onSelectSupplier = (id: string) => {
+    setSupplierId(id);
+    setSiteWalletId("");
+    setRemoteKeys(null);
+    setSelectedKeyIds(new Set());
+    setKeyError(null);
+    const sup = suppliers.find((s) => String(s.id) === id);
+    const onlySite = sup?.sites?.length === 1 ? sup.sites[0] : undefined;
+    if (isRelayProject && onlySite) {
+      const wid = String(onlySite.template_wallet_id);
+      setSiteWalletId(wid);
+      void loadSiteKeys(wid);
+    }
+  };
+
+  const onSelectSite = (wid: string) => {
+    setSiteWalletId(wid);
+    void loadSiteKeys(wid);
+  };
+
+  const toggleKey = (id: string) => {
+    setSelectedKeyIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedSupplier) return setError("请选择要关联的已有供应商");
+    if (isRelayProject && selectedSite && remoteKeys?.length && selectedKeyIds.size === 0) {
+      return setError("请勾选要关联到本项目的站点 Key（可多选）");
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await post<{ ok: boolean; bound?: { created: number; skipped: number } | null }>(
+        `/projects/${projectId}/suppliers`,
+        {
+          party_id: selectedSupplier.id,
+          ...(isRelayProject && selectedSite
+            ? {
+                template_wallet_id: selectedSite.template_wallet_id,
+                key_ids: [...selectedKeyIds],
+                link_whole_site: selectedKeyIds.size === 0,
+              }
+            : {}),
+        },
+      );
+      if (res.bound) {
+        toast.success(
+          `已关联供应商「${selectedSupplier.name}」及 ${res.bound.created} 把 Key${res.bound.skipped ? `（跳过已存在 ${res.bound.skipped} 把）` : ""}`,
+        );
+      } else {
+        toast.success(`已关联供应商「${selectedSupplier.name}」`);
+      }
+      refresh();
+      onDone();
+    } catch (ex) {
+      setError((ex as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <div className="space-y-2">
+        <Label>选择已有供应商 *</Label>
+        {suppliersQ.isLoading ? (
+          <Skeleton className="h-9" />
+        ) : suppliers.length ? (
+          <Select value={supplierId} onValueChange={onSelectSupplier}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="请选择已有供应商" />
+            </SelectTrigger>
+            <SelectContent>
+              {suppliers.map((s) => (
+                <SelectItem key={s.id} value={String(s.id)}>
+                  {s.name}
+                  {s.sites?.length ? `（${s.sites.length} 个站点）` : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <p className="text-muted-foreground rounded-md border p-3 text-sm">
+            还没有供应商，请先前往{" "}
+            <Link href="/dashboard/ledger/suppliers" onClick={onDone} className="text-primary underline">
+              供应商页
+            </Link>{" "}
+            添加供应商。
+          </p>
+        )}
+        <p className="text-muted-foreground text-xs">
+          新增供应商请统一在侧边栏「
+          <Link href="/dashboard/ledger/suppliers" onClick={onDone} className="text-primary hover:underline">
+            供应商
+          </Link>
+          」页添加，项目里只做关联
+        </p>
+      </div>
+
+      {isRelayProject && selectedSupplier ? (
+        <div className="space-y-3 rounded-lg border p-3.5">
+          <div>
+            <div className="text-sm font-medium">关联供应商站点与 Key</div>
+            <p className="text-muted-foreground text-xs">
+              选择该供应商的站点并勾选要用于本项目的 Key（可多选）；如站点已配自定义倍率将自动继承计算
+            </p>
+          </div>
+          {sites.length ? (
+            <div className="space-y-1.5">
+              <Label>1. 选择站点</Label>
+              <Select value={siteWalletId} onValueChange={onSelectSite}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择供应商站点" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sites.map((s) => (
+                    <SelectItem key={s.template_wallet_id} value={String(s.template_wallet_id)}>
+                      {s.name} · {s.host}（{s.platform === "sub2api" ? "sub2api" : "new-api"}）
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           ) : (
-            <AdminKeyPicker
-              keys={adminKeys}
-              setKeys={setAdminKeys}
-              keyId={keyId}
-              setKeyId={setKeyId}
-              panelPass={panelPass}
-              setPanelPass={setPanelPass}
-              setError={setError}
-            />
+            <p className="text-muted-foreground text-xs">
+              该供应商尚未配置站点。可直接关联供应商，或先前往{" "}
+              <Link
+                href={`/dashboard/ledger/suppliers/${selectedSupplier.id}`}
+                onClick={onDone}
+                className="text-primary underline"
+              >
+                供应商详情
+              </Link>{" "}
+              添加站点。
+            </p>
           )}
-          <div className="space-y-2">
-            <Label htmlFor="pty-ratio">{trackMode === "key" ? "折扣（应收 = Key 消耗 × 折扣）" : "默认折扣（没填分组价时用）"}</Label>
-            <Input id="pty-ratio" inputMode="decimal" value={ratio} onChange={(e) => setRatio(e.target.value)} />
-          </div>
+
+          {selectedSite?.custom ? (
+            <div className="bg-muted/50 rounded-md px-3 py-2 text-xs">
+              该站点已设置自定义倍率（充值 ×{selectedSite.custom_ratio ?? "-"} / 消耗 ×
+              {selectedSite.consume_ratio ?? selectedSite.custom_ratio ?? 1}），关联的 Key 将自动按此倍率计算，无需重复设置。
+            </div>
+          ) : null}
+
+          {selectedSite ? (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label>2. 选择站点里的 Key（可多选）</Label>
+                <div className="flex items-center gap-2">
+                  {remoteKeys?.length ? (
+                    <label className="flex items-center gap-1.5 text-xs">
+                      <Checkbox
+                        checked={selectedKeyIds.size === remoteKeys.length}
+                        onCheckedChange={(x) =>
+                          setSelectedKeyIds(x ? new Set(remoteKeys.map((k) => k.id)) : new Set())
+                        }
+                      />
+                      <span className="text-muted-foreground">全选</span>
+                    </label>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2"
+                    onClick={() => loadSiteKeys(siteWalletId)}
+                    disabled={loadingKeys}
+                  >
+                    <RefreshCw className={cn("size-3.5", loadingKeys && "animate-spin")} />
+                    刷新
+                  </Button>
+                </div>
+              </div>
+              {loadingKeys ? <Skeleton className="h-24" /> : null}
+              {keyError ? <FormError>{keyError}</FormError> : null}
+              {remoteKeys && !remoteKeys.length ? (
+                <p className="text-muted-foreground text-xs">该站点上暂未读到 Key</p>
+              ) : null}
+              {remoteKeys?.length ? (
+                <div className="max-h-60 divide-y overflow-y-auto rounded-md border">
+                  {remoteKeys.map((k) => (
+                    <label
+                      key={k.id}
+                      className="hover:bg-muted/40 flex cursor-pointer items-center gap-2.5 p-2.5 text-sm"
+                    >
+                      <Checkbox checked={selectedKeyIds.has(k.id)} onCheckedChange={() => toggleKey(k.id)} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate font-medium">{k.name}</span>
+                          <Badge variant="outline" className="text-[11px] font-normal">
+                            {k.status}
+                          </Badge>
+                        </div>
+                        <div className="text-muted-foreground truncate font-mono text-xs">{k.key_masked}</div>
+                      </div>
+                      <div className="shrink-0 text-right text-xs tabular-nums">
+                        <div className="text-muted-foreground">累计</div>
+                        <div className="font-medium">{amt(k.used)}</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
-      {kind === "supplier" ? (
-        <div className="space-y-4 rounded-lg border p-3">
-          <label className="flex items-center justify-between gap-3 text-sm">
-            <span>
-              <span className="font-medium">抓取供应商余额（new-api / sub2api）</span>
-              <span className="text-muted-foreground block text-xs">
-                填我们在供应商站点的 API Key，自动抓钱包额度和倍率；以后也可以在供应商详情的「余额」里添加多把 Key
-              </span>
-            </span>
-            <Switch checked={walletOn} onCheckedChange={setWalletOn} />
-          </label>
-          {walletOn ? <WalletFields v={wallet} setV={setWallet} /> : null}
-        </div>
-      ) : null}
-      <div className="space-y-2">
-        <Label htmlFor="pty-ext">外部系统编号（可选，接口同步时匹配用）</Label>
-        <Input id="pty-ext" maxLength={100} value={ext} onChange={(e) => setExt(e.target.value)} />
-      </div>
+
       <FormError>{error}</FormError>
-      <Button type="submit" className="w-full" disabled={busy}>
-        添加{relayOn || (kind === "supplier" && walletOn) ? "并获取" : ""}
+      <Button type="submit" className="w-full" disabled={busy || !suppliers.length}>
+        {busy
+          ? "关联中…"
+          : selectedKeyIds.size
+            ? `关联供应商并绑定 ${selectedKeyIds.size} 把 Key`
+            : "关联供应商"}
       </Button>
     </form>
   );
@@ -688,16 +1050,46 @@ function RelayBlock({
   const [confirm, confirmEl] = useConfirm();
   const L = PL[v.kind];
   const rl = v.kind === "customer" ? "折扣" : "倍率";
-  const [ref, setRef] = useState(v.external_id || "");
+  const { data: stations } = useQuery({
+    queryKey: ["ledger", "stations"],
+    queryFn: () => get<{ stations: Station[] }>("/stations").then((d) => d.stations),
+    enabled: !v.relay && v.kind === "customer",
+  });
+  const relayStations = (stations ?? []).filter((s) => s.type === "relay");
+  const [stationId, setStationId] = useState("");
+  const [userQuery, setUserQuery] = useState("");
+  const [searchingUsers, setSearchingUsers] = useState(false);
+  const [userResults, setUserResults] = useState<RelayStationUser[] | null>(null);
+  const [selectedUser, setSelectedUser] = useState<RelayStationUser | null>(null);
   const [ratio, setRatio] = useState(String(v.ratio));
   const [cur, setCur] = useState<Currency>(v.currency);
-  // 甲方挂账：user = 中转站邮箱；key = API Key（消耗按该 Key 的 api_key_id 统计）
   const [mode, setMode] = useState<"user" | "key">("user");
   const [keys, setKeys] = useState<RelayUserKey[] | null>(null);
   const [keyId, setKeyId] = useState("");
   const [panelPass, setPanelPass] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const first = relayStations[0];
+    if (!stationId && first) setStationId(String(first.id));
+  }, [relayStations, stationId]);
+
+  const searchUsers = async () => {
+    if (!stationId) return;
+    setSearchingUsers(true);
+    setError(null);
+    try {
+      const d = await get<{ users: RelayStationUser[] }>(
+        `/stations/${stationId}/users?q=${encodeURIComponent(userQuery.trim())}`,
+      );
+      setUserResults(d.users);
+    } catch (ex) {
+      setError((ex as Error).message);
+    } finally {
+      setSearchingUsers(false);
+    }
+  };
 
   const reload = () => {
     qc.invalidateQueries({ queryKey: qk.party(v.id) });
@@ -708,8 +1100,8 @@ function RelayBlock({
   const link = async () => {
     if (v.kind === "customer" && mode === "key") {
       if (!keyId) return setError("请先读取并选择要追踪的 API Key");
-    } else if (!ref.trim()) {
-      return setError(v.kind === "customer" ? "请填写中转站邮箱" : "请填写中转站账号名称");
+    } else if (!selectedUser) {
+      return setError("请先搜索并选择客户账户");
     }
     const r = Number(ratio);
     if (!(r > 0)) return setError(`${rl}必须大于 0`);
@@ -718,12 +1110,15 @@ function RelayBlock({
     try {
       const picked = keys?.find((k) => String(k.id) === keyId);
       await post(`/parties/${v.id}/relay-link`, {
-        ref: ref.trim(),
-        ratio: r,
-        currency: cur,
+        station_id: Number(stationId) || undefined,
         ...(mode === "key"
           ? { mode: "key", key_id: Number(keyId), key_name: picked?.name || picked?.key_masked || "", group_id: picked?.group_id, panel_pass: panelPass }
-          : {}),
+          : {
+              user_id: selectedUser!.id,
+              ref: selectedUser!.email || selectedUser!.username || String(selectedUser!.id),
+            }),
+        ratio: r,
+        currency: cur,
       });
       toast.success("已绑定并开始自动挂账");
       reload();
@@ -786,11 +1181,77 @@ function RelayBlock({
             setError={setError}
           />
         ) : (
-          <Input
-            placeholder={v.kind === "customer" ? "邮箱 / 用户名" : "账号名称"}
-            value={ref}
-            onChange={(e) => setRef(e.target.value)}
-          />
+          <div className="space-y-2.5">
+            {relayStations.length ? (
+              <Select
+                value={stationId}
+                onValueChange={(sid) => {
+                  setStationId(sid);
+                  setSelectedUser(null);
+                  setUserResults(null);
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择台子" />
+                </SelectTrigger>
+                <SelectContent>
+                  {relayStations.map((s) => (
+                    <SelectItem key={s.id} value={String(s.id)}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : null}
+            {selectedUser ? (
+              <div className="bg-primary/5 border-primary/30 flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
+                <span className="truncate font-medium">
+                  {selectedUser.email || selectedUser.username}（ID {selectedUser.id}）
+                </span>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setSelectedUser(null)}>
+                  重选
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="搜索客户账户（邮箱 / 用户名）"
+                    value={userQuery}
+                    onChange={(e) => setUserQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void searchUsers();
+                      }
+                    }}
+                  />
+                  <Button type="button" variant="outline" onClick={searchUsers} disabled={searchingUsers || !stationId}>
+                    {searchingUsers ? "搜索中…" : "搜索"}
+                  </Button>
+                </div>
+                {userResults ? (
+                  userResults.length ? (
+                    <div className="max-h-40 divide-y overflow-y-auto rounded-md border">
+                      {userResults.map((u) => (
+                        <button
+                          key={u.id}
+                          type="button"
+                          onClick={() => setSelectedUser(u)}
+                          className="hover:bg-muted/60 flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm"
+                        >
+                          <span className="truncate">{u.email || u.username || `用户 #${u.id}`}</span>
+                          <span className="text-muted-foreground shrink-0 text-xs">{usdf(u.balance_usd)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-muted-foreground text-xs">没有匹配的账户</p>
+                  )
+                ) : null}
+              </>
+            )}
+          </div>
         )}
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-2">
@@ -1150,7 +1611,6 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   const [currency, setCurrency] = useState<Currency>(v.currency);
   const [note, setNote] = useState(v.note);
   const [ratio, setRatio] = useState(String(v.ratio));
-  const [ext, setExt] = useState(v.external_id);
   const [settledBase, setSettledBase] = useState(v.kind === "supplier" ? String(v.settled_base ?? 0) : "");
   const [settleType, setSettleType] = useState<"prepaid" | "credit">(v.settle_type === "credit" ? "credit" : "prepaid");
   const [balThreshold, setBalThreshold] = useState(v.balance_threshold == null ? "" : String(v.balance_threshold));
@@ -1178,7 +1638,6 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
         contact,
         note,
         currency,
-        external_id: ext,
         ratio: r,
         settle_type: settleType,
         profile,
@@ -1281,10 +1740,6 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
             </div>
           </>
         ) : null}
-        <div className="space-y-2">
-          <Label htmlFor="pe-ext">外部系统编号</Label>
-          <Input id="pe-ext" maxLength={100} value={ext} onChange={(e) => setExt(e.target.value)} />
-        </div>
         {v.kind === "customer" ? (
           <>
             <div className="space-y-2">

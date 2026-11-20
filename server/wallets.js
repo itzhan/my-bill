@@ -708,13 +708,34 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     const t = nowIso();
     try {
       if (!w.api_key && !(w.platform === 'newapi' && w.access_token)) {
-        // sub2api 只填了站点账号密码：自动从站点绑一把可用的 Key（恰好一把时），多把让用户去列表里选
-        if (!(w.platform === 'sub2api' && w.login_user && w.login_pass)) throw new Error('还没有填 API Key（new-api 填访问令牌、sub2api 填账号密码时可不填）');
-        const active = (await listRemoteKeys(w)).filter((k) => k.status === '启用' && k.key_full);
-        if (!active.length) throw new Error('站点账号下还没有可用的 Key，先去站点创建，再回来刷新');
-        if (active.length > 1) throw new Error(`站点账号下有 ${active.length} 把 Key，在编辑里点「从站点读取 Key 列表」选择要绑定的一把`);
-        db.prepare('UPDATE party_wallets SET api_key = ?, updated_at = ? WHERE id = ?').run(active[0].key_full, t, id);
-        w = { ...w, api_key: active[0].key_full };
+        if (w.platform === 'sub2api' && ((w.login_user && w.login_pass) || w.access_token)) {
+          // sub2api 站点级监控（无 api_key）：通过登录态/令牌读全站 Key 汇总消费，并用首把可用 Key 读余额
+          const remoteKeys = await listRemoteKeys(w);
+          const active = remoteKeys.filter((k) => k.status === '启用' && k.key_full);
+          const totalUsed = remoteKeys.reduce((a, k) => a + (num(k.used) || 0), 0);
+          let bal = null;
+          let ratio = null;
+          let source = '';
+          if (active.length) {
+            try {
+              const probe = await fetchSub2api(baseOf(w.base_url), active[0].key_full, !w.custom, !!w.insecure);
+              bal = probe.wallet;
+              ratio = probe.ratio ?? null;
+              source = probe.source || '';
+            } catch { /* 余额探测失败不影响消费汇总 */ }
+          }
+          const segs = qRatesOf.all(id);
+          const today = walletToday();
+          const cr = w.custom ? consumeRatioOn(w, today, segs) : 1;
+          const customR = w.custom ? customRatioOn(w, today, segs) : ratio;
+          const actual = bal == null ? null : w.custom ? (customR == null ? null : round(bal * customR, 4)) : round(bal, 4);
+          const adjust = num(w.used_adjust) || 0;
+          const usedActual = Math.max(0, round(totalUsed * cr - adjust, 4));
+          db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_error = '', last_checked_at = ? WHERE id = ?")
+            .run(bal, bal == null ? '' : 'wallet', w.custom ? customR : ratio, w.custom ? 'custom' : source, actual, round(totalUsed, 4), usedActual, t, id);
+          return view(getOne.get(id));
+        }
+        throw new Error('还没有填 API Key（new-api 填访问令牌、sub2api 填账号密码或访问令牌时可不填）');
       }
       const r = await fetchWallet(w);
       const segs = qRatesOf.all(id);
@@ -789,9 +810,9 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     const pa = party.get(Number(req.params.id));
     if (!pa) throw new HttpError(404, '供应商不存在（只有供应商可以绑定余额）');
     const v = input(req.body || {}, false);
-    // new-api 填了访问令牌就能按账户读余额 / 消耗；sub2api 填了站点账号密码就能自动绑 Key，都不用先填 API Key
-    if (!v.api_key && !(v.platform === 'newapi' && v.access_token) && !(v.platform === 'sub2api' && v.login_user && v.login_pass)) {
-      throw new HttpError(400, 'API Key 必填（new-api 填了访问令牌、sub2api 填了站点账号密码时可不填）');
+    // new-api 填了访问令牌就能按账户读余额 / 消耗；sub2api 填了站点账号密码或访问令牌就能读 Key 列表，都不用先填 API Key
+    if (!v.api_key && !(v.platform === 'newapi' && v.access_token) && !(v.platform === 'sub2api' && ((v.login_user && v.login_pass) || v.access_token))) {
+      throw new HttpError(400, '请填写访问令牌（或 API Key / sub2api 账号密码）');
     }
     checkCustom(v);
     readOpening(req.body || {});
@@ -861,10 +882,16 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
         last_used_at: t.accessed_time ? new Date(t.accessed_time * 1000).toISOString() : null,
       }));
     }
-    if (!w.login_user || !w.login_pass) throw new HttpError(400, 'sub2api 站点要先填登录账号和密码，才能读取 Key 列表（编辑这行监控填上，或绑定后手动粘贴 Key）');
-    const lr = await httpJson(`${base}/api/v1/auth/login`, { method: 'POST', body: { email: w.login_user, password: w.login_pass }, insecure });
-    const jwt = lr.ok && lr.json.data ? lr.json.data.access_token : null;
-    if (!jwt) throw new HttpError(502, `站点登录失败：${(lr.json && (lr.json.message || lr.json.error?.message)) || lr.error || '账号或密码不对'}`);
+    let jwt = null;
+    if (w.login_user && w.login_pass) {
+      const lr = await httpJson(`${base}/api/v1/auth/login`, { method: 'POST', body: { email: w.login_user, password: w.login_pass }, insecure });
+      jwt = lr.ok && lr.json.data ? lr.json.data.access_token : null;
+      if (!jwt) throw new HttpError(502, `站点登录失败：${(lr.json && (lr.json.message || lr.json.error?.message)) || lr.error || '账号或密码不对'}`);
+    } else if (w.access_token) {
+      jwt = w.access_token;
+    } else {
+      throw new HttpError(400, 'sub2api 站点要先填访问令牌或登录账号密码，才能读取 Key 列表');
+    }
     const kr = await httpJson(`${base}/api/v1/keys?page=1&page_size=100`, { key: jwt, insecure });
     if (!kr.ok) throw new HttpError(502, `读取 Key 列表失败：${kr.error}`);
     const items = (kr.json.data && kr.json.data.items) || [];
@@ -901,40 +928,55 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     res.json({ wallet: out });
   });
 
-  // 批量挂 Key：从站点选多把，每把在这个供应商下新建一行监控（凭据从模板行复制）。
-  // body: { template_wallet_id, key_ids: [...], cost_mode?, project_id? }
-  app.post('/api/parties/:id/wallets-batch', auth, async (req, res) => {
-    const pa = party.get(Number(req.params.id));
+  // 批量挂 Key：从站点选多把，每把在这个供应商下新建一行监控（凭据与自定义倍率均从站点模板行自动继承）。
+  async function bindKeysFromTemplate(user, partyId, { template_wallet_id, key_ids, cost_mode, project_id }) {
+    const pa = party.get(Number(partyId));
     if (!pa) throw new HttpError(404, '供应商不存在（只有供应商可以绑定余额）');
-    const b = req.body || {};
-    const tw = getOne.get(Number(b.template_wallet_id));
-    if (!tw || tw.party_id !== pa.id) throw new HttpError(400, '模板行（template_wallet_id）必须是这家供应商下的余额监控');
-    const keyIds = Array.isArray(b.key_ids) ? [...new Set(b.key_ids.map((x) => String(x)))] : [];
+    const tw = getOne.get(Number(template_wallet_id));
+    if (!tw || tw.party_id !== pa.id) throw new HttpError(400, '站点模板（template_wallet_id）必须是这家供应商下的站点');
+    const keyIds = Array.isArray(key_ids) ? [...new Set(key_ids.map((x) => String(x)))] : [];
     if (!keyIds.length) throw new HttpError(400, '请勾选要添加的 Key');
     if (keyIds.length > 50) throw new HttpError(400, '一次最多添加 50 把 Key');
-    const costMode = ['account', 'key'].includes(b.cost_mode) ? b.cost_mode : 'key'; // 多把 Key 并存就是为了按 Key 拆成本
-    const projectId = b.project_id !== undefined ? (Number(b.project_id) > 0 ? Number(b.project_id) : null) : tw.project_id;
+    const costMode = ['account', 'key'].includes(cost_mode) ? cost_mode : 'key';
+    const projectId = project_id !== undefined ? (Number(project_id) > 0 ? Number(project_id) : null) : tw.project_id;
     const keys = await listRemoteKeys(tw);
     const picked = keyIds.map((id) => keys.find((k) => k.id === id)).filter(Boolean);
     if (!picked.length) throw new HttpError(404, '站点上没有选中的 Key，刷新列表再试');
-    // 这家供应商下已有的 Key 跳过，避免重复挂
-    const existing = new Set(db.prepare('SELECT api_key FROM party_wallets WHERE party_id = ?').all(pa.id).map((r) => r.api_key));
+    // 继承站点的自定义倍率配置（含按日期分段倍率）
+    const twRates = qRatesOf.all(tw.id);
+    const existingRows = db.prepare('SELECT id, api_key, project_id FROM party_wallets WHERE party_id = ?').all(pa.id);
+    const existingByKey = new Map(existingRows.filter((r) => r.api_key).map((r) => [r.api_key, r]));
     const t = nowIso();
     const created = [];
     const skipped = [];
     for (const k of picked) {
-      if (existing.has(k.key_full)) {
-        skipped.push(k.name);
+      const ex = existingByKey.get(k.key_full);
+      if (ex) {
+        // 如果这把 Key 已存在但未绑定项目，直接归属到当前项目并同步站点倍率
+        if (projectId && !ex.project_id) {
+          db.prepare('UPDATE party_wallets SET project_id = ?, cost_mode = ?, custom = ?, custom_ratio = ?, consume_ratio = ?, updated_at = ? WHERE id = ?')
+            .run(projectId, costMode, tw.custom ? 1 : 0, tw.custom ? tw.custom_ratio : null, tw.custom ? tw.consume_ratio : null, t, ex.id);
+          if (tw.custom && twRates.length) replaceConsumeRates(ex.id, twRates);
+          created.push(ex.id);
+        } else {
+          skipped.push(k.name);
+        }
         continue;
       }
       const r = db
         .prepare(
-          'INSERT INTO party_wallets (party_id, name, platform, base_url, api_key, custom, enabled, insecure, access_token, token_user_id, login_user, login_pass, cost_mode, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          'INSERT INTO party_wallets (party_id, name, platform, base_url, api_key, custom, custom_ratio, consume_ratio, enabled, insecure, access_token, token_user_id, login_user, login_pass, cost_mode, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )
-        .run(pa.id, str(k.name, 60) || '默认', tw.platform, tw.base_url, k.key_full, tw.insecure, tw.access_token, tw.token_user_id, tw.login_user, tw.login_pass, costMode, projectId, t, t);
-      created.push(Number(r.lastInsertRowid));
+        .run(
+          pa.id, str(k.name, 60) || '默认', tw.platform, tw.base_url, k.key_full,
+          tw.custom ? 1 : 0, tw.custom ? tw.custom_ratio : null, tw.custom ? tw.consume_ratio : null,
+          tw.insecure, tw.access_token, tw.token_user_id, tw.login_user, tw.login_pass,
+          costMode, projectId, t, t
+        );
+      const newId = Number(r.lastInsertRowid);
+      if (tw.custom && twRates.length) replaceConsumeRates(newId, twRates);
+      created.push(newId);
     }
-    // 并发抓取（每批 4 路），行的抓取结果随创建返回
     const results = [];
     const queue = [...created];
     await Promise.all(
@@ -949,9 +991,12 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
         }
       })
     );
-    onChanged(req.user, `给供应商「${pa.name}」批量添加了 ${created.length} 个余额监控${skipped.length ? `（跳过已存在的 ${skipped.length} 把）` : ''}`);
+    onChanged(user, `给供应商「${pa.name}」关联了 ${created.length} 把站点 Key${skipped.length ? `（跳过已存在的 ${skipped.length} 把）` : ''}`);
     if (typeof onWalletChanged === 'function') onWalletChanged();
-    res.json({ created: created.length, skipped: skipped.length, wallets: results });
+    return { created: created.length, skipped: skipped.length, wallets: results };
+  }
+  app.post('/api/parties/:id/wallets-batch', auth, async (req, res) => {
+    res.json(await bindKeysFromTemplate(req.user, req.params.id, req.body || {}));
   });
 
   // 刷新全部（侧栏「供应商」页的「全部刷新」）
@@ -977,12 +1022,134 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   };
   setTimeout(loop, 30_000).unref();
 
-  // 往来单位卡片用：每家供应商的余额汇总。
-  // 钱包余额和累计消费是「账户级」的：同一站点（base_url）下的多把 Key 读到的是同一个账户，
-  // 数值完全一样——Key 多只是为了各自追踪倍率。所以按站点去重，余额/消费每个账户只算一次。
-  const sumRowsStmt = db.prepare('SELECT base_url, last_actual, last_used_actual, billed_used, last_error FROM party_wallets WHERE party_id = ? AND enabled = 1');
+  const sumRowsStmt = db.prepare('SELECT id, base_url, platform, cost_mode, api_key, last_actual, last_used_actual, billed_used, last_today_actual, last_error, project_id FROM party_wallets WHERE party_id = ? AND enabled = 1');
+  const sumRowsProjStmt = db.prepare('SELECT id, base_url, platform, cost_mode, api_key, last_actual, last_used_actual, billed_used, last_today_actual, last_error, project_id FROM party_wallets WHERE party_id = ? AND project_id = ? AND enabled = 1');
+
+  function computeSummary(rows) {
+    if (!rows.length) return null;
+    const bySite = new Map();
+    for (const r of rows) {
+      const k = baseOf(r.base_url);
+      if (!bySite.has(k)) bySite.set(k, []);
+      bySite.get(k).push(r);
+    }
+    let actual = 0, hasActual = false;
+    let used = 0, hasUsed = false;
+    for (const [, list] of bySite) {
+      // 余额为账户级：同站点取首个非空值
+      const actRow = list.find((r) => r.last_actual != null);
+      if (actRow) { actual += Number(actRow.last_actual); hasActual = true; }
+      // 消费：new-api 有账户级行则直接取该行（避免与绑定 Key 重复累加）；否则按各 Key 累加（去重 api_key）
+      const acct = list.find((r) => r.platform === 'newapi' && r.cost_mode !== 'key');
+      if (acct) {
+        const u = acct.billed_used != null ? acct.billed_used : acct.last_used_actual;
+        if (u != null) { used += Number(u); hasUsed = true; }
+      } else {
+        // 如果存在站点级 sub2api 汇总行（无 api_key）且也有明细 key 行，优先明细 key 汇总或站点汇总（取较大/不重复）
+        const keyRows = list.filter((r) => r.api_key);
+        const pick = keyRows.length ? keyRows : list;
+        const seenKeys = new Set();
+        for (const r of pick) {
+          const kk = r.api_key ? `k:${r.api_key}` : `id:${r.id}`;
+          if (seenKeys.has(kk)) continue;
+          seenKeys.add(kk);
+          const u = r.billed_used != null ? r.billed_used : r.last_used_actual;
+          if (u != null) { used += Number(u); hasUsed = true; }
+        }
+      }
+    }
+    return {
+      count: rows.length,
+      actual: hasActual ? round(actual, 4) : null,
+      used: hasUsed ? round(used, 4) : null,
+      errors: rows.filter((r) => r.last_error).length,
+    };
+  }
+
+  // 按站点（base_url）聚合成站点卡片，供供应商详情页与项目关联弹窗使用
+  function sitesOf(partyId) {
+    const raw = ofParty.all(partyId);
+    const projNames = new Map(db.prepare('SELECT id, name FROM projects').all().map((p) => [p.id, p.name]));
+    const bySite = new Map();
+    for (const w of raw) {
+      const k = baseOf(w.base_url);
+      if (!bySite.has(k)) bySite.set(k, []);
+      bySite.get(k).push(w);
+    }
+    const sites = [];
+    for (const [siteUrl, list] of bySite) {
+      // 模板行优先级：优先有访问令牌/登录态且为账户级的行
+      const sorted = [...list].sort((a, b) => {
+        const score = (x) => (x.cost_mode !== 'key' ? 4 : 0) + (x.access_token ? 2 : 0) + (x.login_user && x.login_pass ? 2 : 0) + (x.project_id == null ? 1 : 0);
+        return score(b) - score(a) || a.id - b.id;
+      });
+      const tpl = sorted[0];
+      const enabledRows = list.filter((x) => x.enabled);
+      const sum = computeSummary(enabledRows);
+      const todayRows = enabledRows.filter((x) => x.last_today_actual != null);
+      const todayVal = todayRows.length
+        ? (tpl.platform === 'newapi' && enabledRows.some((x) => x.cost_mode !== 'key')
+            ? Number((enabledRows.find((x) => x.cost_mode !== 'key' && x.last_today_actual != null) || {}).last_today_actual ?? 0)
+            : todayRows.reduce((a, x) => a + Number(x.last_today_actual || 0), 0))
+        : null;
+      const latestCheck = list.map((x) => x.last_checked_at).filter(Boolean).sort().pop() || null;
+      const errRow = enabledRows.find((x) => x.last_error);
+      let host = siteUrl.replace(/^https?:\/\//, '');
+      try { host = new URL(siteUrl).host; } catch {}
+      sites.push({
+        base_url: siteUrl,
+        host,
+        name: tpl.name && tpl.name !== '默认' ? tpl.name : host,
+        platform: tpl.platform,
+        template_wallet_id: tpl.id,
+        custom: !!tpl.custom,
+        custom_ratio: tpl.custom_ratio == null ? null : Number(tpl.custom_ratio),
+        consume_ratio: tpl.consume_ratio == null ? null : Number(tpl.consume_ratio),
+        consume_rates: qRatesOf.all(tpl.id),
+        has_token: !!tpl.access_token,
+        has_login: !!(tpl.login_user && tpl.login_pass),
+        login_user: tpl.login_user || '',
+        token_user_id: tpl.token_user_id || '',
+        insecure: !!tpl.insecure,
+        actual: sum ? sum.actual : null,
+        used: sum ? sum.used : null,
+        today: todayVal == null ? null : round(todayVal, 4),
+        last_checked_at: latestCheck,
+        last_error: errRow ? errRow.last_error : '',
+        wallets: list.map((x) => ({
+          ...view(x),
+          project_name: x.project_id ? (projNames.get(x.project_id) || '') : '',
+        })),
+      });
+    }
+    return sites;
+  }
+
+  // 创建站点（用于添加供应商时一次添加多个站点）
+  async function createSiteWallet(partyId, b) {
+    const v = input({ name: b.name || '', platform: b.platform || 'newapi', base_url: b.base_url, cost_mode: 'account', custom: !!b.custom, custom_ratio: b.custom_ratio, consume_ratio: b.consume_ratio, access_token: b.access_token || '', token_user_id: b.token_user_id || '', login_user: b.login_user || '', login_pass: b.login_pass || '', api_key: b.api_key || '', insecure: !!b.insecure, project_id: b.project_id || null }, false);
+    if (!v.api_key && !(v.platform === 'newapi' && v.access_token) && !(v.platform === 'sub2api' && ((v.login_user && v.login_pass) || v.access_token))) {
+      throw new HttpError(400, `站点 ${v.base_url} 请填写访问令牌（或账号密码）`);
+    }
+    checkCustom(v);
+    if (!b.name) {
+      try { v.name = new URL(v.base_url).host; } catch { v.name = v.base_url.replace(/^https?:\/\//, '').slice(0, 60); }
+    }
+    const t = nowIso();
+    const cols = { party_id: Number(partyId), ...v, created_at: t, updated_at: t };
+    const keys = Object.keys(cols);
+    const r = db.prepare(`INSERT INTO party_wallets (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`).run(...keys.map((k) => cols[k]));
+    const id = Number(r.lastInsertRowid);
+    const rates = parseConsumeRates(b.consume_rates);
+    if (rates) replaceConsumeRates(id, rates);
+    return refresh(id);
+  }
+
   return {
     listOf: (partyId) => ofParty.all(partyId).map(view),
+    sitesOf,
+    createSiteWallet,
+    bindKeysFromTemplate,
     // 项目期初成本变更后用：立即重抓这个项目下所有行（封存各站点起点），不用等 30 分钟周期
     async refreshProject(projectId) {
       const ids = db.prepare('SELECT id FROM party_wallets WHERE project_id = ? AND enabled = 1').all(Number(projectId)).map((r) => r.id);
@@ -1001,20 +1168,9 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
       );
       return ids.length;
     },
-    summaryOf(partyId) {
-      const rows = sumRowsStmt.all(partyId);
-      if (!rows.length) return null;
-      const bySite = new Map();
-      for (const r of rows) {
-        const k = baseOf(r.base_url);
-        if (!bySite.has(k)) bySite.set(k, r); // 同站点取第一把（数值相同）
-      }
-      const uniq = [...bySite.values()];
-      const sumOf = (f) => {
-        const vals = uniq.map(f).filter((v) => v !== null && v !== undefined);
-        return vals.length ? round(vals.reduce((a, b) => a + b, 0), 4) : null;
-      };
-      return { count: rows.length, actual: sumOf((r) => r.last_actual), used: sumOf((r) => (r.billed_used != null ? r.billed_used : r.last_used_actual)), errors: rows.filter((r) => r.last_error).length };
+    summaryOf(partyId, projectId = null) {
+      const rows = projectId != null ? sumRowsProjStmt.all(partyId, Number(projectId)) : sumRowsStmt.all(partyId);
+      return computeSummary(rows);
     },
     // 详情页用：某把 Key 在供应商站点的分组 / 每组消耗 / 每日消耗（实时抓，不入库）
     async detailOf(walletId) {

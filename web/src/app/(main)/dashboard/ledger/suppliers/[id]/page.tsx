@@ -4,22 +4,28 @@ import { use, useState } from "react";
 
 import Link from "next/link";
 
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ArrowDownLeft, ArrowUpRight, ExternalLink, Pencil, RefreshCw } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowDownLeft, ArrowLeft, ArrowUpRight, ExternalLink, Globe, KeyRound, Pencil, Plus, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { get } from "@/modules/ledger/api";
-import { amt } from "@/modules/ledger/components/party-wallets";
-import { Pager, usePaged } from "@/modules/ledger/components/shared";
-import { curf, fmt0, money } from "@/modules/ledger/format";
+import { get, post } from "@/modules/ledger/api";
+import { amt, amtFull } from "@/modules/ledger/components/party-wallets";
+import { FormError, Pager, ResponsiveDialog, usePaged } from "@/modules/ledger/components/shared";
+import { curf, fmt0, money, relTime, signed } from "@/modules/ledger/format";
+import { useLedgerRefresh } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
-import type { ConsumePoint, SupplierDetail, WalletDetail, WalletGroup } from "@/modules/ledger/types";
+import type { ConsumePoint, SupplierDetail, SupplierSite, WalletDetail, WalletGroup } from "@/modules/ledger/types";
 
 // 分组类型配色
 const TYPE_CLS: Record<string, string> = {
@@ -40,7 +46,6 @@ const TypeBadge = ({ t }: { t: string }) => (
 
 const TYPE_ORDER = ["Claude", "Gemini", "GPT", "Grok", "DeepSeek", "Qwen", "其他", "未分类"];
 
-// 分组按类型展开：一个分组服务多种类型就在每个类型下各列一次；无类型归「未分类」
 function GroupsByType({ groups }: { groups: WalletGroup[] }) {
   const byType = new Map<string, WalletGroup[]>();
   for (const g of groups) {
@@ -96,7 +101,6 @@ function GroupsByType({ groups }: { groups: WalletGroup[] }) {
   );
 }
 
-// 每日消耗柱状图（近 30 天）：按日期显示，悬浮看当日消耗。纯 CSS，无额外依赖
 function DailyBars({ data }: { data: ConsumePoint[] }) {
   const [hover, setHover] = useState<number | null>(null);
   if (!data.length) return <div className="text-muted-foreground py-6 text-center text-sm">近 30 天没有消耗</div>;
@@ -138,12 +142,11 @@ function DailyBars({ data }: { data: ConsumePoint[] }) {
   );
 }
 
-// 单把 Key 的消耗明细（每日曲线 + 按模型 + 按分组）
 function WalletConsume({ w }: { w: WalletDetail }) {
   if (!w.ok) return <div className="text-destructive text-sm">抓取失败：{w.error}</div>;
   const byModel = w.byModel ?? [];
   const byGroup = (w.byGroup ?? []).filter((g) => g.usd > 0);
-  const splitByGroup = byGroup.length > 1; // 站点标了分组才拆得开
+  const splitByGroup = byGroup.length > 1;
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
@@ -220,10 +223,315 @@ function WalletConsume({ w }: { w: WalletDetail }) {
   );
 }
 
+// 给已有供应商添加站点：平台 + 地址 + 访问令牌 + 自定义倍率
+function AddSiteDialog({
+  supplierId,
+  supplierName,
+  open,
+  onOpenChange,
+  onDone,
+}: {
+  supplierId: number;
+  supplierName: string;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  onDone: () => void;
+}) {
+  const [platform, setPlatform] = useState<"newapi" | "sub2api">("newapi");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [accessToken, setAccessToken] = useState("");
+  const [tokenUserId, setTokenUserId] = useState("");
+  const [loginUser, setLoginUser] = useState("");
+  const [loginPass, setLoginPass] = useState("");
+  const [custom, setCustom] = useState(false);
+  const [customRatio, setCustomRatio] = useState("");
+  const [consumeRatio, setConsumeRatio] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const reset = () => {
+    setPlatform("newapi");
+    setBaseUrl("");
+    setAccessToken("");
+    setTokenUserId("");
+    setLoginUser("");
+    setLoginPass("");
+    setCustom(false);
+    setCustomRatio("");
+    setConsumeRatio("");
+    setError(null);
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^https?:\/\//i.test(baseUrl.trim())) return setError("地址需以 http:// 或 https:// 开头");
+    if (platform === "newapi" && !accessToken.trim()) return setError("请填写访问令牌");
+    if (platform === "sub2api" && !accessToken.trim() && !(loginUser.trim() && loginPass.trim())) {
+      return setError("请填写访问令牌或站点登录邮箱密码");
+    }
+    if (custom && !(Number(customRatio) > 0)) return setError("自定义倍率必须大于 0");
+    if (custom && consumeRatio.trim() && !(Number(consumeRatio) > 0)) return setError("消耗倍率必须大于 0");
+    setBusy(true);
+    setError(null);
+    try {
+      let host = baseUrl.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+      try {
+        host = new URL(baseUrl.trim()).host;
+      } catch {}
+      const { wallet } = await post<{ wallet: { last_error: string } }>(`/parties/${supplierId}/wallets`, {
+        name: host,
+        platform,
+        base_url: baseUrl.trim(),
+        cost_mode: "account",
+        access_token: accessToken.trim(),
+        token_user_id: tokenUserId.trim(),
+        login_user: loginUser.trim(),
+        login_pass: loginPass.trim(),
+        custom,
+        custom_ratio: custom ? Number(customRatio) : null,
+        consume_ratio: custom ? (Number(consumeRatio) > 0 ? Number(consumeRatio) : Number(customRatio)) : null,
+      });
+      if (wallet.last_error) toast.warning(`站点已添加，抓取提示：${wallet.last_error}`);
+      else toast.success("站点已添加并抓取成功");
+      reset();
+      onOpenChange(false);
+      onDone();
+    } catch (ex) {
+      setError((ex as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ResponsiveDialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) reset();
+        onOpenChange(o);
+      }}
+      title={`给「${supplierName}」添加站点`}
+    >
+      <form onSubmit={submit} className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-[8.5rem_1fr]">
+          <div className="space-y-1.5">
+            <Label>平台 *</Label>
+            <Select value={platform} onValueChange={(v) => setPlatform(v as "newapi" | "sub2api")}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="newapi">new-api</SelectItem>
+                <SelectItem value="sub2api">sub2api</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label>地址 *</Label>
+            <Input placeholder="https://api.example.com" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+          </div>
+        </div>
+        {platform === "newapi" ? (
+          <div className="grid gap-3 sm:grid-cols-[1fr_8rem]">
+            <div className="space-y-1.5">
+              <Label>访问令牌 *</Label>
+              <Input
+                type="password"
+                autoComplete="off"
+                placeholder="系统访问令牌"
+                value={accessToken}
+                onChange={(e) => setAccessToken(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>用户 ID（选填）</Label>
+              <Input
+                inputMode="numeric"
+                placeholder="老版本需要"
+                value={tokenUserId}
+                onChange={(e) => setTokenUserId(e.target.value)}
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="space-y-1.5">
+              <Label>访问令牌（或填下方登录账号密码）</Label>
+              <Input
+                type="password"
+                autoComplete="off"
+                placeholder="访问令牌（JWT）"
+                value={accessToken}
+                onChange={(e) => setAccessToken(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input placeholder="或登录邮箱" value={loginUser} onChange={(e) => setLoginUser(e.target.value)} />
+              <Input
+                type="password"
+                autoComplete="new-password"
+                placeholder="登录密码"
+                value={loginPass}
+                onChange={(e) => setLoginPass(e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+        <div className="bg-muted/30 space-y-2 rounded-lg border p-3">
+          <label className="flex items-center justify-between gap-3 text-sm">
+            <span>
+              <span className="font-medium">自定义倍率</span>
+              <span className="text-muted-foreground block text-xs">关联到项目时自动继承，无需重复设置</span>
+            </span>
+            <Switch checked={custom} onCheckedChange={setCustom} />
+          </label>
+          {custom ? (
+            <div className="grid gap-3 pt-1 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label className="text-xs">自定义倍率（充值）*</Label>
+                <Input
+                  inputMode="decimal"
+                  placeholder="如 3.6"
+                  value={customRatio}
+                  onChange={(e) => setCustomRatio(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">消耗倍率（默认同左）</Label>
+                <Input
+                  inputMode="decimal"
+                  placeholder={customRatio || "如 3.6"}
+                  value={consumeRatio}
+                  onChange={(e) => setConsumeRatio(e.target.value)}
+                />
+              </div>
+            </div>
+          ) : null}
+        </div>
+        <FormError>{error}</FormError>
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button type="submit" disabled={busy}>
+            {busy ? "保存并抓取中…" : "添加站点"}
+          </Button>
+        </div>
+      </form>
+    </ResponsiveDialog>
+  );
+}
+
+// 站点卡片：展示单个站点的平台、地址、自定义倍率、累计消费、当前余额以及在该站点绑定的项目 Key
+function SiteCard({
+  site,
+  busy,
+  onRefresh,
+}: {
+  site: SupplierSite;
+  busy: boolean;
+  onRefresh: () => void;
+}) {
+  const keyRows = site.wallets.filter((w) => w.cost_mode === "key" || w.project_name);
+  return (
+    <Card className="flex flex-col justify-between gap-3 py-5">
+      <CardHeader className="px-5">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 space-y-1">
+            <CardTitle className="flex items-center gap-1.5 text-base">
+              <Globe className="text-muted-foreground size-4 shrink-0" />
+              <span className="truncate">{site.name}</span>
+            </CardTitle>
+            <CardDescription className="flex flex-wrap items-center gap-1.5">
+              <a
+                href={site.base_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-primary inline-flex max-w-full items-center gap-1 hover:underline"
+              >
+                <span className="truncate font-mono text-xs">{site.host}</span>
+                <ExternalLink className="size-3 shrink-0" />
+              </a>
+            </CardDescription>
+          </div>
+          <Button variant="ghost" size="icon-sm" onClick={onRefresh} disabled={busy} title="刷新该站点">
+            <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+          <Badge variant="outline" className="font-normal">
+            {site.platform === "sub2api" ? "sub2api" : "new-api"}
+          </Badge>
+          {site.custom ? (
+            <Badge variant="secondary" className="font-normal">
+              自定义倍率 充×{site.custom_ratio ?? "-"} / 耗×{site.consume_ratio ?? site.custom_ratio ?? 1}
+            </Badge>
+          ) : null}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3 px-5">
+        <div className="grid grid-cols-2 gap-2.5">
+          <div className="bg-muted/50 rounded-lg p-3">
+            <div className="text-muted-foreground text-xs">累计消费</div>
+            <div className="text-expense mt-1 text-lg font-semibold tabular-nums" title={amtFull(site.used)}>
+              {amt(site.used)}
+            </div>
+            {site.today != null ? (
+              <div className="text-muted-foreground mt-0.5 text-[11px] tabular-nums">今日 {amt(site.today)}</div>
+            ) : null}
+          </div>
+          <div className="bg-muted/50 rounded-lg p-3">
+            <div className="text-muted-foreground text-xs">当前余额</div>
+            <div className="text-income mt-1 text-lg font-semibold tabular-nums" title={amtFull(site.actual)}>
+              {amt(site.actual)}
+            </div>
+            <div className="text-muted-foreground mt-0.5 text-[11px]">
+              {site.last_checked_at ? `${relTime(site.last_checked_at)}更新` : "未抓取"}
+            </div>
+          </div>
+        </div>
+
+        {keyRows.length ? (
+          <div className="space-y-1.5 border-t pt-2.5">
+            <div className="text-muted-foreground flex items-center gap-1 text-xs">
+              <KeyRound className="size-3" />
+              <span>已关联项目 Key（{keyRows.length}）</span>
+            </div>
+            <div className="space-y-1">
+              {keyRows.map((w) => (
+                <div key={w.id} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="min-w-0 truncate">
+                    <span className="font-medium">{w.name}</span>
+                    {w.project_name ? (
+                      <Link
+                        href={`/dashboard/ledger/projects/${w.project_id}`}
+                        className="text-primary ml-1.5 hover:underline"
+                      >
+                        {w.project_name}
+                      </Link>
+                    ) : null}
+                  </span>
+                  <span className="text-expense shrink-0 tabular-nums">{amt(w.billed_used ?? w.last_used_actual)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {site.last_error ? <p className="text-warning text-xs">{site.last_error}</p> : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function SupplierDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const sid = Number(id);
   const { openParty } = useLedger();
+  const qc = useQueryClient();
+  const refreshLedger = useLedgerRefresh();
+  const [addSiteOpen, setAddSiteOpen] = useState(false);
+  const [refreshingSite, setRefreshingSite] = useState<string | null>(null);
   const { data, isLoading, refetch, isFetching } = useQuery({
     queryKey: ["ledger", "supplier-detail", sid],
     queryFn: () => get<SupplierDetail>(`/suppliers/${sid}/detail`),
@@ -232,34 +540,60 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
   if (isLoading) return <Skeleton className="h-96" />;
   if (!data) return <div className="text-muted-foreground py-10 text-center">加载失败</div>;
 
-  const { party, wallets } = data;
-  const okWallets = wallets.filter((w) => w.id);
-  const sites = [...new Set(wallets.map((w) => w.base_url).filter(Boolean))];
-  const credit = party.settle_type === "credit";
+  const { party, wallets, sites = [], project_contributions = [] } = data;
+  const okWallets = wallets.filter((w) => w && w.id);
+  const st = party.supplier_totals ?? { due: 0, paid: 0, balance: 0, relay_due: 0, other_due: 0 };
+  const totalActual = sites.reduce((a, s) => a + (s.actual ?? 0), 0);
 
-  // 实际口径（含自定义倍率）合计
-  const totalActual = wallets.reduce((a, w) => a + (w.last_actual ?? 0), 0);
-  const totalUsed = wallets.reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
-  const topup = totalActual + totalUsed; // 充值总额度 ≈ 当前余额 + 累计消耗
-  const rc = party.recharge;
-  const openingOn = wallets.some((w) => w.billed_used != null);
+  const reloadAll = () => {
+    qc.invalidateQueries({ queryKey: ["ledger", "supplier-detail", sid] });
+    refreshLedger();
+  };
+
+  const refreshSite = async (site: SupplierSite) => {
+    setRefreshingSite(site.base_url);
+    try {
+      for (const w of site.wallets.filter((x) => x.enabled)) {
+        await post(`/party-wallets/${w.id}/refresh`);
+      }
+      toast.success(`已刷新站点 ${site.host}`);
+      reloadAll();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setRefreshingSite(null);
+    }
+  };
 
   const kpis = [
-    { label: "充值总额度", value: amt(topup), sub: "站点累计充入 ≈ 当前余额 + 累计消耗", cls: "" },
-    { label: "消耗总额度", value: amt(totalUsed), sub: "各 Key 在站点的累计消费", cls: "text-expense" },
     {
-      label: credit ? "结算方式" : "当前实际余额",
-      value: credit ? "授信" : amt(totalActual),
-      sub: credit ? "先用后付，不看余额" : "各站点钱包；自定义倍率按 钱包 × 倍率",
-      cls: credit ? "text-muted-foreground" : "text-income",
+      label: "应付合计",
+      value: money(st.due),
+      sub:
+        st.relay_due && st.other_due
+          ? `中转 ${money(st.relay_due)} + 其他项目 ${money(st.other_due)}`
+          : st.other_due
+            ? "来自上 key / 项目制贡献"
+            : "来自中转站点累计消费",
+      cls: "text-expense",
     },
     {
-      label: rc && rc.unsettled > 0 ? "未结算（我们还欠）" : "未结算（预付结余）",
-      value: rc ? (rc.unsettled < 0 ? "−" : "") + curf(Math.abs(rc.unsettled), rc.currency) : "-",
-      sub: openingOn
-        ? "期初成本 + 之后的站点消耗 − 已结算 + 实际余额"
-        : "累计消费 − 已结算 + 实际余额（正=我们还欠，负=多付/预付结余）",
-      cls: rc && rc.unsettled > 0 ? "text-warning" : "text-income",
+      label: "实付合计",
+      value: money(st.paid),
+      sub: "已实际支付给该供应商（扣除退款）",
+      cls: "text-income",
+    },
+    {
+      label: st.balance < 0 ? "结余（我们还欠）" : "结余（预付余款）",
+      value: signed(st.balance),
+      sub: "实付 − 应付（正=预付结余，负=我们还欠）",
+      cls: st.balance < 0 ? "text-warning" : "text-income",
+    },
+    {
+      label: "站点余额合计",
+      value: sites.length ? amt(totalActual) : "—",
+      sub: sites.length ? `共 ${sites.length} 个站点；自定义倍率已自动折算` : "尚未配置中转站点",
+      cls: "text-income",
     },
   ];
 
@@ -274,32 +608,12 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
           <ArrowLeft className="size-4" /> 返回供应商列表
         </Link>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1.5">
+          <div className="space-y-1">
             <div className="flex items-center gap-2">
               <h1 className="text-2xl font-semibold">{party.name}</h1>
-              {credit ? <Badge variant="outline">授信</Badge> : <Badge variant="outline">预付</Badge>}
               {party.archived ? <Badge variant="outline">归档</Badge> : null}
             </div>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-              <Link
-                href={`/dashboard/ledger/projects/${party.project_id}`}
-                className="text-muted-foreground hover:text-foreground hover:underline"
-              >
-                {party.project_name}
-              </Link>
-              {sites.map((u) => (
-                <a
-                  key={u}
-                  href={u}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary inline-flex items-center gap-1 hover:underline"
-                >
-                  <ExternalLink className="size-3.5" />
-                  {u.replace(/^https?:\/\//, "")}
-                </a>
-              ))}
-            </div>
+            {party.contact ? <p className="text-muted-foreground text-sm">联系方式：{party.contact}</p> : null}
           </div>
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => refetch()} disabled={isFetching}>
@@ -308,7 +622,7 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
             </Button>
             <Button variant="outline" onClick={() => openParty(sid)}>
               <Pencil />
-              管理 Key / 记账
+              管理 / 记账
             </Button>
           </div>
         </div>
@@ -327,66 +641,164 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
         ))}
       </div>
 
+      {/* 站点卡片区 */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h2 className="text-base font-semibold">站点情况（{sites.length}）</h2>
+            <p className="text-muted-foreground text-xs">展示该供应商的所有站点，以及我们在各站点的消费与余额</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => setAddSiteOpen(true)}>
+            <Plus />
+            添加站点
+          </Button>
+        </div>
+        {sites.length ? (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {sites.map((site) => (
+              <SiteCard
+                key={site.base_url}
+                site={site}
+                busy={refreshingSite === site.base_url}
+                onRefresh={() => refreshSite(site)}
+              />
+            ))}
+          </div>
+        ) : (
+          <Card>
+            <CardContent className="text-muted-foreground py-8 text-center text-sm">
+              该供应商暂未配置中转站点，点右上角「添加站点」即可追踪站点消费与余额
+            </CardContent>
+          </Card>
+        )}
+      </div>
+
       <Tabs defaultValue="funds">
         <TabsList>
           <TabsTrigger value="funds">资金往来</TabsTrigger>
-          <TabsTrigger value="groups">分组</TabsTrigger>
-          <TabsTrigger value="consume">消耗明细</TabsTrigger>
+          {project_contributions.length ? (
+            <TabsTrigger value="contrib">其他项目贡献（{project_contributions.length}）</TabsTrigger>
+          ) : null}
+          {okWallets.length ? <TabsTrigger value="groups">分组</TabsTrigger> : null}
+          {okWallets.length ? <TabsTrigger value="consume">消耗明细</TabsTrigger> : null}
         </TabsList>
 
         <TabsContent value="funds" className="mt-4">
           <FundsTab detail={data} />
         </TabsContent>
 
-        <TabsContent value="groups" className="mt-4 space-y-4">
-          {okWallets.map((w) => (
-            <Card key={w.id}>
+        {project_contributions.length ? (
+          <TabsContent value="contrib" className="mt-4">
+            <Card>
               <CardHeader>
-                <CardTitle className="text-base">
-                  {w.name}
-                  <Badge variant="outline" className="ml-2 font-normal">
-                    {w.platform === "sub2api" ? "sub2api" : "new-api"}
-                  </Badge>
-                </CardTitle>
-                <CardDescription>{w.base_url.replace(/^https?:\/\//, "")}</CardDescription>
+                <CardTitle className="text-base">其他项目贡献</CardTitle>
+                <CardDescription>该供应商在上 key / 项目制等项目中的应付挂账汇总</CardDescription>
               </CardHeader>
               <CardContent>
-                {!w.ok ? (
-                  <div className="text-destructive text-sm">抓取失败：{w.error}</div>
-                ) : !(w.groups ?? []).length ? (
-                  <div className="text-muted-foreground text-sm">{w.note || "没有分组信息"}</div>
-                ) : (
-                  <GroupsByType groups={w.groups ?? []} />
-                )}
+                <div className="overflow-x-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>项目</TableHead>
+                        <TableHead>类型</TableHead>
+                        <TableHead className="text-right">记录数</TableHead>
+                        <TableHead className="text-right">应付金额</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {project_contributions.map((c) => (
+                        <TableRow key={c.project_id}>
+                          <TableCell className="font-medium">
+                            {c.project_id ? (
+                              <Link
+                                href={`/dashboard/ledger/projects/${c.project_id}`}
+                                className="text-primary hover:underline"
+                              >
+                                {c.project_name}
+                              </Link>
+                            ) : (
+                              c.project_name
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">
+                              {c.ptype === "key" ? "上key" : c.ptype === "relay" ? "中转" : "项目制"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-muted-foreground text-right tabular-nums">{c.count}</TableCell>
+                          <TableCell className="text-expense text-right font-medium tabular-nums">
+                            {money(c.due_cny)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
               </CardContent>
             </Card>
-          ))}
-        </TabsContent>
+          </TabsContent>
+        ) : null}
 
-        <TabsContent value="consume" className="mt-4 space-y-4">
-          {okWallets.map((w) => (
-            <Card key={w.id}>
-              <CardHeader>
-                <CardTitle className="text-base">
-                  {w.name}
-                  <Badge variant="outline" className="ml-2 font-normal">
-                    {w.platform === "sub2api" ? "sub2api" : "new-api"}
-                  </Badge>
-                </CardTitle>
-                <CardDescription>{w.base_url.replace(/^https?:\/\//, "")}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <WalletConsume w={w} />
-              </CardContent>
-            </Card>
-          ))}
-        </TabsContent>
+        {okWallets.length ? (
+          <TabsContent value="groups" className="mt-4 space-y-4">
+            {okWallets.map((w) => (
+              <Card key={w.id}>
+                <CardHeader>
+                  <CardTitle className="text-base">
+                    {w.name}
+                    <Badge variant="outline" className="ml-2 font-normal">
+                      {w.platform === "sub2api" ? "sub2api" : "new-api"}
+                    </Badge>
+                  </CardTitle>
+                  <CardDescription>{w.base_url.replace(/^https?:\/\//, "")}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {!w.ok ? (
+                    <div className="text-destructive text-sm">抓取失败：{w.error}</div>
+                  ) : !(w.groups ?? []).length ? (
+                    <div className="text-muted-foreground text-sm">{w.note || "没有分组信息"}</div>
+                  ) : (
+                    <GroupsByType groups={w.groups ?? []} />
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </TabsContent>
+        ) : null}
+
+        {okWallets.length ? (
+          <TabsContent value="consume" className="mt-4 space-y-4">
+            {okWallets.map((w) => (
+              <Card key={w.id}>
+                <CardHeader>
+                  <CardTitle className="text-base">
+                    {w.name}
+                    <Badge variant="outline" className="ml-2 font-normal">
+                      {w.platform === "sub2api" ? "sub2api" : "new-api"}
+                    </Badge>
+                  </CardTitle>
+                  <CardDescription>{w.base_url.replace(/^https?:\/\//, "")}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <WalletConsume w={w} />
+                </CardContent>
+              </Card>
+            ))}
+          </TabsContent>
+        ) : null}
       </Tabs>
+
+      <AddSiteDialog
+        supplierId={sid}
+        supplierName={party.name}
+        open={addSiteOpen}
+        onOpenChange={setAddSiteOpen}
+        onDone={reloadAll}
+      />
     </div>
   );
 }
 
-// 资金往来：转给他 / 他转回 / 净 + 明细（项目可跳转，经手人可点开成员流水）
 function FundsTab({ detail }: { detail: SupplierDetail }) {
   const { funds } = detail;
   const { rows, pager } = usePaged(funds.entries, "funds");

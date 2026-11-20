@@ -35,10 +35,10 @@ function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; d
             <Button
               variant="outline"
               size="sm"
-              onClick={() => (kind === "supplier" ? openPartyNew(0, "supplier") : openPartyNew(detail.project.id, kind))}
+              onClick={() => openPartyNew(detail.project.id, kind)}
             >
               <Plus />
-              {L.name}
+              关联{kind === "customer" ? "客户" : L.name}
             </Button>
           </CardAction>
         )}

@@ -193,11 +193,13 @@ export type Party = {
   archived: boolean;
   created_at: string;
   ratio: number;
-  relay: { id: number; ref: string; track_mode?: "user" | "key"; key_id?: number | null; key_name?: string; group_id?: number | null } | null;
+  relay: { id: number; ref: string; station_id?: number | null; track_mode?: "user" | "key"; key_id?: number | null; key_name?: string; group_id?: number | null } | null;
   totals: { due: number; paid: number; open: number; count: number; last_at: string | null };
   settle: Settle;
   // 供应商余额汇总（只有绑定了 new-api / sub2api Key 的供应商才有）
   wallet?: { count: number; actual: number | null; used: number | null; errors: number } | null;
+  // 供应商统一汇总（人民币）：应付 = 中转累计消费 + 其他项目贡献，实付 = 净付款，结余 = 实付 − 应付
+  supplier_totals?: { due: number; paid: number; balance: number; relay_due: number; other_due: number } | null;
   settled_base?: number;
   settle_type?: "prepaid" | "credit";
   // 客户：预付余额阈值（美元）、后付账期天数、起始使用时间
@@ -341,11 +343,57 @@ export type WalletDetail = {
   period_used?: number | null;
   note?: string;
 };
+export type SupplierSite = {
+  base_url: string;
+  host: string;
+  name: string;
+  platform: "newapi" | "sub2api";
+  template_wallet_id: number;
+  custom: boolean;
+  custom_ratio: number | null;
+  consume_ratio: number | null;
+  consume_rates?: { from_date: string; ratio: number; custom_ratio?: number | null }[];
+  has_token: boolean;
+  has_login: boolean;
+  login_user: string;
+  token_user_id: string;
+  insecure: boolean;
+  actual: number | null;
+  used: number | null;
+  today: number | null;
+  last_checked_at: string | null;
+  last_error: string;
+  wallets: (PartyWallet & { project_name?: string })[];
+};
+export type SupplierContribution = {
+  project_id: number;
+  project_name: string;
+  ptype: "relay" | "short" | "key";
+  due_cny: number;
+  count: number;
+};
 export type SupplierDetail = {
   party: Party;
   funds: { currency: Currency; out: number; income: number; net: number; entries: FundEntry[] };
+  sites: SupplierSite[];
+  project_contributions: SupplierContribution[];
   wallets: WalletDetail[];
   rates: Rates;
+};
+export type CustomerOption = {
+  key: string;
+  name: string;
+  group: string;
+  contact: string;
+  id: number;
+};
+export type RelayStationUser = {
+  id: number;
+  email: string;
+  username: string;
+  status: string;
+  balance_usd: number;
+  notes?: string;
 };
 
 // 每日利润明细（按项目）：客户每日消耗 − 供应商每日消耗
@@ -404,6 +452,7 @@ export type CustomerGroup = {
   detail_party_id: number;
   name: string;
   parties: CustomerPartyRow[];
+  project_names?: string[];
   has_relay: boolean;
   settle_type: "prepaid" | "credit";
   balance_usd: number | null;
@@ -418,6 +467,7 @@ export type CustomerGroup = {
   ratios: number[];
 };
 export type CustomersResponse = {
+  customers: CustomerGroup[];
   relay_customers: CustomerGroup[];
   project_customers: CustomerGroup[];
   usd_rate: number;

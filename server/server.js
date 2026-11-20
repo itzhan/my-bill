@@ -19,7 +19,7 @@ const TZ = process.env.TIMEZONE || 'Asia/Shanghai';
 const COOKIE = 'hz_session';
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const CURRENCIES = ['CNY', 'USDT', 'USD'];
-const DEFAULT_RATES = { USD: 6.7, USDT: 6.75 };
+const DEFAULT_RATES = { USD: 6.7, USDT: 6.7 };
 const AI_AUTO_DELAY_MS = Number(process.env.AI_AUTO_DELAY_MS) || 45 * 1000;
 const AI_WARM_HOURS = 24;
 const KB_CONSOLIDATE_DAYS = Number(process.env.KB_CONSOLIDATE_DAYS) || 7;
@@ -206,9 +206,16 @@ try { db.exec('ALTER TABLE projects ADD COLUMN station_id INTEGER REFERENCES sta
 // 项目级期初成本（中转制）：项目上直接设总期初，各供应商站点只算封存起点之后的新增消耗
 try { db.exec('ALTER TABLE projects ADD COLUMN opening_cost REAL'); } catch { /* 已有该列 */ }
 // 甲方挂账追踪方式：'' = 按中转站用户（邮箱）；'key' = 按管理员 Key 追踪（消耗按该 Key 的 api_key_id 统计）
-for (const [col, ddl] of [['relay_track_mode', "TEXT NOT NULL DEFAULT ''"], ['relay_key_id', 'INTEGER'], ['relay_key_name', "TEXT NOT NULL DEFAULT ''"], ['relay_group_id', 'INTEGER']]) {
+for (const [col, ddl] of [['relay_track_mode', "TEXT NOT NULL DEFAULT ''"], ['relay_key_id', 'INTEGER'], ['relay_key_name', "TEXT NOT NULL DEFAULT ''"], ['relay_group_id', 'INTEGER'], ['relay_station_id', 'INTEGER REFERENCES stations(id)']]) {
   try { db.exec(`ALTER TABLE parties ADD COLUMN ${col} ${ddl}`); } catch { /* 已有该列 */ }
 }
+// 项目关联的已有供应商（允许在没有任何往来/站点监控前先关联到项目）
+db.exec(`CREATE TABLE IF NOT EXISTS project_suppliers (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, party_id)
+);`);
 try { db.exec("ALTER TABLE relay_customer_groups ADD COLUMN price_mode TEXT NOT NULL DEFAULT 'cny'"); } catch { /* 已有该列 */ }
 // 客户分组按日期调价：某日期及以后的消耗按新价（同一分组可多段，取该日之前最近一条）
 db.exec(`CREATE TABLE IF NOT EXISTS relay_customer_group_rates (
@@ -972,6 +979,33 @@ function supplierSettlement(p, projectId = null) {
   const unsettled = r2(payable - settled + balance);
   return { currency: cur, payable, balance, settled, settled_base: base, from_entries: fromEntries, paid_out: paidOut, refunded, entry_count: entries.length + incomes.length, unsettled };
 }
+// 供应商统一汇总（人民币）：应付 = 中转累计消费 + 其他项目应付（上 key / 项目制 / 手工挂账）；实付 = 期初 + 净付款；结余 = 实付 − 应付
+function supplierTotals(p) {
+  const rates = getRates();
+  const cur = p.currency || 'CNY';
+  const w = partyWallets ? partyWallets.summaryOf(p.id) : null;
+  const relayDue = p.archived ? 0 : (w && w.used != null ? r2(w.used) : 0);
+  const recs = q.recordsOfParty.all(p.id);
+  let otherDue = 0;
+  for (const r of recs) if (r.kind === 'due') otherDue += recBase(r);
+  otherDue = r2(otherDue);
+  const entries = q.entriesOfParty.all(p.id, null, null);
+  const incomes = q.incomesOfParty.all(p.id, null, null);
+  const taggedEntryIds = new Set([...entries, ...incomes].map((e) => e.id));
+  let paidOut = 0, refunded = 0;
+  for (const e of entries) paidOut += entryBase(e, rates);
+  for (const e of incomes) refunded += entryBase(e, rates);
+  let extraPaid = 0;
+  for (const r of recs) {
+    if (r.kind === 'paid' && (!r.entry_id || !taggedEntryIds.has(r.entry_id))) extraPaid += recBase(r);
+  }
+  const baseNum = Number(p.settled_base) || 0;
+  const baseCny = cur === 'CNY' ? baseNum : baseNum * (rates[cur] || 1);
+  const paid = r2(baseCny + paidOut - refunded + extraPaid);
+  const due = p.archived ? paid : r2(relayDue + otherDue);
+  const balance = r2(paid - due);
+  return { due, paid, balance, relay_due: relayDue, other_due: otherDue };
+}
 const partyView = (p, records, projectId = null) => {
   const recs = records || q.recordsOfParty.all(p.id);
   // 客户实收把「记一笔时直接挂上的甲方打款」也算进去：那笔只有流水、没有 party_records
@@ -993,16 +1027,18 @@ const partyView = (p, records, projectId = null) => {
       settle = { ...settle, paid, paid_cny: paidCny, open: open > 0 ? open : 0, credit: open < 0 ? -open : 0, open_cny: r2(settle.due_cny - paidCny) };
     }
   }
-  return { wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p, projectId) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref, track_mode: p.relay_track_mode === 'key' ? 'key' : 'user', key_id: p.relay_key_id == null ? null : Number(p.relay_key_id), key_name: p.relay_key_name || '', group_id: p.relay_group_id == null ? null : Number(p.relay_group_id) } : null, totals: partyTotals(recs), settle };
+  return { wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id, projectId) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p, projectId) : null, supplier_totals: p.kind === 'supplier' ? supplierTotals(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref, station_id: p.relay_station_id || null, track_mode: p.relay_track_mode === 'key' ? 'key' : 'user', key_id: p.relay_key_id == null ? null : Number(p.relay_key_id), key_name: p.relay_key_name || '', group_id: p.relay_group_id == null ? null : Number(p.relay_group_id) } : null, totals: partyTotals(recs), settle };
 };
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId, ptype) {
   const parties = q.partiesOfProject.all(projectId);
-  // 供应商是全局的：本项目出现过往来记录，或有余额监控算进本项目的，都算本项目的供应商
+  // 供应商是全局的：项目主动关联、或出现过往来记录 / 余额监控 / 前缀 / 流水，都算本项目的供应商
   const supplierIds = new Set([
+    ...db.prepare('SELECT party_id FROM project_suppliers WHERE project_id = ?').all(projectId).map((r) => r.party_id),
     ...db.prepare("SELECT DISTINCT party_id FROM party_records WHERE project_id = ?").all(projectId).map((r) => r.party_id),
     ...db.prepare('SELECT DISTINCT party_id FROM party_wallets WHERE project_id = ?').all(projectId).map((r) => r.party_id),
     ...db.prepare('SELECT DISTINCT party_id FROM key_prefixes WHERE project_id = ?').all(projectId).map((r) => r.party_id),
+    ...db.prepare("SELECT DISTINCT e.party_id FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE e.project_id = ? AND pa.kind = 'supplier'").all(projectId).map((r) => r.party_id),
   ]);
   for (const id of supplierIds) if (!parties.some((p) => p.id === id)) { const s = q.party.get(id); if (s) parties.push(s); }
   const records = q.recordsOfProject.all(projectId);
@@ -1011,13 +1047,12 @@ function projectPartiesSummary(projectId, ptype) {
   const suppliers = [], customers = [];
   for (const p of parties) {
     const view = partyView(p, byParty.get(p.id) || [], projectId);
-    // 项目页的应付 / 实付只算对本项目的贡献。中转的应付是站点累计消费（挂账只记了客户侧），上 key 用本项目挂账
+    // 项目页的应付 / 实付只算对本项目的贡献。中转的应付是本项目绑定的站点/Key累计消费 + 本项目手工挂账，上 key 用本项目挂账
     if (p.kind === 'supplier') {
       const paid = view.recharge ? view.recharge.from_entries : 0;
+      const walletUsed = ptype === 'relay' && view.wallet && view.wallet.used != null ? r2(view.wallet.used) : 0;
       // 归档供应商不再按站点消费：站点送的额度不算，应付就是我们实际转出的钱（已扣退款）
-      const due = p.archived ? paid
-        : ptype === 'relay' && view.wallet && view.wallet.used != null ? r2(view.wallet.used)
-        : view.totals.due;
+      const due = p.archived ? paid : r2(walletUsed + view.totals.due);
       view.project_settle = { due, paid, open: r2(due - paid) };
     }
     (p.kind === 'supplier' ? suppliers : customers).push(view);
@@ -1037,23 +1072,29 @@ Object.assign(ops, {
   addParty(user, projectId, body, via = '') {
     const kind = body.kind === 'customer' ? 'customer' : body.kind === 'supplier' ? 'supplier' : null;
     if (!kind) throw new HttpError(400, '类型只能是供应商或客户');
-    // 供应商全局唯一，不挂项目；客户仍归属项目
-    const p = kind === 'customer' ? q.project.get(Number(projectId)) : null;
-    if (kind === 'customer' && !p) throw new HttpError(404, '项目不存在');
+    // 供应商全局唯一，不挂项目；客户支持全局建档（projectId 为空/0）或关联到具体项目
+    const pid = Number(projectId) > 0 ? Number(projectId) : null;
+    const p = kind === 'customer' && pid ? q.project.get(pid) : null;
+    if (kind === 'customer' && pid && !p) throw new HttpError(404, '项目不存在');
     const name = String(body.name || '').trim();
     if (!name || name.length > 60) throw new HttpError(400, '名称为 1–60 个字符');
     const currency = String(body.currency || 'CNY').toUpperCase();
     if (!CURRENCIES.includes(currency)) throw new HttpError(400, '币种不正确');
     const existing = kind === 'supplier'
       ? db.prepare("SELECT * FROM parties WHERE kind = 'supplier' AND trim(name) = ?").get(name)
-      : q.partyByName.get(p.id, kind, name, String(body.external_id || '') || '\u0000');
-    if (existing) throw new HttpError(409, kind === 'supplier' ? `已有供应商「${existing.name}」，直接选择即可` : `该项目已有${PARTY_LABEL[kind].name}「${existing.name}」`);
+      : p
+        ? q.partyByName.get(p.id, kind, name, String(body.external_id || '') || '\u0000')
+        : db.prepare("SELECT * FROM parties WHERE kind = 'customer' AND (trim(customer_group) = ? OR (trim(customer_group) = '' AND trim(name) = ?))").get(name, name);
+    if (existing) throw new HttpError(409, kind === 'supplier' ? `已有供应商「${existing.name}」，直接选择即可` : p ? `该项目已有${PARTY_LABEL[kind].name}「${existing.name}」` : `已有客户「${existing.name}」`);
     const r = q.insertParty.run(p ? p.id : null, kind, name, String(body.contact || '').trim().slice(0, 100), String(body.note || '').trim().slice(0, 200), currency, String(body.external_id || '').trim().slice(0, 100), user.id, now());
     const party = q.party.get(Number(r.lastInsertRowid));
     if (body.ratio !== undefined && body.ratio !== null && body.ratio !== '') { const ratio = Number(body.ratio); if (ratio > 0 && ratio <= 100) db.prepare('UPDATE parties SET ratio = ? WHERE id = ?').run(Math.round(ratio * 10000) / 10000, party.id); }
     if (body.settle_type === 'credit') db.prepare("UPDATE parties SET settle_type = 'credit' WHERE id = ?").run(party.id);
     if (body.profile) db.prepare('UPDATE parties SET profile = ? WHERE id = ?').run(String(body.profile).slice(0, 1000), party.id);
-    if (kind === 'customer' && body.customer_group) db.prepare('UPDATE parties SET customer_group = ? WHERE id = ?').run(String(body.customer_group).slice(0, 60), party.id);
+    if (kind === 'customer') {
+      const grp = String(body.customer_group || (!p ? name : '')).trim().slice(0, 60);
+      if (grp) db.prepare('UPDATE parties SET customer_group = ? WHERE id = ?').run(grp, party.id);
+    }
     if (kind === 'customer') {
       const sets = [], vals = [];
       if (body.balance_threshold !== undefined && body.balance_threshold !== '') { sets.push('balance_threshold = ?'); vals.push(Number(body.balance_threshold) >= 0 ? Number(body.balance_threshold) : null); }
@@ -1838,27 +1879,31 @@ function relayRange(range, from, to) {
 }
 const relayUserView = (u) => ({ id: u.id, email: u.email, username: u.username || '', status: u.status, balance_usd: Number(u.balance || 0), frozen_balance_usd: Number(u.frozen_balance || 0), total_recharged_usd: Number(u.total_recharged || 0), rpm_limit: u.rpm_limit, concurrency_limit: u.concurrency, current_concurrency: u.current_concurrency, last_active_at: u.last_active_at ? fmtTZ(u.last_active_at) : null, last_used_at: u.last_used_at ? fmtTZ(u.last_used_at) : null, notes: u.notes || '' });
 // 按邮箱 / 用户名 / id 找中转站用户（客户）
-async function relayFindUser(ref) {
+async function relayFindUser(ref, station = null) {
   const str = String(ref ?? '').trim();
   if (!str) throw new HttpError(400, '请说明客户（中转站的邮箱、用户名或 id）');
   if (/^\d+$/.test(str)) {
-    const d = await relayGet('/admin/users', { page: 1, page_size: 50, search: str });
+    const d = await relayGet('/admin/users', { page: 1, page_size: 50, search: str }, station);
     const hit = (d.items || []).find((u) => String(u.id) === str);
     if (hit) return hit;
   }
-  const d = await relayGet('/admin/users', { page: 1, page_size: 20, search: str });
+  const d = await relayGet('/admin/users', { page: 1, page_size: 20, search: str }, station);
   const items = d.items || [];
   if (!items.length) throw new HttpError(404, `中转站没有匹配「${str}」的客户`);
   const lower = str.toLowerCase();
   return items.find((u) => (u.email || '').toLowerCase() === lower || (u.username || '').toLowerCase() === lower) || items[0];
 }
 // 中转站管理员账号（给客户的 Key 建在这个账号下）
-async function relayAdminUser() {
-  const d = await relayGet('/admin/users', { page: 1, page_size: 20, role: 'admin' });
+async function relayAdminUser(station = null) {
+  const d = await relayGet('/admin/users', { page: 1, page_size: 20, role: 'admin' }, station);
   const items = d.items || [];
   const hit = items.find((u) => u.role === 'admin') || items[0];
   if (!hit) throw new HttpError(404, '中转站没有管理员账号，无法列出管理员 Key');
   return hit;
+}
+function stationOfParty(pa) {
+  if (!pa || !pa.relay_station_id) return null;
+  return db.prepare("SELECT * FROM stations WHERE id = ? AND type = 'relay'").get(Number(pa.relay_station_id)) || null;
 }
 function relayTrackOf(pa) {
   if (pa.relay_track_mode !== 'key' || !pa.relay_key_id) return null;
@@ -1866,7 +1911,7 @@ function relayTrackOf(pa) {
 }
 // 列某个中转站用户的 API Key：管理接口优先（财务系统 scoped key 已开通列 Key 权限）；
 // 若仍 403，用该账号的登录密码走面板登录兜底。
-async function relayUserKeys(u, panelPass = '') {
+async function relayUserKeys(u, panelPass = '', station = null) {
   const norm = (items, gmap) => items.map((k) => ({
     id: k.id,
     name: k.name || '',
@@ -1875,25 +1920,26 @@ async function relayUserKeys(u, panelPass = '') {
     group_id: k.group_id == null ? null : Number(k.group_id),
     group_name: k.group && k.group.name ? k.group.name : (gmap && k.group_id != null ? gmap.get(Number(k.group_id)) || '' : ''),
   }));
+  const base = (station ? station.base_url : RELAY.base || '').replace(/\/+$/, '');
   try {
     const items = [];
     for (let page = 1; page <= 20; page++) {
-      const d = await relayGet(`/admin/users/${u.id}/api-keys`, { page, page_size: 100 });
+      const d = await relayGet(`/admin/users/${u.id}/api-keys`, { page, page_size: 100 }, station);
       const batch = d.items || [];
       items.push(...batch);
       if (batch.length < 100 || items.length >= Number(d.total || 0)) break;
     }
-    const groups = await relayGet('/admin/groups', { page: 1, page_size: 100 }).catch(() => ({ items: [] }));
+    const groups = await relayGet('/admin/groups', { page: 1, page_size: 100 }, station).catch(() => ({ items: [] }));
     return norm(items, new Map((groups.items || []).map((x) => [x.id, x.name])));
   } catch (e) {
     console.error('[relay-user-keys] 管理接口列 Key 失败：', JSON.stringify({ msg: e.message, status: e.status }));
     if (e.message !== '中转站管理密钥无效或已过期') throw e;
     if (!panelPass) throw new HttpError(403, `站点管理密钥无权读取这个账号的 Key 列表：请填该账号（${u.email || u.username}）的站点登录密码重试`);
-    const lr = await fetch(`${RELAY.base}/api/v1/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: u.email || u.username, password: panelPass }), signal: AbortSignal.timeout(15000) }).catch(() => null);
+    const lr = await fetch(`${base}/api/v1/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: u.email || u.username, password: panelPass }), signal: AbortSignal.timeout(15000) }).catch(() => null);
     const lj = lr && lr.ok ? await lr.json().catch(() => null) : null;
     const jwt = lj && lj.data && lj.data.access_token;
     if (!jwt) throw new HttpError(401, '站点面板登录失败：请确认账号密码正确');
-    const kr = await fetch(`${RELAY.base}/api/v1/keys?page=1&page_size=100`, { headers: { Authorization: `Bearer ${jwt}` }, signal: AbortSignal.timeout(15000) }).catch(() => null);
+    const kr = await fetch(`${base}/api/v1/keys?page=1&page_size=100`, { headers: { Authorization: `Bearer ${jwt}` }, signal: AbortSignal.timeout(15000) }).catch(() => null);
     const kj = kr && kr.ok ? await kr.json().catch(() => null) : null;
     if (!kj || !kj.data) throw new HttpError(502, '读取 Key 列表失败：站点面板返回异常');
     return norm((kj.data.items || []), null);
@@ -1994,11 +2040,11 @@ async function relayResolveAccount(ref) {
   throw new HttpError(404, `中转站没有名为「${str}」的账号`);
 }
 const relayAccountView = (a) => ({ id: a.id, name: a.name, platform: a.platform, type: a.type, status: a.status, error: a.error_message || '', rate_multiplier: a.rate_multiplier, concurrency_limit: a.concurrency, current_concurrency: a.current_concurrency, last_used_at: a.last_used_at ? fmtTZ(a.last_used_at) : null, groups: (a.groups || []).map((g) => g.name), temp_unschedulable: a.temp_unschedulable_until && new Date(a.temp_unschedulable_until) > new Date() ? a.temp_unschedulable_reason || '暂不可调度' : '' });
-async function relayLiveRateBy(filter) {
+async function relayLiveRateBy(filter, station = null) {
   const now = Date.now();
   let items = [];
   for (let page = 1; page <= 4; page++) {
-    const d = await relayGet('/admin/usage', { page, page_size: 200, ...filter });
+    const d = await relayGet('/admin/usage', { page, page_size: 200, ...filter }, station);
     const batch = d.items || [];
     items = items.concat(batch);
     if (batch.length < 200 || now - new Date(batch[batch.length - 1].created_at).getTime() > 5 * 60 * 1000) break;
@@ -2020,29 +2066,30 @@ const daySeries = (trend) => (trend || []).map((x) => ({ date: String(x.date).sl
 // 客户：累计 / 今日 / 本小时消耗、余额、实时 RPM / TPM、近 3 天每日消耗
 // 客户实时消耗。track 为空 = 按中转站用户（邮箱）追踪；
 // track = { key_id, key_name } = 按管理员 Key 追踪：/admin/usage/stats 与 trend 支持 api_key_id 过滤（已实测）。
-function relayCustomerLive(userId, ref, track = null) {
+function relayCustomerLive(userId, ref, track = null, station = null) {
   const keyId = track && track.key_id ? Number(track.key_id) : 0;
-  return relayCached(`cust:${userId}:${keyId ? `k${keyId}` : 'u'}`, 20000, async () => {
+  const stKey = station ? `s${station.id}` : 'env';
+  return relayCached(`cust:${stKey}:${userId}:${keyId ? `k${keyId}` : 'u'}`, 20000, async () => {
     const today = todayKey();
     if (keyId) {
       const filt = { api_key_id: keyId };
       const [allTime, todayStats, trend, live, days] = await Promise.all([
-        relayGet('/admin/usage/stats', { ...filt, start_date: ALL_TIME, end_date: today }),
-        relayGet('/admin/usage/stats', { ...filt, start_date: today, end_date: today }),
-        relayGet('/admin/dashboard/trend', { granularity: 'hour', days: 1, ...filt }).catch(() => ({ trend: [] })),
-        relayLiveRateBy(filt).catch(() => null),
-        relayGet('/admin/dashboard/trend', { granularity: 'day', days: 3, ...filt }).catch(() => ({ trend: [] })),
+        relayGet('/admin/usage/stats', { ...filt, start_date: ALL_TIME, end_date: today }, station),
+        relayGet('/admin/usage/stats', { ...filt, start_date: today, end_date: today }, station),
+        relayGet('/admin/dashboard/trend', { granularity: 'hour', days: 1, ...filt }, station).catch(() => ({ trend: [] })),
+        relayLiveRateBy(filt, station).catch(() => null),
+        relayGet('/admin/dashboard/trend', { granularity: 'day', days: 3, ...filt }, station).catch(() => ({ trend: [] })),
       ]);
       const h = hourlySeries(trend.trend);
       return { kind: 'customer', fetched_at: now(), key_track: { key_id: keyId, key_name: (track && track.key_name) || '' }, user: { id: userId, email: ref || (track && track.key_name) }, total: { requests: allTime.total_requests, cost_usd: r2(allTime.total_actual_cost), tokens: allTime.total_tokens }, today: { requests: todayStats.total_requests, cost_usd: r2(todayStats.total_actual_cost), tokens: todayStats.total_tokens, input_tokens: todayStats.total_input_tokens, output_tokens: todayStats.total_output_tokens }, this_hour: h.this_hour, hourly: h.hourly, daily: daySeries(days.trend).slice(-3), live };
     }
     const [users, allTime, todayStats, trend, live, days] = await Promise.all([
-      relayGet('/admin/users', { page: 1, page_size: 20, search: ref || String(userId) }).catch(() => ({ items: [] })),
-      relayGet('/admin/usage/stats', { user_id: userId, start_date: ALL_TIME, end_date: today }),
-      relayGet('/admin/usage/stats', { user_id: userId, start_date: today, end_date: today }),
-      relayGet('/admin/dashboard/trend', { granularity: 'hour', days: 1, user_id: userId }).catch(() => ({ trend: [] })),
-      relayLiveRateBy({ user_id: userId }).catch(() => null),
-      relayGet('/admin/dashboard/trend', { granularity: 'day', days: 3, user_id: userId }).catch(() => ({ trend: [] })),
+      relayGet('/admin/users', { page: 1, page_size: 20, search: ref || String(userId) }, station).catch(() => ({ items: [] })),
+      relayGet('/admin/usage/stats', { user_id: userId, start_date: ALL_TIME, end_date: today }, station),
+      relayGet('/admin/usage/stats', { user_id: userId, start_date: today, end_date: today }, station),
+      relayGet('/admin/dashboard/trend', { granularity: 'hour', days: 1, user_id: userId }, station).catch(() => ({ trend: [] })),
+      relayLiveRateBy({ user_id: userId }, station).catch(() => null),
+      relayGet('/admin/dashboard/trend', { granularity: 'day', days: 3, user_id: userId }, station).catch(() => ({ trend: [] })),
     ]);
     const u = (users.items || []).find((x) => x.id === Number(userId)) || null;
     const h = hourlySeries(trend.trend);
@@ -2204,7 +2251,8 @@ async function partyLive(pa) {
   if (!pa.relay_id) return { party_id: pa.id, linked: false, settlement: settlementView(pa, null) };
   try {
     const track = relayTrackOf(pa);
-    const live = pa.kind === 'customer' ? await relayCustomerLive(pa.relay_id, pa.relay_ref, track) : await relaySupplierLive(pa.relay_id);
+    const station = stationOfParty(pa);
+    const live = pa.kind === 'customer' ? await relayCustomerLive(pa.relay_id, pa.relay_ref, track, station) : await relaySupplierLive(pa.relay_id);
     try { syncRelayAccrual(pa, live); } catch (e) { console.error('[relay] 自动挂账失败：', e.message); }
     return { party_id: pa.id, linked: true, ...live, settlement: settlementView(pa, live) };
   } catch (e) { return { party_id: pa.id, linked: true, error: e instanceof HttpError ? e.message : (e.message || '获取失败'), settlement: settlementView(pa, null) }; }
@@ -2317,15 +2365,19 @@ async function linkPartyRelay(user, partyId, ref, opts = {}) {
   // 绑定时可一并指定倍率 / 折扣与结算币种
   if (opts.ratio !== undefined || opts.currency !== undefined) ops.updateParty(user, pa0.id, { ratio: opts.ratio, currency: opts.currency }, '');
   const pa = q.party.get(pa0.id);
+  const station = Number(opts.station_id) > 0
+    ? db.prepare("SELECT * FROM stations WHERE id = ? AND type = 'relay'").get(Number(opts.station_id))
+    : stationOfParty(pa);
+  if (Number(opts.station_id) > 0 && !station) throw new HttpError(404, '所选中转站不存在');
   const target = String(ref || pa.relay_ref || pa.external_id || pa.name).trim();
   if (pa.kind === 'customer') {
     if (opts.mode === 'key') {
-      const u = await relayAdminUser();
+      const u = await relayAdminUser(station);
       const id = Number(opts.key_id);
       if (!(id > 0)) throw new HttpError(400, '请选择要追踪的管理员 Key');
       let k = null;
       try {
-        const ks = await relayUserKeys(u, String(opts.panel_pass || ''));
+        const ks = await relayUserKeys(u, String(opts.panel_pass || ''), station);
         k = ks.find((x) => String(x.id) === String(id));
         if (!k) throw new HttpError(404, '管理员账号下没有这把 Key，刷新列表再试');
       } catch (e) {
@@ -2334,12 +2386,12 @@ async function linkPartyRelay(user, partyId, ref, opts = {}) {
         k = { id, name: String(opts.key_name || '').slice(0, 60) || `Key ${id}`, group_id: opts.group_id || null };
       }
       const kname = (String(k.name || '') || `Key ${k.id}`).slice(0, 60);
-      db.prepare("UPDATE parties SET relay_id = ?, relay_ref = ?, relay_track_mode = 'key', relay_key_id = ?, relay_key_name = ?, relay_group_id = ? WHERE id = ?").run(u.id, u.email || u.username || 'admin', k.id, kname, k.group_id || null, pa.id);
+      db.prepare("UPDATE parties SET relay_id = ?, relay_ref = ?, relay_station_id = ?, relay_track_mode = 'key', relay_key_id = ?, relay_key_name = ?, relay_group_id = ? WHERE id = ?").run(u.id, u.email || u.username || 'admin', station ? station.id : null, k.id, kname, k.group_id || null, pa.id);
       dataChanged(user, `把客户「${pa.name}」改为按管理员 Key 追踪：「${kname}」（id ${k.id}）· ${pa.project_name}`);
     } else {
-      const u = await relayFindUser(target);
+      const u = Number(opts.user_id) > 0 && ref ? { id: Number(opts.user_id), email: String(ref).trim(), username: '' } : await relayFindUser(target, station);
       q.linkParty.run(u.id, u.email || u.username || target, pa.id);
-      db.prepare("UPDATE parties SET relay_track_mode = '', relay_key_id = NULL, relay_key_name = '', relay_group_id = NULL WHERE id = ?").run(pa.id);
+      db.prepare("UPDATE parties SET relay_station_id = ?, relay_track_mode = '', relay_key_id = NULL, relay_key_name = '', relay_group_id = NULL WHERE id = ?").run(station ? station.id : null, pa.id);
       dataChanged(user, `把客户「${pa.name}」绑定到中转站用户 ${u.email || u.username}（id ${u.id}）· ${pa.project_name}`);
     }
   } else {
@@ -3318,7 +3370,7 @@ app.get('/api/projects', auth, (req, res) => {
   for (const e of q.allEntries.all()) { if (!byProject.has(e.project_id)) byProject.set(e.project_id, []); byProject.get(e.project_id).push(e); }
   // 每个项目的客户应收合计（折人民币）：中转站消耗已自动按天挂成应收，open_cny = 应收 − 实收
   const custOpen = new Map();
-  for (const pa of db.prepare("SELECT * FROM parties WHERE kind = 'customer'").all()) {
+  for (const pa of db.prepare("SELECT * FROM parties WHERE kind = 'customer' AND project_id IS NOT NULL").all()) {
     const st = partySettle(q.recordsOfParty.all(pa.id), pa.currency || 'CNY');
     custOpen.set(pa.project_id, r2((custOpen.get(pa.project_id) || 0) + (st.open_cny || 0)));
   }
@@ -3450,6 +3502,27 @@ app.get('/api/stations/:id/groups', auth, async (req, res, next) => {
     res.json({ groups: all.map((g) => ({ id: g.id, name: g.name })) });
   } catch (e) { next(e); }
 });
+// 从指定中转站搜索客户账户（挂账追踪：先选台子 → 搜索选择客户账户 → 显示该账户可用分组）
+app.get('/api/stations/:id/users', auth, async (req, res, next) => {
+  try {
+    const s = db.prepare("SELECT * FROM stations WHERE id = ? AND type = 'relay'").get(Number(req.params.id));
+    if (!s) return fail(res, 404, '中转站不存在');
+    const qs = String(req.query.q || '').trim();
+    const d = await relayGet('/admin/users', { page: 1, page_size: 30, search: qs }, s);
+    res.json({ users: (d.items || []).map(relayUserView) });
+  } catch (e) { next(e); }
+});
+// 指定中转站下某个客户账户可用的分组
+app.get('/api/stations/:id/users/:userId/groups', auth, async (req, res, next) => {
+  try {
+    const s = db.prepare("SELECT * FROM stations WHERE id = ? AND type = 'relay'").get(Number(req.params.id));
+    if (!s) return fail(res, 404, '中转站不存在');
+    const uid = Number(req.params.userId);
+    if (!(uid > 0)) return fail(res, 400, '账户 ID 不正确');
+    const names = await partyAllowedGroupNames(s, uid);
+    res.json({ groups: names.map((name) => ({ name })) });
+  } catch (e) { next(e); }
+});
 app.get('/api/parties/:id/relay-groups', auth, (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa) return fail(res, 404, '往来单位不存在');
@@ -3547,7 +3620,7 @@ app.get('/api/parties/:id', auth, (req, res) => {
   res.json({ party: partyView(pa, records), records: records.map(recordView), labels: PARTY_LABEL[pa.kind], relay_configured: relayConfigured() });
 });
 app.patch('/api/parties/:id', auth, (req, res) => res.json({ party: partyView(ops.updateParty(req.user, req.params.id, req.body || {})) }));
-app.post('/api/parties/:id/relay-link', auth, async (req, res, next) => { try { const b = req.body || {}; res.json({ live: await linkPartyRelay(req.user, req.params.id, b.ref, { ratio: b.ratio, currency: b.currency, mode: b.mode, key_id: b.key_id, key_name: b.key_name, group_id: b.group_id, panel_pass: b.panel_pass }) }); } catch (e) { next(e); } });
+app.post('/api/parties/:id/relay-link', auth, async (req, res, next) => { try { const b = req.body || {}; res.json({ live: await linkPartyRelay(req.user, req.params.id, b.ref, { ratio: b.ratio, currency: b.currency, mode: b.mode, key_id: b.key_id, key_name: b.key_name, group_id: b.group_id, panel_pass: b.panel_pass, station_id: b.station_id, user_id: b.user_id }) }); } catch (e) { next(e); } });
 app.post('/api/relay/admin-keys', auth, async (req, res, next) => {
   try {
     if (!relayConfigured()) return fail(res, 400, '未配置中转站接口');
@@ -3668,13 +3741,125 @@ if (!db.prepare("SELECT 1 FROM settings WHERE key = 'stations_v1'").get()) {
   }
   db.prepare("INSERT INTO settings (key, value) VALUES ('stations_v1', '1')").run();
 }
+// 一次性：允许客户先全局建档（project_id 可为空），再在项目往来中关联
+if (!db.prepare("SELECT 1 FROM settings WHERE key = 'customers_global_v1'").get()) {
+  const tbl = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'parties'").get();
+  if (tbl && /CHECK\s*\(\s*kind\s*=\s*'supplier'\s+OR\s+project_id\s+IS\s+NOT\s+NULL\s*\)/i.test(tbl.sql)) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec('BEGIN');
+    try {
+      db.exec('ALTER TABLE parties RENAME TO parties_cg_old');
+      const newSql = tbl.sql.replace(/,?\s*CHECK\s*\(\s*kind\s*=\s*'supplier'\s+OR\s+project_id\s+IS\s+NOT\s+NULL\s*\)/i, '');
+      db.exec(newSql);
+      const cols = db.prepare('PRAGMA table_info(parties_cg_old)').all().map((c) => c.name).join(', ');
+      db.exec(`INSERT INTO parties (${cols}) SELECT ${cols} FROM parties_cg_old`);
+      db.exec('DROP TABLE parties_cg_old');
+      for (const t of db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql LIKE '%parties_cg_old%'").all()) {
+        db.exec(`ALTER TABLE ${t.name} RENAME TO ${t.name}_cg_fix`);
+        db.exec(t.sql.replace(/CREATE TABLE\s+\S+/, `CREATE TABLE ${t.name}`).replaceAll('"parties_cg_old"', 'parties'));
+        const cs = db.prepare(`PRAGMA table_info(${t.name}_cg_fix)`).all().map((c) => c.name).join(', ');
+        db.exec(`INSERT INTO ${t.name} (${cs}) SELECT ${cs} FROM ${t.name}_cg_fix`);
+        db.exec(`DROP TABLE ${t.name}_cg_fix`);
+      }
+      db.exec('CREATE INDEX IF NOT EXISTS idx_parties_project ON parties(project_id, kind)');
+      db.prepare("INSERT INTO settings (key, value) VALUES ('customers_global_v1', '1')").run();
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    finally { db.exec('PRAGMA foreign_keys = ON'); }
+  } else {
+    db.prepare("INSERT INTO settings (key, value) VALUES ('customers_global_v1', '1')").run();
+  }
+}
 // 侧栏「供应商」页：供应商全局一份，不挂项目
 app.get('/api/suppliers', auth, (req, res) => {
   const rows = db.prepare("SELECT * FROM parties WHERE kind = 'supplier' ORDER BY archived, id DESC").all();
-  res.json({ suppliers: rows.map((r) => ({ ...partyView(r), wallets: partyWallets.listOf(r.id) })), rates: getRates() });
+  res.json({ suppliers: rows.map((r) => ({ ...partyView(r), wallets: partyWallets.listOf(r.id), sites: partyWallets.sitesOf(r.id) })), rates: getRates() });
+});
+// 仅在「供应商」页添加新供应商：名称、联系方式、可选多个站点（平台 + 地址 + 访问令牌 + 自定义倍率）
+app.post('/api/suppliers', auth, async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    const pa = ops.addParty(req.user, 0, { kind: 'supplier', name: b.name, contact: b.contact || '', currency: 'CNY' });
+    const sites = Array.isArray(b.sites) ? b.sites.filter((s) => s && String(s.base_url || '').trim()) : [];
+    const createdWallets = [];
+    const siteErrors = [];
+    for (const s of sites) {
+      try {
+        const w = await partyWallets.createSiteWallet(pa.id, s);
+        createdWallets.push(w);
+        if (w.last_error) siteErrors.push(`${w.base_url}：${w.last_error}`);
+      } catch (e) {
+        siteErrors.push(`${s.base_url}：${e.message}`);
+      }
+    }
+    res.json({ supplier: { ...partyView(q.party.get(pa.id)), wallets: partyWallets.listOf(pa.id), sites: partyWallets.sitesOf(pa.id) }, site_errors: siteErrors });
+  } catch (e) { next(e); }
+});
+// 项目往来：关联已有供应商（非中转项目只关联供应商；中转项目可一并关联该供应商的站点与站点里的多把 Key，自动继承站点自定义倍率）
+app.post('/api/projects/:id/suppliers', auth, async (req, res, next) => {
+  try {
+    const projectId = Number(req.params.id);
+    const p = q.project.get(projectId);
+    if (!p) return fail(res, 404, '项目不存在');
+    const b = req.body || {};
+    const partyId = Number(b.party_id);
+    const pa = q.party.get(partyId);
+    if (!pa || pa.kind !== 'supplier') return fail(res, 404, '供应商不存在');
+    db.prepare('INSERT OR IGNORE INTO project_suppliers (project_id, party_id, created_at) VALUES (?, ?, ?)').run(projectId, partyId, now());
+    let bound = null;
+    const keyIds = Array.isArray(b.key_ids) ? b.key_ids.filter(Boolean) : [];
+    if (b.template_wallet_id && keyIds.length) {
+      bound = await partyWallets.bindKeysFromTemplate(req.user, partyId, {
+        template_wallet_id: Number(b.template_wallet_id),
+        key_ids: keyIds,
+        cost_mode: 'key',
+        project_id: projectId,
+      });
+    } else if (b.template_wallet_id && b.link_whole_site) {
+      // 整站关联（当站点无分 Key 需求时，把未归属项目的站点监控归到本项目）
+      const tw = db.prepare('SELECT * FROM party_wallets WHERE id = ? AND party_id = ?').get(Number(b.template_wallet_id), partyId);
+      if (tw && !tw.project_id) {
+        db.prepare('UPDATE party_wallets SET project_id = ?, updated_at = ? WHERE id = ?').run(projectId, now(), tw.id);
+      }
+    }
+    supplierCostCache.clear();
+    profitCache = null;
+    dataChanged(req.user, `在「${p.name}」关联了供应商「${pa.name}」${bound ? `（${bound.created} 把 Key）` : ''}`);
+    res.json({ ok: true, party_id: partyId, bound });
+  } catch (e) { next(e); }
+});
+app.delete('/api/projects/:id/suppliers/:partyId', auth, (req, res) => {
+  const projectId = Number(req.params.id);
+  const partyId = Number(req.params.partyId);
+  db.prepare('DELETE FROM project_suppliers WHERE project_id = ? AND party_id = ?').run(projectId, partyId);
+  res.json({ ok: true });
 });
 app.get('/api/suppliers/options', auth, (req, res) => {
   res.json({ suppliers: db.prepare("SELECT id, name FROM parties WHERE kind = 'supplier' AND archived = 0 ORDER BY name").all() });
+});
+// 全局客户建档（不归属项目）
+app.post('/api/customers', auth, (req, res) => {
+  const b = req.body || {};
+  const pa = ops.addParty(req.user, 0, { kind: 'customer', name: b.name, contact: b.contact || '', currency: 'CNY' });
+  res.json({ customer: partyView(q.party.get(pa.id)) });
+});
+// 全局已有客户列表（供项目往来「关联客户」下拉选择）
+app.get('/api/customers/options', auth, (req, res) => {
+  const rows = db.prepare("SELECT * FROM parties WHERE kind = 'customer' ORDER BY archived, id").all();
+  const map = new Map();
+  for (const r of rows) {
+    const key = custGroupKey(r);
+    if (!key) continue;
+    if (!map.has(key)) {
+      map.set(key, { key, name: key, group: key, contact: r.contact || '', archived: !!r.archived, id: r.id });
+    } else {
+      const cur = map.get(key);
+      if (!cur.contact && r.contact) cur.contact = r.contact;
+      if (!r.archived) cur.archived = false;
+    }
+  }
+  const list = [...map.values()].filter((x) => !x.archived).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  res.json({ customers: list });
 });
 // 记一笔收入时可选的甲方（客户归属项目）
 app.get('/api/projects/:id/customers/options', auth, (req, res) => {
@@ -3790,53 +3975,53 @@ app.delete('/api/project-files/:id', auth, (req, res) => {
   if (a) { try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(a.file))); } catch {} db.prepare('DELETE FROM attachments WHERE id = ?').run(a.id); }
   res.json({ ok: true });
 });
-// 一个逻辑客户的归并键：手动分组优先，否则按 relay 账号，否则单独一个
-const custGroupKey = (r) => (r.customer_group || '').trim() || (r.relay_id != null ? `relay:${r.relay_id}` : `party:${r.id}`);
+// 一个逻辑客户的归并键：优先手动分组，否则按客户名称归并（同一客户跨多个项目自动合并）
+const custGroupKey = (r) => (r.customer_group || '').trim() || (r.name || '').trim() || `party:${r.id}`;
 function custSiblings(pa) {
-  const sel = "SELECT pa.*, p.name AS project_name, p.ptype AS project_type FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer'";
-  const g = (pa.customer_group || '').trim();
-  if (g) return db.prepare(`${sel} AND pa.customer_group = ? ORDER BY pa.id`).all(g);
-  if (pa.relay_id != null) return db.prepare(`${sel} AND (pa.customer_group = '' OR pa.customer_group IS NULL) AND pa.relay_id = ? ORDER BY pa.id`).all(pa.relay_id);
-  return db.prepare(`${sel} AND pa.id = ?`).all(pa.id);
+  const sel = "SELECT pa.*, p.name AS project_name, p.ptype AS project_type FROM parties pa LEFT JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer'";
+  const key = custGroupKey(pa);
+  return db.prepare(`${sel} AND COALESCE(NULLIF(trim(pa.customer_group), ''), trim(pa.name)) = ? ORDER BY CASE WHEN pa.project_id IS NULL THEN 1 ELSE 0 END, pa.id`).all(key);
 }
-// 客户：按逻辑客户聚合。有中转项目 → 中转客户；全部项目制 → 项目制客户
+// 客户：统一视为客户，不再拆分中转客户 / 项目制客户；聚合该客户在所有项目的应支付、已支付、未支付
 app.get('/api/customers', auth, async (req, res) => {
   const rates = getRates();
-  const rows = db.prepare("SELECT pa.*, p.name AS project_name, p.archived AS project_archived, p.ptype AS project_type FROM parties pa JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer' ORDER BY pa.id").all();
+  const rows = db.prepare("SELECT pa.*, p.name AS project_name, p.archived AS project_archived, p.ptype AS project_type FROM parties pa LEFT JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer' ORDER BY pa.id").all();
   const bal = await relayBalances();
   const todayS = todayKey();
   const groups = new Map();
   for (const r of rows) {
-    const v = partyView(r);
+    const v = partyView(r, null, r.project_id);
     const key = custGroupKey(r);
     const balance_usd = r.relay_id != null ? (bal.has(r.relay_id) ? bal.get(r.relay_id) : null) : null;
-    const part = { party_id: r.id, name: r.name, project_id: r.project_id, project_name: r.project_name, project_type: r.project_type || 'relay', project_archived: !!r.project_archived, settle_type: v.settle_type, relay_id: r.relay_id || null, balance_usd, due_cny: v.settle.due_cny, paid_cny: v.settle.paid_cny, open_cny: v.settle.open_cny, ratio: v.ratio, archived: v.archived, low_balance: v.settle_type === 'prepaid' && v.balance_threshold != null && balance_usd != null && balance_usd < v.balance_threshold, term: termStatus(v, todayS), balance_threshold: v.balance_threshold };
-    if (!groups.has(key)) groups.set(key, { key, group: (r.customer_group || '').trim(), parties: [] });
+    const part = { party_id: r.id, name: r.name, project_id: r.project_id || 0, project_name: r.project_name || '', project_type: r.project_type || 'relay', project_archived: !!r.project_archived, settle_type: v.settle_type, relay_id: r.relay_id || null, balance_usd, due_cny: v.settle.due_cny, paid_cny: v.settle.paid_cny, open_cny: v.settle.open_cny, ratio: v.ratio, archived: v.archived, low_balance: v.settle_type === 'prepaid' && v.balance_threshold != null && balance_usd != null && balance_usd < v.balance_threshold, term: termStatus(v, todayS), balance_threshold: v.balance_threshold };
+    if (!groups.has(key)) groups.set(key, { key, group: key, parties: [] });
     groups.get(key).parties.push(part);
   }
   const customers = [...groups.values()].map((g) => {
-    const ps = g.parties;
+    const allParts = g.parties;
+    const projParts = allParts.filter((p) => p.project_id > 0);
+    const projectNames = [...new Set(projParts.map((p) => p.project_name).filter(Boolean))];
+    const primary = projParts[0] || allParts[0];
     return {
-      key: g.key, group: g.group, detail_party_id: ps[0].party_id,
-      name: g.group || ps[0].name,
-      parties: ps,
-      has_relay: ps.some((p) => p.project_type === 'relay' || p.project_type === 'key'),
-      settle_type: ps.every((p) => p.settle_type === 'credit') ? 'credit' : 'prepaid',
-      balance_usd: ps.some((p) => p.balance_usd != null) ? r2(ps.reduce((a, p) => a + (p.balance_usd ?? 0), 0)) : null,
-      // 余额 × 折扣（美金）：预付余额按折扣折算后的实收价
-      bal_rev_usd: ps.some((p) => p.balance_usd != null) ? r2(ps.reduce((a, p) => a + (p.balance_usd ?? 0) * p.ratio, 0)) : null,
-      due_cny: r2(ps.reduce((a, p) => a + p.due_cny, 0)),
-      paid_cny: r2(ps.reduce((a, p) => a + p.paid_cny, 0)),
-      open_cny: r2(ps.reduce((a, p) => a + p.open_cny, 0)),
-      low_balance: ps.some((p) => p.low_balance),
-      overdue: ps.some((p) => p.term && p.term.overdue),
-      archived: ps.every((p) => p.archived || p.project_archived),
-      project_count: ps.length,
-      // 折扣：取绑定了中转站的项目的折扣（没有则取全部），去重
-      ratios: [...new Set((ps.some((p) => p.relay_id != null) ? ps.filter((p) => p.relay_id != null) : ps).map((p) => p.ratio))].sort((a, b) => a - b),
+      key: g.key, group: g.group, detail_party_id: primary.party_id,
+      name: g.group || primary.name,
+      parties: projParts,
+      project_names: projectNames,
+      has_relay: projParts.some((p) => p.project_type === 'relay' || p.project_type === 'key'),
+      settle_type: allParts.every((p) => p.settle_type === 'credit') ? 'credit' : 'prepaid',
+      balance_usd: projParts.some((p) => p.balance_usd != null) ? r2(projParts.reduce((a, p) => a + (p.balance_usd ?? 0), 0)) : null,
+      bal_rev_usd: projParts.some((p) => p.balance_usd != null) ? r2(projParts.reduce((a, p) => a + (p.balance_usd ?? 0) * p.ratio, 0)) : null,
+      due_cny: r2(allParts.reduce((a, p) => a + p.due_cny, 0)),
+      paid_cny: r2(allParts.reduce((a, p) => a + p.paid_cny, 0)),
+      open_cny: r2(allParts.reduce((a, p) => a + p.open_cny, 0)),
+      low_balance: projParts.some((p) => p.low_balance),
+      overdue: projParts.some((p) => p.term && p.term.overdue),
+      archived: projParts.length ? projParts.every((p) => p.archived || p.project_archived) : allParts.every((p) => p.archived),
+      project_count: projectNames.length,
+      ratios: [...new Set((projParts.some((p) => p.relay_id != null) ? projParts.filter((p) => p.relay_id != null) : projParts).map((p) => p.ratio))].sort((a, b) => a - b),
     };
   });
-  res.json({ relay_customers: customers.filter((c) => c.has_relay), project_customers: customers.filter((c) => !c.has_relay), usd_rate: rates.USD, rates, fetched_at: now() });
+  res.json({ customers, relay_customers: customers.filter((c) => c.has_relay), project_customers: customers.filter((c) => !c.has_relay), usd_rate: rates.USD, rates, fetched_at: now() });
 });
 // 客户详情：按逻辑客户聚合所有项目 + 全部往来记录 + 电子合同 + 中转站实时
 app.get('/api/customers/:id/detail', auth, async (req, res) => {
@@ -3847,21 +4032,21 @@ app.get('/api/customers/:id/detail', auth, async (req, res) => {
   const bal = await relayBalances();
   const siblings = custSiblings(pa);
   const entriesOfProj = db.prepare('SELECT * FROM entries WHERE project_id = ?');
-  const projects = siblings.map((s) => { const v = partyView(s); const isShort = (s.project_type || 'relay') === 'short'; return { party_id: s.id, project_id: s.project_id, project_name: s.project_name, project_type: s.project_type || 'relay', settle_type: v.settle_type, relay_id: s.relay_id || null, relay_ref: s.relay_ref || '', balance_usd: s.relay_id != null ? (bal.has(s.relay_id) ? bal.get(s.relay_id) : null) : null, ratio: v.ratio, currency: v.currency, settle: v.settle, groups: db.prepare('SELECT group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(s.id), summary: isShort ? summarize(entriesOfProj.all(s.project_id), rates) : null }; });
-  const records = siblings.flatMap((s) => q.recordsWithCreator.all(s.id).map((r) => ({ ...recordView(r), project_name: s.project_name }))).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
-  const contracts = siblings.flatMap((s) => qContractsOf.all(s.id).map((r) => ({ ...contractView(r), project_name: s.project_name })));
+  const projects = siblings.filter((s) => s.project_id != null).map((s) => { const v = partyView(s, null, s.project_id); const isShort = (s.project_type || 'relay') === 'short'; return { party_id: s.id, project_id: s.project_id, project_name: s.project_name, project_type: s.project_type || 'relay', settle_type: v.settle_type, relay_id: s.relay_id || null, relay_ref: s.relay_ref || '', balance_usd: s.relay_id != null ? (bal.has(s.relay_id) ? bal.get(s.relay_id) : null) : null, ratio: v.ratio, currency: v.currency, settle: v.settle, groups: db.prepare('SELECT group_name, price, price_mode FROM relay_customer_groups WHERE party_id = ? ORDER BY group_name').all(s.id), summary: isShort ? summarize(entriesOfProj.all(s.project_id), rates) : null }; });
+  const records = siblings.flatMap((s) => q.recordsWithCreator.all(s.id).map((r) => ({ ...recordView(r), project_name: s.project_name || '' }))).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
+  const contracts = siblings.flatMap((s) => qContractsOf.all(s.id).map((r) => ({ ...contractView(r), project_name: s.project_name || '' })));
   // 实时：取第一个绑定了中转站的 party
   let live = null;
   const relaySib = siblings.find((s) => s.relay_id != null);
-  if (relaySib && relayConfigured()) { const trk = relayTrackOf(relaySib); try { live = await relayCustomerLive(relaySib.relay_id, relaySib.relay_ref, trk); } catch { /* ignore */ } }
-  const v = partyView(pa);
+  if (relaySib && (relayConfigured() || relaySib.relay_station_id)) { const trk = relayTrackOf(relaySib); try { live = await relayCustomerLive(relaySib.relay_id, relaySib.relay_ref, trk, stationOfParty(relaySib)); } catch { /* ignore */ } }
+  const v = partyView(pa, null, pa.project_id);
   const balance_usd = projects.some((p) => p.balance_usd != null) ? r2(projects.reduce((a, p) => a + (p.balance_usd ?? 0), 0)) : null;
   const agg = { due: 0, paid: 0, open: 0, due_cny: 0, paid_cny: 0, open_cny: 0 };
-  for (const s of siblings) { const st = partyView(s).settle; agg.due_cny += st.due_cny; agg.paid_cny += st.paid_cny; agg.open_cny += st.open_cny; }
+  for (const s of siblings) { const st = partyView(s, null, s.project_id).settle; agg.due_cny += st.due_cny; agg.paid_cny += st.paid_cny; agg.open_cny += st.open_cny; }
   const settle = { ...v.settle, due_cny: r2(agg.due_cny), paid_cny: r2(agg.paid_cny), open_cny: r2(agg.open_cny) };
-  res.json({ customer: { ...v, name: (pa.customer_group || '').trim() || pa.name, settle, balance_usd, term: termStatus(v, todayS) }, projects, records, contracts, live, rates });
+  res.json({ customer: { ...v, name: custGroupKey(pa), settle, balance_usd, term: termStatus(v, todayS) }, projects, records, contracts, live, rates });
 });
-// 供应商详情：资金往来（双向明细）+ 每把 Key 在站点的分组 / 每组消耗 / 每日消耗
+// 供应商详情：资金往来（双向明细）+ 所有站点卡片（消费与余额）+ 其他项目贡献 + 分组 / 消耗明细
 app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa || pa.kind !== 'supplier') return fail(res, 404, '供应商不存在');
@@ -3874,16 +4059,26 @@ app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
     if (e.type === 'income') income += inCur; else out += inCur;
     return { id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, rate: e.rate, cny: r2(entryBase(e, rates)), in_cur: r2(inCur), project_id: e.project_id, project_name: e.project_name, note: e.note, handler: e.handler_name, handler_id: e.handler_id };
   });
-  // 按站点去重：同一 base_url 是同一账户，分组 / 消耗完全一样，只取一把 Key 抓一次
-  const wallets = [];
-  const seen = new Set();
-  for (const w of partyWallets.listOf(pa.id)) {
-    const site = String(w.base_url || '').replace(/\/+$/, '');
-    if (seen.has(site)) continue;
-    seen.add(site);
-    wallets.push(await partyWallets.detailOf(w.id));
+  // 其他项目贡献（上 key / 项目制 / 手工挂账）：按项目汇总 party_records due
+  const projMap = new Map(q.projects.all().map((p) => [p.id, p]));
+  const contribMap = new Map();
+  for (const r of q.recordsOfParty.all(pa.id)) {
+    if (r.kind !== 'due') continue;
+    const pid = r.project_id || 0;
+    const pr = projMap.get(pid);
+    const curRow = contribMap.get(pid) || { project_id: pid, project_name: pr ? pr.name : '未指定项目', ptype: pr ? pr.ptype : 'short', due_cny: 0, count: 0 };
+    curRow.due_cny = r2(curRow.due_cny + recBase(r));
+    curRow.count += 1;
+    contribMap.set(pid, curRow);
   }
-  res.json({ party: partyView(pa), funds: { currency: cur, out: r2(out), income: r2(income), net: r2(out - income), entries }, wallets, rates });
+  const project_contributions = [...contribMap.values()].sort((a, b) => b.due_cny - a.due_cny);
+  const sites = partyWallets.sitesOf(pa.id);
+  // 按站点去重：同一 base_url 是同一账户，分组 / 消耗完全一样，只取模板行抓一次
+  const wallets = [];
+  for (const s of sites) {
+    wallets.push(await partyWallets.detailOf(s.template_wallet_id));
+  }
+  res.json({ party: partyView(pa), funds: { currency: cur, out: r2(out), income: r2(income), net: r2(out - income), entries }, sites, project_contributions, wallets, rates });
 });
 // 成员详情：总收 / 总付 / 沉淀资金 + 全部经手流水（跨项目）+ 转账往来
 app.get('/api/members/:id/detail', auth, (req, res) => {
@@ -3926,8 +4121,8 @@ async function supplierDailyCost(onlyProject = null) {
   const seen = new Set();
   const jobs = [];
   for (const w of walletRows) {
-    if (!w.project_id) { errors.push(`${w.name}：没有选择所属项目，消耗未计入利润`); continue; }
-    const site = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
+    if (!w.project_id) continue; // 站点级监控未绑定具体项目时不报误错，只算已归属项目的监控
+    const site = w.cost_mode === 'key' ? `${w.project_id}|key:${w.id}` : `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
     if (seen.has(site)) continue;
     seen.add(site);
     jobs.push(w);
@@ -4038,7 +4233,7 @@ async function refreshCustomerGaps() {
       // 已设分组收费的客户，用量表覆盖全部历史，不再按单一折扣补差额
       if (customerGroupPrices(pa.id).length) continue;
       const track = relayTrackOf(pa);
-      const live = await relayCustomerLive(pa.relay_id, pa.relay_ref, track);
+      const live = await relayCustomerLive(pa.relay_id, pa.relay_ref, track, stationOfParty(pa));
       const total = Number(live.total && live.total.cost_usd) || 0;
       // 已挂账的人民币 ÷ 汇率还原成美元消耗，和中转站累计比较，差额就是挂账前的历史
       const bookedCny = db.prepare("SELECT COALESCE(SUM(amount * CASE WHEN currency = 'CNY' THEN 1 ELSE rate END), 0) AS n FROM party_records WHERE party_id = ? AND source = 'relay' AND kind = 'due'").get(pa.id).n;
