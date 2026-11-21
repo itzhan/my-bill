@@ -209,13 +209,15 @@ try { db.exec('ALTER TABLE projects ADD COLUMN opening_cost REAL'); } catch { /*
 for (const [col, ddl] of [['relay_track_mode', "TEXT NOT NULL DEFAULT ''"], ['relay_key_id', 'INTEGER'], ['relay_key_name', "TEXT NOT NULL DEFAULT ''"], ['relay_group_id', 'INTEGER'], ['relay_station_id', 'INTEGER REFERENCES stations(id)']]) {
   try { db.exec(`ALTER TABLE parties ADD COLUMN ${col} ${ddl}`); } catch { /* 已有该列 */ }
 }
-// 项目关联的已有供应商（允许在没有任何往来/站点监控前先关联到项目）
+// 项目关联的已有供应商（允许在没有任何往来/站点监控前先关联到项目；archived 表示该供应商仅在本项目不再发力，不影响全局供应商列表）
 db.exec(`CREATE TABLE IF NOT EXISTS project_suppliers (
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL,
+  archived INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, party_id)
 );`);
+try { db.exec('ALTER TABLE project_suppliers ADD COLUMN archived INTEGER NOT NULL DEFAULT 0'); } catch { /* 已有该列 */ }
 try { db.exec("ALTER TABLE relay_customer_groups ADD COLUMN price_mode TEXT NOT NULL DEFAULT 'cny'"); } catch { /* 已有该列 */ }
 // 客户分组按日期调价：某日期及以后的消耗按新价（同一分组可多段，取该日之前最近一条）
 db.exec(`CREATE TABLE IF NOT EXISTS relay_customer_group_rates (
@@ -1006,6 +1008,11 @@ function supplierTotals(p) {
   const balance = r2(paid - due);
   return { due, paid, balance, relay_due: relayDue, other_due: otherDue };
 }
+function isSupplierArchivedInProject(projectId, partyId) {
+  if (!projectId || !partyId) return false;
+  const r = db.prepare('SELECT archived FROM project_suppliers WHERE project_id = ? AND party_id = ?').get(Number(projectId), Number(partyId));
+  return !!(r && r.archived);
+}
 const partyView = (p, records, projectId = null) => {
   const recs = records || q.recordsOfParty.all(p.id);
   // 客户实收把「记一笔时直接挂上的甲方打款」也算进去：那笔只有流水、没有 party_records
@@ -1027,11 +1034,14 @@ const partyView = (p, records, projectId = null) => {
       settle = { ...settle, paid, paid_cny: paidCny, open: open > 0 ? open : 0, credit: open < 0 ? -open : 0, open_cny: r2(settle.due_cny - paidCny) };
     }
   }
-  return { wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id, projectId) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p, projectId) : null, supplier_totals: p.kind === 'supplier' ? supplierTotals(p) : null, id: p.id, project_id: p.project_id, project_name: p.project_name, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref, station_id: p.relay_station_id || null, track_mode: p.relay_track_mode === 'key' ? 'key' : 'user', key_id: p.relay_key_id == null ? null : Number(p.relay_key_id), key_name: p.relay_key_name || '', group_id: p.relay_group_id == null ? null : Number(p.relay_group_id) } : null, totals: partyTotals(recs), settle };
+  const projectArchived = p.kind === 'supplier' && projectId != null ? isSupplierArchivedInProject(projectId, p.id) : false;
+  const scopedProjectName = projectId != null && !p.project_name ? (q.project.get(Number(projectId))?.name || '') : p.project_name;
+  return { wallet: p.kind === 'supplier' && partyWallets ? partyWallets.summaryOf(p.id, projectId) : null, recharge: p.kind === 'supplier' ? supplierSettlement(p, projectId) : null, supplier_totals: p.kind === 'supplier' ? supplierTotals(p) : null, id: p.id, project_id: p.project_id, project_name: scopedProjectName, kind: p.kind, name: p.name, contact: p.contact, note: p.note, currency: p.currency, external_id: p.external_id, archived: !!p.archived, project_archived: projectArchived, created_at: p.created_at, ratio: Number(p.ratio) > 0 ? Number(p.ratio) : 1, settle_type: p.settle_type === 'credit' ? 'credit' : 'prepaid', settled_base: r2(Number(p.settled_base) || 0), balance_threshold: p.balance_threshold == null ? null : Number(p.balance_threshold), term_days: p.term_days == null ? null : Number(p.term_days), start_date: p.start_date || '', profile: p.profile || '', customer_group: p.customer_group || '', relay: p.relay_id ? { id: p.relay_id, ref: p.relay_ref, station_id: p.relay_station_id || null, track_mode: p.relay_track_mode === 'key' ? 'key' : 'user', key_id: p.relay_key_id == null ? null : Number(p.relay_key_id), key_name: p.relay_key_name || '', group_id: p.relay_group_id == null ? null : Number(p.relay_group_id) } : null, totals: partyTotals(recs), settle };
 };
 const recordView = (r) => ({ id: r.id, party_id: r.party_id, kind: r.kind, amount: r.amount, currency: r.currency, rate: r.rate, cny: r2(recBase(r)), date: r.date, note: r.note, source: r.source, external_ref: r.external_ref, entry_id: r.entry_id, created_at: r.created_at, creator_name: r.creator_name || '' });
 function projectPartiesSummary(projectId, ptype) {
   const parties = q.partiesOfProject.all(projectId);
+  const projArchivedSet = new Set(db.prepare('SELECT party_id FROM project_suppliers WHERE project_id = ? AND archived = 1').all(projectId).map((r) => r.party_id));
   // 供应商是全局的：项目主动关联、或出现过往来记录 / 余额监控 / 前缀 / 流水，都算本项目的供应商
   const supplierIds = new Set([
     ...db.prepare('SELECT party_id FROM project_suppliers WHERE project_id = ?').all(projectId).map((r) => r.party_id),
@@ -1051,8 +1061,10 @@ function projectPartiesSummary(projectId, ptype) {
     if (p.kind === 'supplier') {
       const paid = view.recharge ? view.recharge.from_entries : 0;
       const walletUsed = ptype === 'relay' && view.wallet && view.wallet.used != null ? r2(view.wallet.used) : 0;
-      // 归档供应商不再按站点消费：站点送的额度不算，应付就是我们实际转出的钱（已扣退款）
-      const due = p.archived ? paid : r2(walletUsed + view.totals.due);
+      const projArchived = projArchivedSet.has(p.id);
+      view.project_archived = projArchived;
+      // 本项目已归档（或全局归档）的供应商不再按站点消费：站点送的额度不算，应付按我们在该项目实际转出的钱（已扣退款）
+      const due = (p.archived || projArchived) ? paid : r2(walletUsed + view.totals.due);
       view.project_settle = { due, paid, open: r2(due - paid) };
     }
     (p.kind === 'supplier' ? suppliers : customers).push(view);
@@ -3616,8 +3628,9 @@ app.post('/api/projects/:id/parties', auth, (req, res) => res.json({ party: part
 app.get('/api/parties/:id', auth, (req, res) => {
   const pa = q.party.get(Number(req.params.id));
   if (!pa) return fail(res, 404, '往来单位不存在');
+  const pid = req.query.project_id ? Number(req.query.project_id) : null;
   const records = q.recordsWithCreator.all(pa.id);
-  res.json({ party: partyView(pa, records), records: records.map(recordView), labels: PARTY_LABEL[pa.kind], relay_configured: relayConfigured() });
+  res.json({ party: partyView(pa, records, pid), records: records.map(recordView), labels: PARTY_LABEL[pa.kind], relay_configured: relayConfigured() });
 });
 app.patch('/api/parties/:id', auth, (req, res) => {
   const b = req.body || {};
@@ -3814,7 +3827,7 @@ app.post('/api/projects/:id/suppliers', auth, async (req, res, next) => {
     const partyId = Number(b.party_id);
     const pa = q.party.get(partyId);
     if (!pa || pa.kind !== 'supplier') return fail(res, 404, '供应商不存在');
-    db.prepare('INSERT OR IGNORE INTO project_suppliers (project_id, party_id, created_at) VALUES (?, ?, ?)').run(projectId, partyId, now());
+    db.prepare('INSERT INTO project_suppliers (project_id, party_id, created_at, archived) VALUES (?, ?, ?, 0) ON CONFLICT(project_id, party_id) DO UPDATE SET archived = 0').run(projectId, partyId, now());
     let bound = null;
     const keyIds = Array.isArray(b.key_ids) ? b.key_ids.filter(Boolean) : [];
     if (b.template_wallet_id && keyIds.length) {
@@ -3836,6 +3849,25 @@ app.post('/api/projects/:id/suppliers', auth, async (req, res, next) => {
     dataChanged(req.user, `在「${p.name}」关联了供应商「${pa.name}」${bound ? `（${bound.created} 把 Key）` : ''}`);
     res.json({ ok: true, party_id: partyId, bound });
   } catch (e) { next(e); }
+});
+app.patch('/api/projects/:id/suppliers/:partyId', auth, (req, res) => {
+  const projectId = Number(req.params.id);
+  const partyId = Number(req.params.partyId);
+  const p = q.project.get(projectId);
+  if (!p) return fail(res, 404, '项目不存在');
+  const pa = q.party.get(partyId);
+  if (!pa || pa.kind !== 'supplier') return fail(res, 404, '供应商不存在');
+  const archived = (req.body || {}).archived ? 1 : 0;
+  db.prepare(`
+    INSERT INTO project_suppliers (project_id, party_id, created_at, archived)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(project_id, party_id) DO UPDATE SET archived = excluded.archived
+  `).run(projectId, partyId, now(), archived);
+  supplierCostCache.clear();
+  profitCache = null;
+  refreshRelayForecasts().catch(() => {});
+  dataChanged(req.user, `在「${p.name}」${archived ? '归档' : '恢复'}了供应商「${pa.name}」`);
+  res.json({ ok: true, project_archived: !!archived });
 });
 app.delete('/api/projects/:id/suppliers/:partyId', auth, (req, res) => {
   const projectId = Number(req.params.id);
@@ -4129,7 +4161,7 @@ async function supplierDailyCost(onlyProject = null) {
     if (!segsBy.has(s.wallet_id)) segsBy.set(s.wallet_id, []);
     segsBy.get(s.wallet_id).push(s);
   }
-  const walletRows = db.prepare("SELECT w.*, p.name AS party_name, pr.ptype AS ptype FROM party_wallets w JOIN parties p ON p.id = w.party_id LEFT JOIN projects pr ON pr.id = w.project_id WHERE w.enabled = 1 AND p.archived = 0 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
+  const walletRows = db.prepare("SELECT w.*, p.name AS party_name, pr.ptype AS ptype FROM party_wallets w JOIN parties p ON p.id = w.party_id LEFT JOIN projects pr ON pr.id = w.project_id LEFT JOIN project_suppliers ps ON ps.project_id = w.project_id AND ps.party_id = w.party_id WHERE w.enabled = 1 AND p.archived = 0 AND COALESCE(ps.archived, 0) = 0 AND p.kind = 'supplier'" + (onlyProject ? ' AND w.project_id = ?' : '')).all(...(onlyProject ? [onlyProject] : []));
   // 项目级期初成本：项目上直接设的总期初（中转制）。行没单独设期初时，这行只算起点后新增，期初由项目层扛
   const projOpenings = new Map(db.prepare("SELECT id, opening_cost FROM projects WHERE ptype = 'relay' AND opening_cost IS NOT NULL").all().map((r) => [r.id, Number(r.opening_cost)]));
   const seen = new Set();
@@ -4281,8 +4313,8 @@ function refreshRelayForecasts() {
       const { byKey, lifetime: costLifetime } = await supplierDailyCost();
       // 按天消耗只有近 30 天，更早的用站点累计 − 近 30 天，并按切日前的倍率折算
       const lifetime = costLifetime || new Map();
-      // 归档供应商：消费 = 实际转出 − 退回，不按站点累计（站点送的额度不算）；同时计入 lifetime，避免被 earlier = lifetime − recentSupplier 抵消
-      for (const e of db.prepare("SELECT e.project_id, e.type, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE pa.kind = 'supplier' AND pa.archived = 1 AND e.project_id IS NOT NULL").all()) {
+      // 项目级归档（或全局归档）的供应商：消费 = 在该项目实际转出 − 退回，不按站点累计（站点送的额度不算）；同时计入 lifetime，避免被 earlier = lifetime − recentSupplier 抵消
+      for (const e of db.prepare("SELECT e.project_id, e.type, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id LEFT JOIN project_suppliers ps ON ps.project_id = e.project_id AND ps.party_id = e.party_id WHERE pa.kind = 'supplier' AND e.project_id IS NOT NULL AND (pa.archived = 1 OR COALESCE(ps.archived, 0) = 1)").all()) {
         const cny = e.currency === 'CNY' ? e.amount : e.amount * (Number(e.rate) || 0);
         const sign = e.type === 'income' ? -1 : 1;
         byKey.set(`${e.project_id}|${e.date}`, r2((byKey.get(`${e.project_id}|${e.date}`) || 0) + sign * cny));

@@ -18,10 +18,14 @@ function rowOf(v: Party) {
   return { due: v.settle.due_cny, paid: v.settle.paid_cny, open: v.settle.open_cny };
 }
 
+function isRowArchived(v: Party) {
+  return v.kind === "supplier" ? !!(v.project_archived || v.archived) : v.archived;
+}
+
 function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; detail: ProjectDetail }) {
   const { openParty, openPartyNew } = useLedger();
   const L = PL[kind];
-  const sorted = [...list].sort((a, b) => rowOf(b).due - rowOf(a).due);
+  const sorted = [...list].sort((a, b) => Number(isRowArchived(a)) - Number(isRowArchived(b)) || rowOf(b).due - rowOf(a).due);
   const sum = sorted.reduce((a, v) => { const r = rowOf(v); return { due: a.due + r.due, paid: a.paid + r.paid, open: a.open + r.open }; }, { due: 0, paid: 0, open: 0 });
   return (
     <Card>
@@ -58,11 +62,16 @@ function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; d
           <TableBody className="tabular-nums">
             {sorted.map((v) => {
               const r = rowOf(v);
+              const arch = isRowArchived(v);
               return (
-                <TableRow key={v.id} className="cursor-pointer" onClick={() => openParty(v.id, detail.project.id)}>
+                <TableRow
+                  key={v.id}
+                  className={cn("cursor-pointer", arch && "opacity-60")}
+                  onClick={() => openParty(v.id, detail.project.id)}
+                >
                   <TableCell className="font-medium">
                     {v.name}
-                    {v.archived ? <Badge variant="outline" className="ml-1.5">归档</Badge> : null}
+                    {arch ? <Badge variant="outline" className="ml-1.5">已归档</Badge> : null}
                   </TableCell>
                   <TableCell className="text-right">{money(r.due)}</TableCell>
                   <TableCell className="text-right">{money(r.paid)}</TableCell>

@@ -887,7 +887,10 @@ function PartyDetailView({
   onClose: () => void;
 }) {
   const router = useRouter();
-  const { data, isLoading, error } = useParty(id);
+  const qc = useQueryClient();
+  const refresh = useLedgerRefresh();
+  const [archBusy, setArchBusy] = useState(false);
+  const { data, isLoading, error } = useParty(id, projectId);
   const hasRelay = !!data?.party.relay;
   const live = useQuery({
     queryKey: qk.partyRelay(id),
@@ -918,7 +921,26 @@ function PartyDetailView({
   }
   const v = data.party;
   const L = PL[v.kind];
-  if (editing) return <EditPartyForm party={v} onBack={() => setMode("view")} onDeleted={onDeleted} />;
+  if (editing) {
+    return <EditPartyForm party={v} projectId={projectId} onBack={() => setMode("view")} onDeleted={onDeleted} />;
+  }
+
+  const isProjectSupplier = v.kind === "supplier" && !!projectId;
+  const projArchived = !!v.project_archived;
+  const toggleProjectArchive = async () => {
+    if (!projectId) return;
+    setArchBusy(true);
+    try {
+      await patch(`/projects/${projectId}/suppliers/${v.id}`, { archived: !projArchived });
+      toast.success(projArchived ? "已在本项目恢复" : "已在本项目归档（不影响供应商总列表）");
+      qc.invalidateQueries({ queryKey: ["ledger", "party", v.id] });
+      refresh();
+    } catch (ex) {
+      toast.error((ex as Error).message);
+    } finally {
+      setArchBusy(false);
+    }
+  };
 
   const liveData = live.data ?? (live.error ? ({ error: live.error.message } as RelayLive) : undefined);
   const st0 = liveData?.settlement ?? v.settle;
@@ -934,7 +956,11 @@ function PartyDetailView({
               <Badge variant="outline">
                 {v.settle_type === "credit" ? (v.kind === "supplier" ? "授信" : "后付") : "预付"}
               </Badge>
-              {v.archived ? <Badge variant="outline">归档</Badge> : null}
+              {isProjectSupplier && projArchived ? (
+                <Badge variant="outline">本项目已归档</Badge>
+              ) : v.archived ? (
+                <Badge variant="outline">归档</Badge>
+              ) : null}
             </SheetTitle>
             <SheetDescription>{[v.project_name, v.contact, v.note].filter(Boolean).join(" · ")}</SheetDescription>
             {siteUrls.length ? (
@@ -956,6 +982,17 @@ function PartyDetailView({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-1">
+            {isProjectSupplier ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={archBusy}
+                onClick={toggleProjectArchive}
+                title="仅在本项目标记为已归档，不影响全局供应商列表与其他项目"
+              >
+                {projArchived ? "恢复合作" : "本项目归档"}
+              </Button>
+            ) : null}
             {v.kind === "supplier" ? (
               <Button
                 variant="outline"
@@ -1017,7 +1054,11 @@ function PartyDetailView({
         {v.kind === "customer" && v.relay && v.relay.track_mode !== "key" ? <RelayGroups party={v} /> : null}
 
         {/* 项目往来内去掉记应付 / 记实付 */}
-        {v.archived ? (
+        {isProjectSupplier && projArchived ? (
+          <p className="text-muted-foreground text-sm">
+            该供应商在本项目已归档（不再发力，本项目应付按实际转出计算），仍保留在全局供应商列表中
+          </p>
+        ) : v.archived ? (
           <p className="text-muted-foreground text-sm">已归档，只能查看</p>
         ) : projectId && v.kind === "supplier" ? null : (
           <RecordForm party={v} />
@@ -1101,7 +1142,7 @@ function RelayBlock({
   };
 
   const reload = () => {
-    qc.invalidateQueries({ queryKey: qk.party(v.id) });
+    qc.invalidateQueries({ queryKey: ["ledger", "party", v.id] });
     qc.invalidateQueries({ queryKey: qk.partyRelay(v.id) });
     refresh();
   };
@@ -1610,11 +1651,22 @@ function RecordList({ party: v, records }: { party: Party; records: import("../t
   );
 }
 
-function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: () => void; onDeleted: () => void }) {
+function EditPartyForm({
+  party: v,
+  projectId,
+  onBack,
+  onDeleted,
+}: {
+  party: Party;
+  projectId?: number;
+  onBack: () => void;
+  onDeleted: () => void;
+}) {
   const refresh = useLedgerRefresh();
   const qc = useQueryClient();
   const [confirm, confirmEl] = useConfirm();
   const L = PL[v.kind];
+  const isProjectSupplier = v.kind === "supplier" && !!projectId;
   const [name, setName] = useState(v.name);
   const [contact, setContact] = useState(v.contact);
   const [currency, setCurrency] = useState<Currency>(v.currency);
@@ -1632,7 +1684,7 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   useEffect(() => setError(null), [v.id]);
 
   const reload = () => {
-    qc.invalidateQueries({ queryKey: qk.party(v.id) });
+    qc.invalidateQueries({ queryKey: ["ledger", "party", v.id] });
     qc.invalidateQueries({ queryKey: qk.partyRelay(v.id) });
     refresh();
   };
@@ -1669,8 +1721,14 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
   };
   const archive = async () => {
     try {
-      await patch(`/parties/${v.id}`, { archived: !v.archived });
-      toast.success(v.archived ? "已恢复" : "已归档");
+      if (isProjectSupplier && projectId) {
+        const next = !v.project_archived;
+        await patch(`/projects/${projectId}/suppliers/${v.id}`, { archived: next });
+        toast.success(next ? "已在本项目归档（不影响供应商总列表）" : "已在本项目恢复");
+      } else {
+        await patch(`/parties/${v.id}`, { archived: !v.archived });
+        toast.success(v.archived ? "已恢复" : "已归档");
+      }
       reload();
       onBack();
     } catch (ex) {
@@ -1831,11 +1889,19 @@ function EditPartyForm({ party: v, onBack, onDeleted }: { party: Party; onBack: 
           <Button type="submit">保存</Button>
         </div>
         <Button type="button" variant="outline" className="w-full" onClick={archive}>
-          {v.archived ? "恢复" : "归档"}
+          {isProjectSupplier
+            ? v.project_archived
+              ? "在本项目恢复合作"
+              : "在本项目归档"
+            : v.archived
+              ? "恢复"
+              : "归档"}
         </Button>
         {v.kind === "supplier" ? (
           <p className="text-muted-foreground text-xs">
-            不再合作的供应商归档后，消费按我们实际转出的钱计算，不再用站点的累计消费
+            {isProjectSupplier
+              ? "仅在本项目标记为已归档（该供应商在此项目不再发力，本项目应付按实际转出计算），不会从全局供应商列表归档，也不影响其他项目"
+              : "不再合作的供应商全局归档后，将从活跃供应商列表隐藏，消费按我们实际转出的钱计算"}
           </p>
         ) : null}
         <Button type="button" variant="outline" className="text-destructive w-full" onClick={remove}>

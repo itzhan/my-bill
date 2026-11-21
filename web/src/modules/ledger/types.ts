@@ -191,6 +191,8 @@ export type Party = {
   currency: Currency;
   external_id: string;
   archived: boolean;
+  // 供应商在当前项目内是否已归档（仅表示在此项目不再发力，不影响全局供应商列表）
+  project_archived?: boolean;
   created_at: string;
   ratio: number;
   relay: { id: number; ref: string; station_id?: number | null; track_mode?: "user" | "key"; key_id?: number | null; key_name?: string; group_id?: number | null } | null;

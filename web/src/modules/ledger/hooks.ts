@@ -22,7 +22,8 @@ export const qk = {
   me: ["ledger", "me"] as const,
   projects: ["ledger", "projects"] as const,
   project: (id: number) => ["ledger", "project", id] as const,
-  party: (id: number) => ["ledger", "party", id] as const,
+  party: (id: number, projectId?: number) =>
+    projectId ? (["ledger", "party", id, projectId] as const) : (["ledger", "party", id] as const),
   partyRelay: (id: number) => ["ledger", "party-relay", id] as const,
   report: (qs: string) => ["ledger", "report", qs] as const,
   exports: ["ledger", "exports"] as const,
@@ -39,8 +40,12 @@ export const useProjects = () => useQuery({ queryKey: qk.projects, queryFn: () =
 export const useProject = (id: number) =>
   useQuery({ queryKey: qk.project(id), queryFn: () => get<ProjectDetail>(`/projects/${id}`), retry: false });
 
-export const useParty = (id: number | null) =>
-  useQuery({ queryKey: qk.party(id ?? 0), queryFn: () => get<PartyDetail>(`/parties/${id}`), enabled: !!id });
+export const useParty = (id: number | null, projectId?: number) =>
+  useQuery({
+    queryKey: qk.party(id ?? 0, projectId),
+    queryFn: () => get<PartyDetail>(projectId ? `/parties/${id}?project_id=${projectId}` : `/parties/${id}`),
+    enabled: !!id,
+  });
 
 export const useReport = (qs: string, enabled = true) =>
   useQuery({
