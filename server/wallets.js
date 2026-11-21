@@ -176,8 +176,113 @@ async function newapiSelf(base, token, userId, qpu, insecure) {
   return { ok: true, wallet: round(num(u.quota) / qpu, 4), used: round(num(u.used_quota) / qpu, 4), group: u.group || "" };
 }
 
-// sub2api：/v1/usage 拿钱包（balance），/v1/sub2api/billing 拿倍率；老版本没有 billing 接口时用 实际扣费 / 标准费用 反推
-async function fetchSub2api(base, key, wantRatio, insecure) {
+// sub2api 登录态鉴权：优先邮箱密码登录（不会过期且自带最新余额），其次使用用户填写的 JWT 访问令牌
+async function sub2apiAuth(base, w) {
+  const insecure = !!w.insecure;
+  if (w.login_user && w.login_pass) {
+    const lr = await httpJson(`${base}/api/v1/auth/login`, {
+      method: "POST",
+      body: { email: w.login_user, password: w.login_pass },
+      insecure,
+    });
+    const jwt = lr.ok && lr.json?.data ? lr.json.data.access_token : null;
+    if (!jwt) {
+      throw new Error(`站点登录失败：${(lr.json && (lr.json.message || lr.json.error?.message)) || lr.error || "账号或密码不对"}`);
+    }
+    return { jwt, user: lr.json.data.user || null };
+  }
+  if (w.access_token) {
+    const me = await httpJson(`${base}/api/v1/auth/me`, { key: w.access_token, insecure });
+    if (!me.ok || !me.json?.data) {
+      throw new Error(`访问令牌无效或已过期：${(me.json && (me.json.message || me.json.error?.message)) || me.error || "请改用邮箱密码或重新获取令牌"}`);
+    }
+    return { jwt: w.access_token, user: me.json.data };
+  }
+  return null;
+}
+
+function parseSub2apiKeyId(remoteKeyId) {
+  const m = String(remoteKeyId || "").match(/^sub2api:(\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
+function sub2apiPlatformType(p) {
+  const s = String(p || "").toLowerCase();
+  if (s.includes("anthropic") || s.includes("claude")) return "Claude";
+  if (s.includes("gemini") || s.includes("google")) return "Gemini";
+  if (s.includes("openai") || s.includes("gpt")) return "GPT";
+  if (s.includes("grok") || s.includes("xai")) return "Grok";
+  if (s.includes("deepseek")) return "DeepSeek";
+  if (s.includes("qwen")) return "Qwen";
+  return s ? s : "其他";
+}
+
+// sub2api：有邮箱密码 / JWT 时直接走面板接口（账户模式读全账号余额/累计/今日；Key 模式按 api_key_id 读单把 Key 全量与今日，哪怕 Key 已停用也能读）；
+// 仅有 API Key 时回退走 /v1/usage 与 /v1/sub2api/billing
+async function fetchSub2api(base, key, wantRatio, insecure, opts = {}) {
+  const hasPanelAuth = !!(opts.login_user && opts.login_pass) || !!opts.access_token;
+  if (hasPanelAuth) {
+    const auth = await sub2apiAuth(base, {
+      login_user: opts.login_user,
+      login_pass: opts.login_pass,
+      access_token: opts.access_token,
+      insecure,
+    });
+    if (auth) {
+      const { jwt, user } = auth;
+      let wallet = num(user?.balance);
+      if (wallet === null) {
+        const me = await httpJson(`${base}/api/v1/auth/me`, { key: jwt, insecure });
+        wallet = num(me.ok ? me.json?.data?.balance : null);
+      }
+      const todayKey = walletToday();
+      const isKeyMode = opts.cost_mode === "key";
+      let keyId = isKeyMode ? parseSub2apiKeyId(opts.remote_key_id) : null;
+      if (isKeyMode && !keyId && (key || opts.name)) {
+        const kr = await httpJson(`${base}/api/v1/keys?page=1&page_size=100`, { key: jwt, insecure });
+        const items = (kr.ok && kr.json?.data?.items) || [];
+        const hit = (key && items.find((t) => t.key === key)) || (opts.name && items.find((t) => t.name === opts.name));
+        if (hit) keyId = Number(hit.id);
+      }
+      if (isKeyMode && keyId) {
+        const [allR, todayR] = await Promise.all([
+          httpJson(`${base}/api/v1/usage/stats?api_key_id=${keyId}&start_date=2020-01-01&end_date=${todayKey}`, { key: jwt, insecure }),
+          httpJson(`${base}/api/v1/usage/stats?api_key_id=${keyId}&start_date=${todayKey}&end_date=${todayKey}`, { key: jwt, insecure }),
+        ]);
+        const ad = allR.ok ? allR.json?.data : null;
+        const td = todayR.ok ? todayR.json?.data : null;
+        const used = ad ? num(ad.total_actual_cost ?? ad.total_cost) : null;
+        const today = td ? num(td.total_actual_cost ?? td.total_cost) : 0;
+        let ratio = null;
+        let source = "";
+        if (wantRatio && ad && num(ad.total_cost) > 0 && num(ad.total_actual_cost) !== null) {
+          ratio = round(num(ad.total_actual_cost) / num(ad.total_cost), 4);
+          source = "usage";
+        }
+        return { wallet, kind: "wallet", used, today, ratio, source, remoteKeyId: `sub2api:${keyId}` };
+      }
+      const st = await httpJson(`${base}/api/v1/usage/dashboard/stats`, { key: jwt, insecure });
+      const sd = st.ok ? st.json?.data : null;
+      let used = sd ? num(sd.total_actual_cost ?? sd.total_cost) : null;
+      let today = sd ? num(sd.today_actual_cost ?? sd.today_cost) : null;
+      if (used === null) {
+        const allR = await httpJson(`${base}/api/v1/usage/stats?start_date=2020-01-01&end_date=${todayKey}`, { key: jwt, insecure });
+        used = allR.ok ? num(allR.json?.data?.total_actual_cost ?? allR.json?.data?.total_cost) : null;
+      }
+      if (today === null) {
+        const todayR = await httpJson(`${base}/api/v1/usage/stats?start_date=${todayKey}&end_date=${todayKey}`, { key: jwt, insecure });
+        today = todayR.ok ? num(todayR.json?.data?.total_actual_cost ?? todayR.json?.data?.total_cost) : null;
+      }
+      let ratio = null;
+      let source = "";
+      if (wantRatio && sd && num(sd.total_cost) > 0 && num(sd.total_actual_cost) !== null) {
+        ratio = round(num(sd.total_actual_cost) / num(sd.total_cost), 4);
+        source = "usage";
+      }
+      return { wallet, kind: "wallet", used, today, ratio, source };
+    }
+  }
+  if (!key) throw new Error("请填写 sub2api 登录邮箱密码、访问令牌或 API Key");
   const u = await httpJson(`${base}/v1/usage`, { key, insecure });
   if (!u.ok) throw new Error(`读取余额失败：${u.status === 401 ? "Key 无效或已禁用（编辑里点「从站点读取 Key 列表」重新绑定一把）" : u.error}`);
   const d = u.json;
@@ -197,7 +302,11 @@ async function fetchSub2api(base, key, wantRatio, insecure) {
     kind = "wallet";
   }
   const used = num(d.usage?.total?.actual_cost); // 这把 Key 的累计实际扣费
-  if (!wantRatio) return { wallet, kind, used };
+  const todayKey = walletToday();
+  const byDay = d.usage?.by_day || d.usage?.daily || {};
+  const tRaw = d.usage?.today ?? byDay[todayKey];
+  const today = tRaw != null ? num(typeof tRaw === "object" ? tRaw.actual_cost ?? tRaw.cost : tRaw) : null;
+  if (!wantRatio) return { wallet, kind, used, today };
 
   let ratio = null;
   let source = "";
@@ -212,7 +321,7 @@ async function fetchSub2api(base, key, wantRatio, insecure) {
       source = "usage";
     } else source = b.status === 403 ? "Key 没有分组，读不到倍率" : "读不到倍率（这把 Key 还没有消费记录）";
   }
-  return { wallet, kind, used, ratio, source };
+  return { wallet, kind, used, today, ratio, source };
 }
 
 // new-api 倍率：优先账户分组（登录时），否则最近一条消费日志里的分组倍率，最后退回 /api/pricing 的 default
@@ -504,10 +613,63 @@ async function fetchNewapiDetail(w) {
   };
 }
 
-// sub2api：用 Key 只能拿到按模型/按天的消耗，拿不到按分组的拆分（那要登录态）
+// sub2api：有邮箱密码 / JWT 时通过面板接口拿分组、近 30 天按天趋势和按模型消耗；仅 API Key 时回退走 /v1/usage
 async function fetchSub2apiDetail(w) {
   const base = baseOf(w.base_url);
   const insecure = !!w.insecure;
+  if ((w.login_user && w.login_pass) || w.access_token) {
+    const auth = await sub2apiAuth(base, w);
+    if (auth) {
+      const { jwt } = auth;
+      const todayKey = walletToday();
+      const startKey = addDaysKey(todayKey, -29);
+      const keyId = w.cost_mode === "key" ? parseSub2apiKeyId(w.remote_key_id) : null;
+      const keyQs = keyId ? `&api_key_id=${keyId}` : "";
+      const [gRes, tRes, mRes] = await Promise.all([
+        httpJson(`${base}/api/v1/groups/available`, { key: jwt, insecure }),
+        httpJson(`${base}/api/v1/usage/dashboard/trend?start_date=${startKey}&end_date=${todayKey}&granularity=day${keyQs}`, { key: jwt, insecure }),
+        httpJson(`${base}/api/v1/usage/dashboard/models?start_date=${startKey}&end_date=${todayKey}${keyQs}`, { key: jwt, insecure }),
+      ]);
+      const gRaw = gRes.ok && Array.isArray(gRes.json?.data) ? gRes.json.data : [];
+      const groups = gRaw
+        .map((g) => ({
+          name: g.name || "",
+          ratio: num(g.rate_multiplier),
+          desc: g.description || "",
+          model_count: 0,
+          types: [sub2apiPlatformType(g.platform)],
+        }))
+        .sort((a, b) => (b.ratio || 0) - (a.ratio || 0));
+      const tRaw = tRes.ok && Array.isArray(tRes.json?.data?.trend) ? tRes.json.data.trend : [];
+      const daily = tRaw
+        .map((x) => ({
+          date: x.date,
+          usd: round(num(x.actual_cost ?? x.cost) || 0, 4),
+          count: num(x.requests) || 0,
+        }))
+        .sort((a, b) => (a.date < b.date ? -1 : 1));
+      const mRaw = mRes.ok && Array.isArray(mRes.json?.data?.models) ? mRes.json.data.models : [];
+      const byModel = mRaw
+        .map((x) => ({
+          model: x.model || "",
+          usd: round(num(x.actual_cost ?? x.cost) || 0, 4),
+          count: num(x.requests) || 0,
+          tokens: num(x.total_tokens) || 0,
+        }))
+        .sort((a, b) => b.usd - a.usd);
+      const periodUsed = round(daily.reduce((a, x) => a + x.usd, 0), 4);
+      return {
+        platform: "sub2api",
+        groups,
+        byGroup: [],
+        byModel,
+        daily,
+        groupDaily: {},
+        period_days: 30,
+        period_used: periodUsed,
+      };
+    }
+  }
   const u = await httpJson(`${base}/v1/usage`, { key: w.api_key, insecure });
   if (!u.ok) throw new Error(`读取失败：${u.error}`);
   const d = u.json || {};
@@ -579,7 +741,14 @@ async function fetchWallet(w) {
   const login = w.login_user && w.login_pass ? [[w.login_user, w.login_pass]] : Array.isArray(w.login_candidates) ? w.login_candidates : [];
   const r =
     w.platform === "sub2api"
-      ? await fetchSub2api(base, w.api_key, wantRatio, insecure) // sub2api 的 /v1/usage 本来就是这把 Key 的消耗
+      ? await fetchSub2api(base, w.api_key, wantRatio, insecure, {
+          login_user: w.login_user,
+          login_pass: w.login_pass,
+          access_token: w.access_token,
+          cost_mode: w.cost_mode,
+          remote_key_id: w.remote_key_id || "",
+          name: w.name,
+        })
       : await fetchNewapi(base, w.api_key, wantRatio, login, insecure, token, w.cost_mode === "key", { name: w.name, remoteKeyId: w.remote_key_id || "" });
   // 自定义：充值倍率（custom_ratio）算实际余额；消耗倍率（consume_ratio，默认 1）算实际消费
   const ratio = w.custom ? num(w.custom_ratio) : r.ratio ?? null;
@@ -785,34 +954,11 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     if (!w) throw new HttpError(404, '余额监控不存在');
     const t = nowIso();
     try {
-      if (!w.api_key && !(w.platform === 'newapi' && w.access_token)) {
-        if (w.platform === 'sub2api' && ((w.login_user && w.login_pass) || w.access_token)) {
-          // sub2api 站点级监控（无 api_key）：通过登录态/令牌读全站 Key 汇总消费，并用首把可用 Key 读余额
-          const remoteKeys = await listRemoteKeys(w);
-          const active = remoteKeys.filter((k) => k.status === '启用' && k.key_full);
-          const totalUsed = remoteKeys.reduce((a, k) => a + (num(k.used) || 0), 0);
-          let bal = null;
-          let ratio = null;
-          let source = '';
-          if (active.length) {
-            try {
-              const probe = await fetchSub2api(baseOf(w.base_url), active[0].key_full, !w.custom, !!w.insecure);
-              bal = probe.wallet;
-              ratio = probe.ratio ?? null;
-              source = probe.source || '';
-            } catch { /* 余额探测失败不影响消费汇总 */ }
-          }
-          const segs = qRatesOf.all(id);
-          const today = walletToday();
-          const cr = w.custom ? consumeRatioOn(w, today, segs) : 1;
-          const customR = w.custom ? customRatioOn(w, today, segs) : ratio;
-          const actual = bal == null ? null : w.custom ? (customR == null ? null : round(bal * customR, 4)) : round(bal, 4);
-          const adjust = num(w.used_adjust) || 0;
-          const usedActual = Math.max(0, round(totalUsed * cr - adjust, 4));
-          db.prepare("UPDATE party_wallets SET last_wallet = ?, last_wallet_kind = ?, last_ratio = ?, last_ratio_source = ?, last_actual = ?, last_used = ?, last_used_actual = ?, last_error = '', last_checked_at = ? WHERE id = ?")
-            .run(bal, bal == null ? '' : 'wallet', w.custom ? customR : ratio, w.custom ? 'custom' : source, actual, round(totalUsed, 4), usedActual, t, id);
-          return view(getOne.get(id));
-        }
+      const hasAuth =
+        !!w.api_key ||
+        (w.platform === 'newapi' && !!w.access_token) ||
+        (w.platform === 'sub2api' && (!!(w.login_user && w.login_pass) || !!w.access_token));
+      if (!hasAuth) {
         throw new Error('还没有填 API Key（new-api 填访问令牌、sub2api 填账号密码或访问令牌时可不填）');
       }
       const r = await fetchWallet(w);
@@ -1027,13 +1173,29 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
     const kr = await httpJson(`${base}/api/v1/keys?page=1&page_size=100`, { key: jwt, insecure });
     if (!kr.ok) throw new HttpError(502, `读取 Key 列表失败：${kr.error}`);
     const items = (kr.json.data && kr.json.data.items) || [];
+    const todayKey = walletToday();
+    // sub2api 未设 quota 的 Key 的 quota_used 常为 0，并发补拉每把 Key 的全量实际消费，方便勾选识别
+    const usedById = new Map();
+    const queue = items.slice(0, 30);
+    await Promise.all(
+      Array.from({ length: Math.min(4, queue.length) }, async () => {
+        while (queue.length) {
+          const t = queue.shift();
+          const sr = await httpJson(`${base}/api/v1/usage/stats?api_key_id=${t.id}&start_date=2020-01-01&end_date=${todayKey}`, { key: jwt, insecure });
+          if (sr.ok && sr.json?.data) {
+            const c = num(sr.json.data.total_actual_cost ?? sr.json.data.total_cost);
+            if (c !== null) usedById.set(t.id, round(c, 4));
+          }
+        }
+      }),
+    );
     return items.map((t) => ({
       id: `sub2api:${t.id}`,
       name: str(t.name, 100) || '(未命名)',
       key_full: String(t.key || ''),
-      used: num(t.quota_used),
+      used: usedById.has(t.id) ? usedById.get(t.id) : num(t.quota_used),
       remain: num(t.quota) > 0 ? round(num(t.quota) - (num(t.quota_used) || 0), 4) : null,
-      status: t.status === 'active' ? '启用' : t.status === 'disabled' ? '禁用' : String(t.status ?? ''),
+      status: t.status === 'active' ? '启用' : t.status === 'disabled' || t.status === 'inactive' ? '停用' : String(t.status ?? ''),
       last_used_at: t.last_used_at || null,
     }));
   }
