@@ -3619,7 +3619,16 @@ app.get('/api/parties/:id', auth, (req, res) => {
   const records = q.recordsWithCreator.all(pa.id);
   res.json({ party: partyView(pa, records), records: records.map(recordView), labels: PARTY_LABEL[pa.kind], relay_configured: relayConfigured() });
 });
-app.patch('/api/parties/:id', auth, (req, res) => res.json({ party: partyView(ops.updateParty(req.user, req.params.id, req.body || {})) }));
+app.patch('/api/parties/:id', auth, (req, res) => {
+  const b = req.body || {};
+  const party = ops.updateParty(req.user, req.params.id, b);
+  if (b.archived !== undefined) {
+    supplierCostCache.clear();
+    profitCache = null;
+    refreshRelayForecasts().catch(() => {});
+  }
+  res.json({ party: partyView(party) });
+});
 app.post('/api/parties/:id/relay-link', auth, async (req, res, next) => { try { const b = req.body || {}; res.json({ live: await linkPartyRelay(req.user, req.params.id, b.ref, { ratio: b.ratio, currency: b.currency, mode: b.mode, key_id: b.key_id, key_name: b.key_name, group_id: b.group_id, panel_pass: b.panel_pass, station_id: b.station_id, user_id: b.user_id }) }); } catch (e) { next(e); } });
 app.post('/api/relay/admin-keys', auth, async (req, res, next) => {
   try {
@@ -4105,10 +4114,13 @@ let profitCache = null;
 // 供应商每日实际消费（人民币）：站点每日消耗 × 消耗倍率，同一项目同一站点只算一次。
 // 只抓按天消耗（不读分组和模型），并发抓，结果缓存 10 分钟，打开项目页不用每次重新打十几个站点
 const supplierCostCache = new Map();
+function cloneSupplierCost(d) {
+  return { byKey: new Map(d.byKey), lifetime: new Map(d.lifetime), errors: [...d.errors] };
+}
 async function supplierDailyCost(onlyProject = null) {
   const key = String(onlyProject || 'all');
   const hit = supplierCostCache.get(key);
-  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.data;
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return cloneSupplierCost(hit.data);
   const byKey = new Map();
   const lifetime = new Map();
   const errors = [];
@@ -4156,8 +4168,9 @@ async function supplierDailyCost(onlyProject = null) {
           lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + total));
           continue;
         }
-        // 多算扣减从最早的一天开始减，减完再算进项目
-        let adjust = Number(w.used_adjust) || 0;
+        // 多算扣减从最早的一天开始减，减完再算进项目；earlierRaw 基于扣减后的总消耗计算，避免把已扣减额度又补回来
+        const totalAdjust = Number(w.used_adjust) || 0;
+        let adjust = totalAdjust;
         let recentRaw = 0, recentCost = 0;
         for (const x of daily) {
           let usd = x.usd || 0;
@@ -4170,8 +4183,7 @@ async function supplierDailyCost(onlyProject = null) {
         const rawUsed = Number(w.last_used) || 0;
         let siteLifetime;
         if (rawUsed > 0) {
-          let earlierRaw = Math.max(0, rawUsed - recentRaw);
-          if (adjust > 0) earlierRaw = Math.max(0, earlierRaw - adjust);
+          const earlierRaw = Math.max(0, rawUsed - totalAdjust - recentRaw);
           const earlierDate = daily.length ? addDays(daily[0].date, -1) : '1970-01-01';
           siteLifetime = earlierRaw * consumeRatioOn(w, earlierDate, segs) + recentCost;
         } else {
@@ -4192,7 +4204,7 @@ async function supplierDailyCost(onlyProject = null) {
   }));
   const data = { byKey, lifetime, errors };
   supplierCostCache.set(key, { at: Date.now(), data });
-  return data;
+  return cloneSupplierCost(data);
 }
 // 中转制预估利润：客户分组收费（没设分组价才用消耗 × 折扣）− 付给供应商的钱（站点每日消耗 × 消耗倍率）
 function relayForecastOf(projectId, byKey) {
@@ -4264,11 +4276,12 @@ async function refreshRelayForecasts() {
     const { byKey, lifetime: costLifetime } = await supplierDailyCost();
     // 按天消耗只有近 30 天，更早的用站点累计 − 近 30 天，并按切日前的倍率折算
     const lifetime = costLifetime || new Map();
-    // 归档供应商：消费 = 实际转出 − 退回，不按站点累计（站点送的额度不算）
+    // 归档供应商：消费 = 实际转出 − 退回，不按站点累计（站点送的额度不算）；同时计入 lifetime，避免被 earlier = lifetime − recentSupplier 抵消
     for (const e of db.prepare("SELECT e.project_id, e.type, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE pa.kind = 'supplier' AND pa.archived = 1 AND e.project_id IS NOT NULL").all()) {
       const cny = e.currency === 'CNY' ? e.amount : e.amount * (Number(e.rate) || 0);
       const sign = e.type === 'income' ? -1 : 1;
       byKey.set(`${e.project_id}|${e.date}`, r2((byKey.get(`${e.project_id}|${e.date}`) || 0) + sign * cny));
+      lifetime.set(e.project_id, r2((lifetime.get(e.project_id) || 0) + sign * cny));
     }
     for (const p of q.projects.all()) {
       if (p.ptype !== 'relay') continue;
