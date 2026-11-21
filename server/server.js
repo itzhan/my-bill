@@ -2500,7 +2500,7 @@ async function syncRelayNonGroupDaily(pa) {
   const today = todayKey();
   const filt = keyId ? { api_key_id: keyId } : { user_id: pa.relay_id };
   const [liveTrend, histDaily, liveAllRaw, histAll] = await Promise.all([
-    relayGet('/admin/dashboard/trend', { granularity: 'day', days: 90, ...filt }, station).catch(() => ({ trend: [] })),
+    relayGet('/admin/dashboard/trend', { granularity: 'day', start_date: addDays(today, -89), end_date: today, ...filt }, station).catch(() => ({ trend: [] })),
     useHist ? relayHistSafe(() => relayHist.queryDaily({ userId: pa.relay_id, apiKeyId: keyId || null, startDate: ALL_TIME, endDate: today }), []) : [],
     relayGet('/admin/usage/stats', { ...filt, start_date: ALL_TIME, end_date: today }, station),
     useHist ? relayHistSafe(() => relayHist.queryStats({ userId: pa.relay_id, apiKeyId: keyId || null, startDate: ALL_TIME, endDate: today }), null) : null,
@@ -2594,10 +2594,10 @@ async function syncRelayEstimate() {
 setTimeout(syncRelayEstimate, 40 * 1000).unref();
 setInterval(syncRelayEstimate, 15 * 60 * 1000).unref();
 // 一次性：接入历史库后自动补齐所有中转客户 11.6 08:00 之前的分组用量与按日挂账（已执行过则跳过）
-if (relayHist.isEnabled() && getSetting('relay_hist_backfill_v1', '') === '') {
+if (relayHist.isEnabled() && getSetting('relay_hist_backfill_v2', '') === '') {
   setTimeout(() => {
     backfillRelayHistory().then((res) => {
-      q.putSetting.run('relay_hist_backfill_v1', now());
+      q.putSetting.run('relay_hist_backfill_v2', now());
       console.log(`[relay-hist] 首次历史回补完成（${res.count} 家）：`, JSON.stringify(res.results));
     }).catch((e) => console.error('[relay-hist] 首次历史回补失败：', e.message));
   }, 5 * 1000).unref();
