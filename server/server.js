@@ -4132,8 +4132,7 @@ async function supplierDailyCost(onlyProject = null) {
     while (queue.length) {
       const w = queue.shift();
       try {
-        // new-api 绑定 Key 模式没有 key 级按天接口（账户级按天是整个账户的，不能拿来拆这把 Key），不拉按天，新增全部落在「历史」行
-        const daily = w.platform === 'newapi' && w.cost_mode === 'key' ? [] : (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+        const daily = w.platform === 'newapi' && w.cost_mode === 'key' && !w.access_token ? [] : (await fetchDailyUsage(w)).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
         const segs = segsBy.get(w.id) || [];
         // 中转且设了期初（行级期初或项目级期初）：只把起点之后的消耗算进按天，期初和窗口前的新增放进 lifetime，由预估的「历史」行带上
         if (w.ptype === 'relay' && (w.opening_cost != null || projOpenings.has(w.project_id))) {
