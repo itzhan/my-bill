@@ -125,6 +125,7 @@ function LedgerReady({ me, children }: { me: Me; children: ReactNode }) {
       qc.invalidateQueries({ queryKey: ["ledger", "party"] });
       qc.invalidateQueries({ queryKey: ["ledger", "report"] });
       qc.invalidateQueries({ queryKey: ["ledger", "suppliers"] });
+      qc.invalidateQueries({ queryKey: ["ledger", "supplier-detail"] });
     };
     es.onerror = () => setConnected(false);
     es.addEventListener("hello", (ev) => {

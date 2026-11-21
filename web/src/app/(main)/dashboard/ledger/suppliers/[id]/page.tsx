@@ -5,7 +5,7 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDownLeft, ArrowLeft, ArrowUpRight, ExternalLink, Globe, KeyRound, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowDownLeft, ArrowLeft, ArrowUpRight, ExternalLink, Globe, Image as ImageIcon, KeyRound, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -20,12 +20,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { del, get, patch, post } from "@/modules/ledger/api";
+import { EntryDetailDialog } from "@/modules/ledger/components/entry-detail";
 import { amt, amtFull } from "@/modules/ledger/components/party-wallets";
 import { FormError, Pager, ResponsiveDialog, useConfirm, usePaged } from "@/modules/ledger/components/shared";
 import { curf, fmt0, money, relTime, signed } from "@/modules/ledger/format";
-import { useLedgerRefresh } from "@/modules/ledger/hooks";
+import { useLedgerRefresh, useMe } from "@/modules/ledger/hooks";
 import { useLedger } from "@/modules/ledger/provider";
-import type { ConsumePoint, SupplierDetail, SupplierSite, WalletDetail, WalletGroup } from "@/modules/ledger/types";
+import type { ConsumePoint, Entry, SupplierDetail, SupplierSite, WalletDetail, WalletGroup } from "@/modules/ledger/types";
 
 // 分组类型配色
 const TYPE_CLS: Record<string, string> = {
@@ -1040,6 +1041,10 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
 function FundsTab({ detail }: { detail: SupplierDetail }) {
   const { funds } = detail;
   const { rows, pager } = usePaged(funds.entries, "funds");
+  const { data: me } = useMe();
+  const { openEntry } = useLedger();
+  const [viewing, setViewing] = useState<Entry | null>(null);
+  const canEdit = !!viewing && !!me && viewing.created_by === me.user.id;
   const cards = [
     { label: "我们转给他", value: curf(funds.out, funds.currency), icon: ArrowUpRight, cls: "text-expense" },
     { label: "他转给我们", value: curf(funds.income, funds.currency), icon: ArrowDownLeft, cls: "text-income" },
@@ -1063,7 +1068,7 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">往来明细</CardTitle>
-          <CardDescription>挂在这个供应商名下的充值 / 结算（支出）与退款 / 换钱（收入）</CardDescription>
+          <CardDescription>挂在这个供应商名下的充值 / 结算（支出）与退款 / 换钱（收入），点击记录可查看详情与凭证</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto rounded-md border">
@@ -1081,11 +1086,17 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
               <TableBody>
                 {funds.entries.length ? (
                   rows.map((e) => (
-                    <TableRow key={e.id}>
+                    <TableRow
+                      key={e.id}
+                      className="cursor-pointer"
+                      onClick={() => setViewing(e)}
+                      title="点击查看这笔流水的详情与凭证"
+                    >
                       <TableCell className="text-muted-foreground text-xs whitespace-nowrap">{e.time}</TableCell>
                       <TableCell>
                         <Link
                           href={`/dashboard/ledger/members/${e.handler_id}`}
+                          onClick={(ev) => ev.stopPropagation()}
                           className="bg-secondary text-secondary-foreground hover:bg-secondary/70 inline-flex items-center rounded-full px-2 py-0.5 text-xs transition-colors"
                           title="查看该成员的详细流水"
                         >
@@ -1110,12 +1121,26 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
                       <TableCell>
                         <Link
                           href={`/dashboard/ledger/projects/${e.project_id}`}
+                          onClick={(ev) => ev.stopPropagation()}
                           className="text-primary text-xs hover:underline"
                         >
                           {e.project_name}
                         </Link>
                       </TableCell>
-                      <TableCell className="text-muted-foreground max-w-xs truncate text-xs">{e.note || "—"}</TableCell>
+                      <TableCell className="text-muted-foreground max-w-xs text-xs">
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate">{e.note || "—"}</span>
+                          {e.images?.length ? (
+                            <span
+                              className="text-muted-foreground inline-flex shrink-0 items-center gap-0.5"
+                              title={`含 ${e.images.length} 张图片凭证`}
+                            >
+                              <ImageIcon className="size-3.5" />
+                              {e.images.length > 1 ? e.images.length : null}
+                            </span>
+                          ) : null}
+                        </div>
+                      </TableCell>
                     </TableRow>
                   ))
                 ) : (
@@ -1131,6 +1156,15 @@ function FundsTab({ detail }: { detail: SupplierDetail }) {
           <Pager {...pager} className="mt-4" />
         </CardContent>
       </Card>
+      <EntryDetailDialog
+        entry={viewing}
+        canEdit={canEdit}
+        onOpenChange={(o) => !o && setViewing(null)}
+        onEdit={(e) => {
+          setViewing(null);
+          openEntry({ entry: e });
+        }}
+      />
     </div>
   );
 }

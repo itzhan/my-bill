@@ -4057,7 +4057,9 @@ app.get('/api/suppliers/:id/detail', auth, async (req, res) => {
   const entries = q.entriesTaggedParty.all(pa.id).map((e) => {
     const inCur = conv(e);
     if (e.type === 'income') income += inCur; else out += inCur;
-    return { id: e.id, time: fmtTZ(e.created_at), type: e.type, amount: e.amount, currency: e.currency, rate: e.rate, cny: r2(entryBase(e, rates)), in_cur: r2(inCur), project_id: e.project_id, project_name: e.project_name, note: e.note, handler: e.handler_name, handler_id: e.handler_id };
+    const base = r2(entryBase(e, rates));
+    // 完整 Entry（含 created_by / images 等），方便供应商往来明细点击查看详情并由登记人修改
+    return { ...e, base, images: entryImages(e), time: fmtTZ(e.created_at), cny: base, in_cur: r2(inCur), handler: e.handler_name };
   });
   // 其他项目贡献（上 key / 项目制 / 手工挂账）：按项目汇总 party_records due
   const projMap = new Map(q.projects.all().map((p) => [p.id, p]));

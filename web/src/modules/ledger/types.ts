@@ -271,21 +271,12 @@ export type PartyWallet = {
   last_error: string;
   last_checked_at: string | null;
 };
-// 供应商详情：资金往来（双向）+ 每把 Key 在站点的分组 / 每组消耗 / 每日消耗
-export type FundEntry = {
-  id: number;
+// 供应商详情：资金往来（双向完整流水）+ 每把 Key 在站点的分组 / 每组消耗 / 每日消耗
+export type FundEntry = Entry & {
   time: string;
-  type: EntryType;
-  amount: number;
-  currency: Currency;
-  rate: number | null;
   cny: number;
   in_cur: number;
-  project_id: number;
-  project_name: string;
-  note: string;
   handler: string;
-  handler_id: number;
 };
 // 成员详情：资金汇总 + 经手的完整流水（跨项目）+ 转账
 export type MemberDetail = {
