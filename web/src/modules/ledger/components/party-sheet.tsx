@@ -225,6 +225,114 @@ export function PartySheet({
   );
 }
 
+type PickerOption = {
+  value: string;
+  label: string;
+  sub?: string;
+  meta?: string;
+  searchText?: string;
+};
+
+// 可搜索选择器：用于关联已有甲方 / 供应商，在抽屉内无焦点冲突，支持实时模糊搜索与回车快选
+function SearchablePicker({
+  options,
+  value,
+  onChange,
+  placeholder,
+  emptyText,
+}: {
+  options: PickerOption[];
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  emptyText: string;
+}) {
+  const [kw, setKw] = useState("");
+  const picked = options.find((o) => o.value === value) ?? null;
+  const q = kw.trim().toLowerCase();
+  const filtered = q
+    ? options.filter((o) =>
+        `${o.label} ${o.sub ?? ""} ${o.meta ?? ""} ${o.searchText ?? ""}`.toLowerCase().includes(q),
+      )
+    : options;
+
+  if (picked) {
+    return (
+      <div className="bg-primary/5 border-primary/30 flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 font-medium">
+            <Check className="text-primary size-4 shrink-0" />
+            <span className="truncate">{picked.label}</span>
+          </div>
+          {picked.sub || picked.meta ? (
+            <div className="text-muted-foreground truncate text-xs">
+              {[picked.sub, picked.meta].filter(Boolean).join(" · ")}
+            </div>
+          ) : null}
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            onChange("");
+            setKw("");
+          }}
+        >
+          重选
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="relative">
+        <Search className="text-muted-foreground absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
+        <Input
+          placeholder={placeholder}
+          className="pl-8"
+          value={kw}
+          onChange={(e) => setKw(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              const first = filtered[0];
+              if (first) {
+                onChange(first.value);
+                setKw("");
+              }
+            }
+          }}
+        />
+      </div>
+      {filtered.length ? (
+        <div className="max-h-52 divide-y overflow-y-auto rounded-md border">
+          {filtered.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => {
+                onChange(o.value);
+                setKw("");
+              }}
+              className="hover:bg-muted/60 flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors"
+            >
+              <div className="min-w-0">
+                <div className="truncate font-medium">{o.label}</div>
+                {o.sub ? <div className="text-muted-foreground truncate text-xs">{o.sub}</div> : null}
+              </div>
+              {o.meta ? <span className="text-muted-foreground shrink-0 text-xs">{o.meta}</span> : null}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="text-muted-foreground rounded-md border py-4 text-center text-xs">{emptyText}</p>
+      )}
+    </div>
+  );
+}
+
 // 项目往来 -> 关联已有客户：只选已有客户；若是中转项目，挂账追踪按「选台子 → 搜索选择客户账户 → 显示该账户可用分组并设折扣」
 function LinkProjectCustomerForm({
   projectId,
@@ -376,18 +484,18 @@ function LinkProjectCustomerForm({
         {custOptsQ.isLoading ? (
           <Skeleton className="h-9" />
         ) : customers.length ? (
-          <Select value={customerKey} onValueChange={setCustomerKey}>
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder="请选择已有客户" />
-            </SelectTrigger>
-            <SelectContent>
-              {customers.map((c) => (
-                <SelectItem key={c.key} value={c.key}>
-                  {c.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SearchablePicker
+            value={customerKey}
+            onChange={setCustomerKey}
+            placeholder="搜索客户名称 / 联系方式…"
+            emptyText="没有找到匹配的已有客户"
+            options={customers.map((c) => ({
+              value: c.key,
+              label: c.name,
+              sub: c.contact || undefined,
+              searchText: c.group,
+            }))}
+          />
         ) : (
           <p className="text-muted-foreground rounded-md border p-3 text-sm">
             还没有已建档的客户，请先前往{" "}
@@ -709,19 +817,24 @@ function LinkProjectSupplierForm({ projectId, onDone }: { projectId: number; onD
         {suppliersQ.isLoading ? (
           <Skeleton className="h-9" />
         ) : suppliers.length ? (
-          <Select value={supplierId} onValueChange={onSelectSupplier}>
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder="请选择已有供应商" />
-            </SelectTrigger>
-            <SelectContent>
-              {suppliers.map((s) => (
-                <SelectItem key={s.id} value={String(s.id)}>
-                  {s.name}
-                  {s.sites?.length ? `（${s.sites.length} 个站点）` : ""}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SearchablePicker
+            value={supplierId}
+            onChange={onSelectSupplier}
+            placeholder="搜索供应商名称 / 站点 / 备注…"
+            emptyText="没有找到匹配的已有供应商"
+            options={suppliers.map((s) => ({
+              value: String(s.id),
+              label: s.name,
+              sub:
+                (s.sites ?? [])
+                  .map((st) => st.note || st.name || st.host)
+                  .filter(Boolean)
+                  .slice(0, 2)
+                  .join(" · ") || undefined,
+              meta: s.sites?.length ? `${s.sites.length} 个站点` : undefined,
+              searchText: (s.sites ?? []).map((st) => `${st.name} ${st.note ?? ""} ${st.host}`).join(" "),
+            }))}
+          />
         ) : (
           <p className="text-muted-foreground rounded-md border p-3 text-sm">
             还没有供应商，请先前往{" "}
