@@ -764,7 +764,7 @@ function SiteCard({
 export default function SupplierDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const sid = Number(id);
-  const { openParty } = useLedger();
+  const { openEntry, openParty } = useLedger();
   const qc = useQueryClient();
   const refreshLedger = useLedgerRefresh();
   const [siteModal, setSiteModal] = useState<{ open: boolean; site: SupplierSite | null }>({ open: false, site: null });
@@ -853,6 +853,20 @@ export default function SupplierDetailPage({ params }: { params: Promise<{ id: s
             {party.contact ? <p className="text-muted-foreground text-sm">联系方式：{party.contact}</p> : null}
           </div>
           <div className="flex gap-2">
+            <Button
+              onClick={() =>
+                openEntry({
+                  partyId: sid,
+                  projectId:
+                    sites.flatMap((s) => s.wallets).find((w) => w.project_id)?.project_id ??
+                    project_contributions.find((c) => c.project_id)?.project_id ??
+                    undefined,
+                })
+              }
+            >
+              <Plus />
+              记一笔
+            </Button>
             <Button variant="outline" onClick={() => refetch()} disabled={isFetching}>
               <RefreshCw className={cn(isFetching && "animate-spin")} />
               刷新

@@ -51,12 +51,14 @@ export function EntryDialog({
   open,
   onOpenChange,
   projectId,
+  partyId,
   entry: editing,
   onNeedProject,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId?: number;
+  partyId?: number;
   entry?: Entry;
   onNeedProject: () => void;
 }) {
@@ -132,7 +134,7 @@ export function EntryDialog({
     setAmount("");
     setRate(prefs.currency === "CNY" ? "" : String(rates[prefs.currency] ?? ""));
     setNote("");
-    setSupplier(null);
+    setSupplier(partyId ?? null);
     setImages([]);
     const now = toLocalInput(new Date());
     setTime(now);

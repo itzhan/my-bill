@@ -24,7 +24,7 @@ type LedgerCtx = {
   me: Me;
   connected: boolean;
   subscribe: (fn: Listener) => () => void;
-  openEntry: (opts?: { projectId?: number; entry?: Entry }) => void;
+  openEntry: (opts?: { projectId?: number; partyId?: number; entry?: Entry }) => void;
   openProject: (project?: Project) => void;
   openTransfer: (opts?: { projectId?: number | null; fromId?: number }) => void;
   openParty: (id: number, projectId?: number) => void;
@@ -82,7 +82,7 @@ function LedgerReady({ me, children }: { me: Me; children: ReactNode }) {
   const listeners = useRef(new Set<Listener>());
   const [connected, setConnected] = useState(false);
 
-  const [entryState, setEntryState] = useState<{ open: boolean; projectId?: number; entry?: Entry }>({ open: false });
+  const [entryState, setEntryState] = useState<{ open: boolean; projectId?: number; partyId?: number; entry?: Entry }>({ open: false });
   const [projectState, setProjectState] = useState<{ open: boolean; project?: Project }>({ open: false });
   const [transferState, setTransferState] = useState<{ open: boolean; projectId?: number | null; fromId?: number }>({
     open: false,

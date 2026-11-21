@@ -22,6 +22,7 @@ import { get, post } from "@/modules/ledger/api";
 import { FormError, PageHeader, Pager, ResponsiveDialog, usePaged } from "@/modules/ledger/components/shared";
 import { money, signed } from "@/modules/ledger/format";
 import { useLedgerRefresh } from "@/modules/ledger/hooks";
+import { useLedger } from "@/modules/ledger/provider";
 import type { Party, PartyWallet, SupplierSite } from "@/modules/ledger/types";
 
 type SupplierRow = Party & { wallets: PartyWallet[]; sites?: SupplierSite[] };
@@ -336,6 +337,7 @@ function AddSupplierDialog({ open, onOpenChange }: { open: boolean; onOpenChange
 export default function SuppliersPage() {
   const router = useRouter();
   const qc = useQueryClient();
+  const { openEntry } = useLedger();
   const { data } = useQuery({
     queryKey: ["ledger", "suppliers"],
     queryFn: () => get<{ suppliers: SupplierRow[] }>("/suppliers").then((d) => d.suppliers),
@@ -483,6 +485,7 @@ export default function SuppliersPage() {
                     <TableHead className="text-right">应付</TableHead>
                     <TableHead className="text-right">实付</TableHead>
                     <TableHead className="text-right">结余</TableHead>
+                    <TableHead className="w-24 text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -491,6 +494,7 @@ export default function SuppliersPage() {
                       const due = dueOf(s);
                       const paid = paidOf(s);
                       const bal = balOf(s);
+                      const defaultProjectId = s.wallets.find((w) => w.project_id)?.project_id ?? undefined;
                       return (
                         <TableRow
                           key={s.id}
@@ -514,12 +518,28 @@ export default function SuppliersPage() {
                           >
                             {signed(bal)}
                           </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2 text-xs"
+                              title={`给「${s.name}」记一笔`}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                openEntry({ partyId: s.id, projectId: defaultProjectId });
+                              }}
+                            >
+                              <Plus className="size-3.5" />
+                              记一笔
+                            </Button>
+                          </TableCell>
                         </TableRow>
                       );
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={4} className="text-muted-foreground py-10 text-center">
+                      <TableCell colSpan={5} className="text-muted-foreground py-10 text-center">
                         {data.length ? "没有符合条件的供应商" : "还没有供应商，点右上角「添加供应商」开始"}
                       </TableCell>
                     </TableRow>
