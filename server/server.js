@@ -4192,12 +4192,14 @@ async function supplierDailyCost(onlyProject = null) {
         lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + siteLifetime));
       } catch (e) {
         errors.push(`${w.name}：${String(e.message || '').slice(0, 50)}`);
-        // 按天抓失败时仍保留期初计费，避免预估应付掉回 0
+        // 按天抓失败时用期初或上次成功抓到的累计消耗兜底，避免站点临时超时/限流导致预估利润剧烈跳变
         if (w.ptype === 'relay' && (w.opening_cost != null || projOpenings.has(w.project_id)) && w.project_id) {
           const rawUsed = Number(w.last_used);
           const bill = w.opening_used != null && Number.isFinite(rawUsed) ? billSinceOpening(w, segsBy.get(w.id) || [], rawUsed, [], w.opening_cost != null ? null : 0) : null;
           const total = bill ? bill.total : w.opening_cost != null ? r2(Number(w.opening_cost) || 0) : 0;
           lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + total));
+        } else if (w.project_id && Number(w.last_used_actual) > 0) {
+          lifetime.set(w.project_id, r2((lifetime.get(w.project_id) || 0) + Number(w.last_used_actual)));
         }
       }
     }
@@ -4269,42 +4271,48 @@ async function refreshCustomerGaps() {
 }
 // 后台每 5 分钟算一遍所有中转制项目的预估利润，打开页面只读这份缓存
 const relayForecastCache = new Map();
-async function refreshRelayForecasts() {
-  try {
-    customerGapCache.clear();
-    await refreshCustomerGaps();
-    const { byKey, lifetime: costLifetime } = await supplierDailyCost();
-    // 按天消耗只有近 30 天，更早的用站点累计 − 近 30 天，并按切日前的倍率折算
-    const lifetime = costLifetime || new Map();
-    // 归档供应商：消费 = 实际转出 − 退回，不按站点累计（站点送的额度不算）；同时计入 lifetime，避免被 earlier = lifetime − recentSupplier 抵消
-    for (const e of db.prepare("SELECT e.project_id, e.type, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE pa.kind = 'supplier' AND pa.archived = 1 AND e.project_id IS NOT NULL").all()) {
-      const cny = e.currency === 'CNY' ? e.amount : e.amount * (Number(e.rate) || 0);
-      const sign = e.type === 'income' ? -1 : 1;
-      byKey.set(`${e.project_id}|${e.date}`, r2((byKey.get(`${e.project_id}|${e.date}`) || 0) + sign * cny));
-      lifetime.set(e.project_id, r2((lifetime.get(e.project_id) || 0) + sign * cny));
-    }
-    for (const p of q.projects.all()) {
-      if (p.ptype !== 'relay') continue;
-      const f = relayForecastOf(p.id, byKey);
-      let recentSupplier = 0;
-      for (const [k, v] of byKey) if (k.startsWith(`${p.id}|`)) recentSupplier += v;
-      const earlier = r2((lifetime.get(p.id) || 0) - recentSupplier);
-      if (earlier > 1) {
-        f.daily.push({ date: '历史（30天前）', customer: 0, supplier: earlier, profit: r2(-earlier) });
-        f.supplier = r2(f.supplier + earlier);
-        f.profit = r2(f.profit - earlier);
+let refreshRelayPending = null;
+function refreshRelayForecasts() {
+  if (refreshRelayPending) return refreshRelayPending;
+  refreshRelayPending = (async () => {
+    try {
+      customerGapCache.clear();
+      await refreshCustomerGaps();
+      const { byKey, lifetime: costLifetime } = await supplierDailyCost();
+      // 按天消耗只有近 30 天，更早的用站点累计 − 近 30 天，并按切日前的倍率折算
+      const lifetime = costLifetime || new Map();
+      // 归档供应商：消费 = 实际转出 − 退回，不按站点累计（站点送的额度不算）；同时计入 lifetime，避免被 earlier = lifetime − recentSupplier 抵消
+      for (const e of db.prepare("SELECT e.project_id, e.type, e.amount, e.currency, e.rate, substr(e.created_at, 1, 10) AS date FROM entries e JOIN parties pa ON pa.id = e.party_id WHERE pa.kind = 'supplier' AND pa.archived = 1 AND e.project_id IS NOT NULL").all()) {
+        const cny = e.currency === 'CNY' ? e.amount : e.amount * (Number(e.rate) || 0);
+        const sign = e.type === 'income' ? -1 : 1;
+        byKey.set(`${e.project_id}|${e.date}`, r2((byKey.get(`${e.project_id}|${e.date}`) || 0) + sign * cny));
+        lifetime.set(e.project_id, r2((lifetime.get(e.project_id) || 0) + sign * cny));
       }
-      // 项目级期初成本：单独一行，应付 = 期初 + 各站点起点后新增
-      if (p.opening_cost != null) {
-        const oc = r2(Number(p.opening_cost));
-        f.daily.push({ date: '项目期初', customer: 0, supplier: oc, profit: r2(-oc) });
-        f.supplier = r2(f.supplier + oc);
-        f.profit = r2(f.profit - oc);
+      for (const p of q.projects.all()) {
+        if (p.ptype !== 'relay') continue;
+        const f = relayForecastOf(p.id, byKey);
+        let recentSupplier = 0;
+        for (const [k, v] of byKey) if (k.startsWith(`${p.id}|`)) recentSupplier += v;
+        const earlier = r2((lifetime.get(p.id) || 0) - recentSupplier);
+        if (earlier > 1) {
+          f.daily.push({ date: '历史（30天前）', customer: 0, supplier: earlier, profit: r2(-earlier) });
+          f.supplier = r2(f.supplier + earlier);
+          f.profit = r2(f.profit - earlier);
+        }
+        // 项目级期初成本：单独一行，应付 = 期初 + 各站点起点后新增
+        if (p.opening_cost != null) {
+          const oc = r2(Number(p.opening_cost));
+          f.daily.push({ date: '项目期初', customer: 0, supplier: oc, profit: r2(-oc) });
+          f.supplier = r2(f.supplier + oc);
+          f.profit = r2(f.profit - oc);
+        }
+        relayForecastCache.set(p.id, f);
       }
-      relayForecastCache.set(p.id, f);
-    }
-    console.log(`[relay] 预估利润已更新：${relayForecastCache.size} 个中转制项目`);
-  } catch (e) { console.error('[relay] 预估利润更新失败：', e.message); }
+      console.log(`[relay] 预估利润已更新：${relayForecastCache.size} 个中转制项目`);
+    } catch (e) { console.error('[relay] 预估利润更新失败：', e.message); }
+    finally { refreshRelayPending = null; }
+  })();
+  return refreshRelayPending;
 }
 setTimeout(refreshRelayForecasts, 25 * 1000).unref();
 setInterval(refreshRelayForecasts, 5 * 60 * 1000).unref();
