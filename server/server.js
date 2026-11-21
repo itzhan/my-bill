@@ -4119,10 +4119,18 @@ async function supplierDailyCost(onlyProject = null) {
   // 项目级期初成本：项目上直接设的总期初（中转制）。行没单独设期初时，这行只算起点后新增，期初由项目层扛
   const projOpenings = new Map(db.prepare("SELECT id, opening_cost FROM projects WHERE ptype = 'relay' AND opening_cost IS NOT NULL").all().map((r) => [r.id, Number(r.opening_cost)]));
   const seen = new Set();
+  const accountSites = new Set(
+    walletRows
+      .filter((w) => w.project_id && w.platform === 'newapi' && w.cost_mode !== 'key')
+      .map((w) => `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`),
+  );
   const jobs = [];
   for (const w of walletRows) {
     if (!w.project_id) continue; // 站点级监控未绑定具体项目时不报误错，只算已归属项目的监控
-    const site = w.cost_mode === 'key' ? `${w.project_id}|key:${w.id}` : `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
+    const normSite = `${w.project_id}|${String(w.base_url).replace(/\/+$/, '')}`;
+    // 同一项目同一站点已有 new-api 账户级监控时，跳过同站点的绑定 Key 行，避免每日成本双算
+    if (w.platform === 'newapi' && w.cost_mode === 'key' && accountSites.has(normSite)) continue;
+    const site = w.cost_mode === 'key' ? `${w.project_id}|key:${w.id}` : normSite;
     if (seen.has(site)) continue;
     seen.add(site);
     jobs.push(w);
