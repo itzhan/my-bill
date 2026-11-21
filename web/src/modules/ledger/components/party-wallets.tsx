@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import Link from "next/link";
+
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, KeyRound, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -12,13 +14,14 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
 import { del, get, patch, post } from "../api";
 import { curf, relTime } from "../format";
 import { useLedgerRefresh, useProjects } from "../hooks";
-import type { Party, PartyWallet, RemoteStationKey } from "../types";
+import type { Party, PartyWallet, RemoteStationKey, SupplierSite } from "../types";
 
 import { FormError, ResponsiveDialog, useConfirm } from "./shared";
 
@@ -746,20 +749,250 @@ function WalletDialog({
   );
 }
 
+// 项目往来内添加 Key 消费：直接选择该供应商名下的站点，再多选要关联到本项目的 Key（自动继承站点自定义倍率）
+function BindSiteKeysDialog({
+  open,
+  onOpenChange,
+  party,
+  projectId,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  party: Party;
+  projectId: number;
+  onSaved: () => void;
+}) {
+  const sitesQ = useQuery({
+    queryKey: ["ledger", "party-sites", party.id],
+    queryFn: () => get<{ sites: SupplierSite[] }>(`/parties/${party.id}/sites`).then((d) => d.sites),
+    enabled: open,
+  });
+  const sites = sitesQ.data ?? [];
+  const [siteWalletId, setSiteWalletId] = useState("");
+  const [remoteKeys, setRemoteKeys] = useState<RemoteStationKey[] | null>(null);
+  const [loadingKeys, setLoadingKeys] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const selectedSite = sites.find((s) => String(s.template_wallet_id) === siteWalletId) ?? null;
+
+  const loadKeys = async (wid: string) => {
+    if (!wid) return;
+    setLoadingKeys(true);
+    setError(null);
+    setRemoteKeys(null);
+    setSelected(new Set());
+    try {
+      const d = await get<{ keys: RemoteStationKey[] }>(`/party-wallets/${wid}/remote-keys`);
+      setRemoteKeys(d.keys);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoadingKeys(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!open) {
+      setSiteWalletId("");
+      setRemoteKeys(null);
+      setSelected(new Set());
+      setError(null);
+      return;
+    }
+    const only = sites.length === 1 ? sites[0] : undefined;
+    if (!siteWalletId && only) {
+      const wid = String(only.template_wallet_id);
+      setSiteWalletId(wid);
+      void loadKeys(wid);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, sites.length]);
+
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    if (!selectedSite) return setError("请先选择一个站点");
+    if (remoteKeys?.length && !selected.size) return setError("请勾选要关联到本项目的 Key（可多选）");
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await post<{ ok: boolean; bound?: { created: number; skipped: number } | null }>(
+        `/projects/${projectId}/suppliers`,
+        {
+          party_id: party.id,
+          template_wallet_id: selectedSite.template_wallet_id,
+          key_ids: [...selected],
+          link_whole_site: selected.size === 0,
+        },
+      );
+      if (res.bound) {
+        toast.success(
+          `已关联 ${res.bound.created} 把 Key${res.bound.skipped ? `（跳过已存在 ${res.bound.skipped} 把）` : ""}`,
+        );
+      } else {
+        toast.success("已关联站点到本项目");
+      }
+      onOpenChange(false);
+      onSaved();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <ResponsiveDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={`关联「${party.name}」的站点 Key`}
+      description="选择该供应商名下的站点并勾选要关联到本项目的 Key（可多选）；自定义倍率自动沿用站点配置"
+    >
+      <div className="space-y-4">
+        {sitesQ.isLoading ? (
+          <Skeleton className="h-20" />
+        ) : sites.length ? (
+          <>
+            <div className="space-y-1.5">
+              <Label>1. 选择站点</Label>
+              <Select
+                value={siteWalletId}
+                onValueChange={(wid) => {
+                  setSiteWalletId(wid);
+                  void loadKeys(wid);
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="请选择供应商站点" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sites.map((s) => (
+                    <SelectItem key={s.template_wallet_id} value={String(s.template_wallet_id)}>
+                      {s.name} · {s.host}（{s.platform === "sub2api" ? "sub2api" : "new-api"}）
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedSite?.custom ? (
+              <div className="bg-muted/50 rounded-md px-3 py-2 text-xs">
+                该站点已设置自定义倍率（充 ×{selectedSite.custom_ratio ?? "-"} / 耗 ×
+                {selectedSite.consume_ratio ?? selectedSite.custom_ratio ?? 1}），将自动继承计算，无需重复设置。
+              </div>
+            ) : null}
+            {selectedSite ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label>2. 选择要关联的 Key（可多选）</Label>
+                  <div className="flex items-center gap-2">
+                    {remoteKeys?.length ? (
+                      <label className="flex items-center gap-1.5 text-xs">
+                        <Checkbox
+                          checked={selected.size === remoteKeys.length}
+                          onCheckedChange={(x) => setSelected(x ? new Set(remoteKeys.map((k) => k.id)) : new Set())}
+                        />
+                        <span className="text-muted-foreground">全选</span>
+                      </label>
+                    ) : null}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2"
+                      onClick={() => loadKeys(siteWalletId)}
+                      disabled={loadingKeys}
+                    >
+                      <RefreshCw className={cn("size-3.5", loadingKeys && "animate-spin")} />
+                      刷新
+                    </Button>
+                  </div>
+                </div>
+                {loadingKeys ? <Skeleton className="h-24" /> : null}
+                {remoteKeys && !remoteKeys.length ? (
+                  <p className="text-muted-foreground text-xs">该站点上暂未读到 Key</p>
+                ) : null}
+                {remoteKeys?.length ? (
+                  <div className="max-h-64 divide-y overflow-y-auto rounded-md border">
+                    {remoteKeys.map((k) => (
+                      <label
+                        key={k.id}
+                        className="hover:bg-muted/40 flex cursor-pointer items-center gap-2.5 p-2.5 text-sm"
+                      >
+                        <Checkbox checked={selected.has(k.id)} onCheckedChange={() => toggle(k.id)} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate font-medium">{k.name}</span>
+                            <Badge variant="outline" className="text-[11px] font-normal">
+                              {k.status}
+                            </Badge>
+                          </div>
+                          <div className="text-muted-foreground truncate font-mono text-xs">{k.key_masked}</div>
+                        </div>
+                        <div className="shrink-0 text-right text-xs tabular-nums">
+                          <div className="text-muted-foreground">累计</div>
+                          <div className="font-medium">{amt(k.used)}</div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <p className="text-muted-foreground rounded-md border p-3 text-sm">
+            该供应商还没有配置站点，请先前往{" "}
+            <Link
+              href={`/dashboard/ledger/suppliers/${party.id}`}
+              onClick={() => onOpenChange(false)}
+              className="text-primary underline"
+            >
+              供应商详情
+            </Link>{" "}
+            添加站点。
+          </p>
+        )}
+        <FormError>{error}</FormError>
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button onClick={submit} disabled={saving || !selectedSite}>
+            {saving ? "关联中…" : selected.size ? `关联选中的 ${selected.size} 把 Key` : "关联站点"}
+          </Button>
+        </div>
+      </div>
+    </ResponsiveDialog>
+  );
+}
+
 // 供应商详情里的「余额」区块：每把 Key 一行，钱包额度 / 倍率（来源）/ 实际余额
-export function PartyWallets({ party }: { party: Party }) {
+export function PartyWallets({ party, projectId }: { party: Party; projectId?: number }) {
   const qc = useQueryClient();
   const refreshLedger = useLedgerRefresh();
   const [confirm, confirmEl] = useConfirm();
   const [editing, setEditing] = useState<PartyWallet | null>(null);
   const [open, setOpen] = useState(false);
+  const [bindOpen, setBindOpen] = useState(false);
   const [busy, setBusy] = useState<Set<number>>(new Set());
+  const inProject = typeof projectId === "number" && projectId > 0;
   const { data } = useQuery({
     queryKey: walletsKey(party.id),
     queryFn: () => get<{ wallets: PartyWallet[] }>(`/parties/${party.id}/wallets`).then((d) => d.wallets),
   });
   const changed = () => {
     qc.invalidateQueries({ queryKey: walletsKey(party.id) });
+    qc.invalidateQueries({ queryKey: ["ledger", "party-sites", party.id] });
     refreshLedger(); // 卡片上的余额汇总
   };
 
@@ -768,7 +1001,7 @@ export function PartyWallets({ party }: { party: Party }) {
     try {
       const { wallet: r } = await post<{ wallet: PartyWallet }>(`/party-wallets/${w.id}/refresh`);
       if (r.last_error) toast.error(`${r.name}：${r.last_error}`);
-      else toast.success(`${r.name}：实际余额 ${amt(r.last_actual)}`);
+      else toast.success(`${r.name}：累计消费 ${amt(r.last_used_actual)}`);
       changed();
     } catch (e) {
       toast.error((e as Error).message);
@@ -781,6 +1014,25 @@ export function PartyWallets({ party }: { party: Party }) {
     }
   };
   const remove = async (w: PartyWallet) => {
+    if (inProject) {
+      if (
+        !(await confirm({
+          title: `从本项目移除「${w.name}」？`,
+          description: "仅取消与本项目的关联，不再在当前项目显示；供应商的站点记录仍完整保留。",
+          destructive: true,
+          confirmText: "移除",
+        }))
+      )
+        return;
+      try {
+        await post(`/party-wallets/${w.id}/unlink-project`);
+        toast.success("已从本项目移除（站点记录已保留）");
+        changed();
+      } catch (e) {
+        toast.error((e as Error).message);
+      }
+      return;
+    }
     if (!(await confirm({ title: `删除余额监控「${w.name}」？`, destructive: true, confirmText: "删除" }))) return;
     try {
       await del(`/party-wallets/${w.id}`);
@@ -799,17 +1051,35 @@ export function PartyWallets({ party }: { party: Party }) {
     }
   };
 
-  const list = data ?? [];
-  // 合计按站点去重：同一 base_url 是同一账户，钱包/消费只算一次（多把 Key 只为各自追踪倍率）
-  const uniqSites = [
-    ...new Map(list.filter((w) => w.enabled).map((w) => [w.base_url.replace(/\/+$/, ""), w] as const)).values(),
-  ];
-  const totalUsed = uniqSites.reduce((a, w) => a + (w.last_used_actual ?? 0), 0);
-  const totalToday = uniqSites.reduce((a, w) => a + (w.last_today_actual ?? 0), 0);
+  const allList = data ?? [];
+  const list = inProject ? allList.filter((w) => w.project_id === projectId) : allList;
+  // 合计按站点/Key 口径计算：同一站点 new-api 账户级去重，按 Key 计费累加
+  const enabledList = list.filter((w) => w.enabled);
+  const bySite = new Map<string, PartyWallet[]>();
+  for (const w of enabledList) {
+    const k = w.base_url.replace(/\/+$/, "");
+    const arr = bySite.get(k) ?? [];
+    arr.push(w);
+    bySite.set(k, arr);
+  }
+  let totalUsed = 0;
+  let totalToday = 0;
+  for (const [, arr] of bySite) {
+    const acct = arr.find((w) => w.platform === "newapi" && w.cost_mode !== "key");
+    if (acct) {
+      totalUsed += acct.billed_used ?? acct.last_used_actual ?? 0;
+      totalToday += acct.last_today_actual ?? 0;
+    } else {
+      for (const w of arr) {
+        totalUsed += w.billed_used ?? w.last_used_actual ?? 0;
+        totalToday += w.last_today_actual ?? 0;
+      }
+    }
+  }
   const r = party.recharge;
   return (
     <div className="space-y-3">
-      {r ? (
+      {!inProject && r ? (
         <div className="space-y-2 rounded-lg border p-4">
           <b className="text-sm">结算</b>
           <div className="grid grid-cols-3 gap-2">
@@ -839,7 +1109,9 @@ export function PartyWallets({ party }: { party: Party }) {
           <div>
             <b className="text-sm">Key 消费</b>
             <p className="text-muted-foreground text-xs">
-              每把 Key 在供应商站点的倍率、累计消费与今日消费，每 30 分钟自动刷新
+              {inProject
+                ? "本项目关联的站点 Key 消费，移除仅取消本项目关联，不会删除供应商站点"
+                : "每把 Key 在供应商站点的倍率、累计消费与今日消费，每 30 分钟自动刷新"}
               {list.length ? ` · 累计消费合计 ${amt(totalUsed)} · 今日 ${amt(totalToday)}` : ""}
             </p>
           </div>
@@ -847,8 +1119,12 @@ export function PartyWallets({ party }: { party: Party }) {
             variant="outline"
             size="sm"
             onClick={() => {
-              setEditing(null);
-              setOpen(true);
+              if (inProject) {
+                setBindOpen(true);
+              } else {
+                setEditing(null);
+                setOpen(true);
+              }
             }}
           >
             <Plus />
@@ -880,18 +1156,25 @@ export function PartyWallets({ party }: { party: Party }) {
                     >
                       <RefreshCw className={cn(busy.has(w.id) && "animate-spin")} />
                     </Button>
+                    {!inProject ? (
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        title="编辑"
+                        onClick={() => {
+                          setEditing(w);
+                          setOpen(true);
+                        }}
+                      >
+                        <Pencil />
+                      </Button>
+                    ) : null}
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      title="编辑"
-                      onClick={() => {
-                        setEditing(w);
-                        setOpen(true);
-                      }}
+                      title={inProject ? "从本项目移除（不删除站点）" : "删除"}
+                      onClick={() => remove(w)}
                     >
-                      <Pencil />
-                    </Button>
-                    <Button variant="ghost" size="icon-sm" title="删除" onClick={() => remove(w)}>
                       <Trash2 />
                     </Button>
                   </span>
@@ -974,11 +1257,23 @@ export function PartyWallets({ party }: { party: Party }) {
           </div>
         ) : (
           <p className="text-muted-foreground text-sm">
-            还没有绑定 Key。点「添加」选平台（new-api / sub2api）并填 Key，就能自动抓钱包额度和倍率。
+            {inProject
+              ? "本项目还没有关联该供应商的站点 Key。点右上角「添加」选择站点和 Key。"
+              : "还没有绑定 Key。点「添加」选平台（new-api / sub2api）并填 Key，就能自动抓钱包额度和倍率。"}
           </p>
         )}
       </div>
-      <WalletDialog open={open} onOpenChange={setOpen} party={party} wallet={editing} onSaved={changed} />
+      {inProject ? (
+        <BindSiteKeysDialog
+          open={bindOpen}
+          onOpenChange={setBindOpen}
+          party={party}
+          projectId={projectId}
+          onSaved={changed}
+        />
+      ) : (
+        <WalletDialog open={open} onOpenChange={setOpen} party={party} wallet={editing} onSaved={changed} />
+      )}
       {confirmEl}
     </div>
   );

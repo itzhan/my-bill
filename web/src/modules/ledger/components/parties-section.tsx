@@ -59,7 +59,7 @@ function PartyColumn({ kind, list, detail }: { kind: PartyKind; list: Party[]; d
             {sorted.map((v) => {
               const r = rowOf(v);
               return (
-                <TableRow key={v.id} className="cursor-pointer" onClick={() => openParty(v.id)}>
+                <TableRow key={v.id} className="cursor-pointer" onClick={() => openParty(v.id, detail.project.id)}>
                   <TableCell className="font-medium">
                     {v.name}
                     {v.archived ? <Badge variant="outline" className="ml-1.5">归档</Badge> : null}

@@ -45,8 +45,8 @@ import { FormError, useConfirm } from "./shared";
 
 export type PartySheetState =
   | { open: false }
-  | { open: true; mode: "view"; id: number }
-  | { open: true; mode: "edit"; id: number }
+  | { open: true; mode: "view"; id: number; projectId?: number }
+  | { open: true; mode: "edit"; id: number; projectId?: number }
   | { open: true; mode: "new"; projectId: number; kind: PartyKind };
 
 const SOURCE_TXT: Record<string, string> = { api: "接口同步", ai: "AI", relay: "中转站自动" };
@@ -208,8 +208,9 @@ export function PartySheet({
         {state.open && state.mode !== "new" ? (
           <PartyDetailView
             id={state.id}
+            projectId={state.projectId}
             editing={state.mode === "edit"}
-            setMode={(mode) => setState({ open: true, mode, id: state.id })}
+            setMode={(mode) => setState({ open: true, mode, id: state.id, projectId: state.projectId })}
             onDeleted={close}
             onClose={close}
           />
@@ -871,12 +872,14 @@ function Kv({ label, value, className }: { label: React.ReactNode; value: React.
 
 function PartyDetailView({
   id,
+  projectId,
   editing,
   setMode,
   onDeleted,
   onClose,
 }: {
   id: number;
+  projectId?: number;
   editing: boolean;
   setMode: (m: "view" | "edit") => void;
   onDeleted: () => void;
@@ -1004,7 +1007,7 @@ function PartyDetailView({
           </div>
         ) : null}
 
-        {v.kind === "supplier" ? <PartyWallets party={v} /> : null}
+        {v.kind === "supplier" ? <PartyWallets party={v} projectId={projectId} /> : null}
 
         {data.relay_configured && v.kind === "customer" ? (
           <RelayBlock party={v} live={liveData} loading={live.isFetching} onRefresh={() => live.refetch()} />
@@ -1012,7 +1015,12 @@ function PartyDetailView({
 
         {v.kind === "customer" && v.relay && v.relay.track_mode !== "key" ? <RelayGroups party={v} /> : null}
 
-        {v.archived ? <p className="text-muted-foreground text-sm">已归档，只能查看</p> : <RecordForm party={v} />}
+        {/* 项目往来内去掉记应付 / 记实付 */}
+        {v.archived ? (
+          <p className="text-muted-foreground text-sm">已归档，只能查看</p>
+        ) : projectId && v.kind === "supplier" ? null : (
+          <RecordForm party={v} />
+        )}
 
         {v.kind !== "supplier" ? (
           <div className="space-y-2">

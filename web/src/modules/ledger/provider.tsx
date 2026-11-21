@@ -27,7 +27,7 @@ type LedgerCtx = {
   openEntry: (opts?: { projectId?: number; entry?: Entry }) => void;
   openProject: (project?: Project) => void;
   openTransfer: (opts?: { projectId?: number | null; fromId?: number }) => void;
-  openParty: (id: number) => void;
+  openParty: (id: number, projectId?: number) => void;
   openPartyNew: (projectId: number, kind: PartyKind) => void;
   // 打开右下角 AI 助手，可指定会话（group / dm / project:<id>）
   openChat: (channel?: string) => void;
@@ -189,7 +189,7 @@ function LedgerReady({ me, children }: { me: Me; children: ReactNode }) {
       openEntry: (opts) => setEntryState({ open: true, ...opts }),
       openProject: (project) => setProjectState({ open: true, project }),
       openTransfer: (opts) => setTransferState({ open: true, ...opts }),
-      openParty: (id) => setPartyState({ open: true, mode: "view", id }),
+      openParty: (id, projectId) => setPartyState({ open: true, mode: "view", id, projectId }),
       openPartyNew: (projectId, kind) => setPartyState({ open: true, mode: "new", projectId, kind }),
       openChat: (channel) => {
         if (channel) setChatTab(channel);

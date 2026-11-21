@@ -884,6 +884,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   }
 
   app.get('/api/parties/:id/wallets', auth, (req, res) => res.json({ wallets: ofParty.all(Number(req.params.id)).map(view) }));
+  app.get('/api/parties/:id/sites', auth, (req, res) => res.json({ sites: sitesOf(Number(req.params.id)) }));
   app.post('/api/parties/:id/wallets', auth, async (req, res) => {
     const pa = party.get(Number(req.params.id));
     if (!pa) throw new HttpError(404, '供应商不存在（只有供应商可以绑定余额）');
@@ -910,25 +911,75 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   app.patch('/api/party-wallets/:id', auth, async (req, res) => {
     const w = getOne.get(Number(req.params.id));
     if (!w) throw new HttpError(404, '余额监控不存在');
-    const v = input(req.body || {}, true);
+    const b = req.body || {};
+    const v = input(b, true);
     checkCustom({ ...w, ...v });
-    readOpening(req.body || {});
+    readOpening(b);
+    const oldBase = baseOf(w.base_url);
     const keys = Object.keys(v);
     if (keys.length) db.prepare(`UPDATE party_wallets SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...keys.map((k) => v[k]), nowIso(), w.id);
-    const rates = parseConsumeRates((req.body || {}).consume_rates);
+    const rates = parseConsumeRates(b.consume_rates);
     if (rates) replaceConsumeRates(w.id, rates);
-    applyOpening(w.id, req.body || {});
+    applyOpening(w.id, b);
+    const updated = getOne.get(w.id);
+    // 站点卡片编辑模式（sync_site = true）：同步站点凭据、地址与自定义倍率到同一站点的所有绑定 Key 行
+    if (b.sync_site) {
+      const siblings = ofParty.all(w.party_id).filter((x) => x.id !== w.id && baseOf(x.base_url) === oldBase);
+      const t = nowIso();
+      const curRates = qRatesOf.all(w.id);
+      for (const s of siblings) {
+        db.prepare(
+          'UPDATE party_wallets SET platform = ?, base_url = ?, custom = ?, custom_ratio = ?, consume_ratio = ?, insecure = ?, access_token = ?, token_user_id = ?, login_user = ?, login_pass = ?, updated_at = ? WHERE id = ?'
+        ).run(
+          updated.platform, updated.base_url, updated.custom, updated.custom_ratio, updated.consume_ratio,
+          updated.insecure, updated.access_token, updated.token_user_id, updated.login_user, updated.login_pass,
+          t, s.id
+        );
+        replaceConsumeRates(s.id, updated.custom ? curRates : []);
+      }
+      for (const s of siblings) {
+        if (s.enabled) await refresh(s.id).catch(() => {});
+      }
+    }
     const out = await refresh(w.id); // 改了平台 / Key / 倍率后按新参数重抓
-    onChanged(req.user, `修改了余额监控「${out.name}」`);
+    onChanged(req.user, `修改了站点监控「${out.name}」`);
     if (typeof onWalletChanged === 'function') onWalletChanged();
     res.json({ wallet: out });
+  });
+  // 在项目往来内「移除」监控行：绝不删除供应商的站点记录！
+  // - 站点级监控（cost_mode !== 'key'）或同站点的最后一行：仅清空 project_id = NULL，站点记录完整保留；
+  // - 同站点已有其他行时的按 Key 绑定行：仅移除该条 Key 绑定行，不影响站点记录。
+  app.post('/api/party-wallets/:id/unlink-project', auth, (req, res) => {
+    const w = getOne.get(Number(req.params.id));
+    if (!w) throw new HttpError(404, '监控行不存在');
+    const siteBase = baseOf(w.base_url);
+    const others = ofParty.all(w.party_id).filter((x) => x.id !== w.id && baseOf(x.base_url) === siteBase);
+    if (w.cost_mode === 'key' && others.length > 0) {
+      qDelRates.run(w.id);
+      db.prepare('DELETE FROM party_wallets WHERE id = ?').run(w.id);
+    } else {
+      db.prepare('UPDATE party_wallets SET project_id = NULL, updated_at = ? WHERE id = ?').run(nowIso(), w.id);
+    }
+    onChanged(req.user, `从项目中移除了监控「${w.name}」（保留供应商站点）`);
+    if (typeof onWalletChanged === 'function') onWalletChanged();
+    res.json({ ok: true });
   });
   app.delete('/api/party-wallets/:id', auth, (req, res) => {
     const w = getOne.get(Number(req.params.id));
     if (!w) throw new HttpError(404, '余额监控不存在');
-    qDelRates.run(w.id);
-    db.prepare('DELETE FROM party_wallets WHERE id = ?').run(w.id);
-    onChanged(req.user, `删除了余额监控「${w.name}」`);
+    if (req.query.site === '1') {
+      const siteBase = baseOf(w.base_url);
+      const allSite = ofParty.all(w.party_id).filter((x) => baseOf(x.base_url) === siteBase);
+      for (const x of allSite) {
+        qDelRates.run(x.id);
+        db.prepare('DELETE FROM party_wallets WHERE id = ?').run(x.id);
+      }
+      onChanged(req.user, `删除了站点「${w.name}」（共 ${allSite.length} 条监控）`);
+    } else {
+      qDelRates.run(w.id);
+      db.prepare('DELETE FROM party_wallets WHERE id = ?').run(w.id);
+      onChanged(req.user, `删除了余额监控「${w.name}」`);
+    }
     if (typeof onWalletChanged === 'function') onWalletChanged();
     res.json({ ok: true });
   });
