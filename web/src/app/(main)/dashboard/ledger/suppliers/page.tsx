@@ -30,6 +30,7 @@ type SiteFormItem = {
   id: string;
   platform: "newapi" | "sub2api";
   base_url: string;
+  note: string;
   access_token: string;
   token_user_id: string;
   login_user: string;
@@ -44,6 +45,7 @@ const newSiteItem = (): SiteFormItem => ({
   id: `s-${++siteSeq}`,
   platform: "newapi",
   base_url: "",
+  note: "",
   access_token: "",
   token_user_id: "",
   login_user: "",
@@ -97,6 +99,7 @@ function AddSupplierDialog({ open, onOpenChange }: { open: boolean; onOpenChange
         sites: sites.map((s) => ({
           platform: s.platform,
           base_url: s.base_url.trim(),
+          note: s.note.trim(),
           access_token: s.access_token.trim(),
           token_user_id: s.token_user_id.trim(),
           login_user: s.login_user.trim(),
@@ -218,6 +221,15 @@ function AddSupplierDialog({ open, onOpenChange }: { open: boolean; onOpenChange
                     onChange={(e) => updateSite(s.id, { base_url: e.target.value })}
                   />
                 </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>备注（可选）</Label>
+                <Input
+                  maxLength={200}
+                  placeholder="例如：awsb 主站 / fable 渠道 / 备用池"
+                  value={s.note}
+                  onChange={(e) => updateSite(s.id, { note: e.target.value })}
+                />
               </div>
               {s.platform === "newapi" ? (
                 <div className="grid gap-3 sm:grid-cols-[1fr_8rem]">

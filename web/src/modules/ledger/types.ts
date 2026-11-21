@@ -234,6 +234,7 @@ export type PartyWallet = {
   party_id: number;
   project_id: number | null;
   name: string;
+  note?: string;
   platform: "newapi" | "sub2api";
   base_url: string;
   custom: boolean;
@@ -347,6 +348,7 @@ export type SupplierSite = {
   base_url: string;
   host: string;
   name: string;
+  note?: string;
   platform: "newapi" | "sub2api";
   template_wallet_id: number;
   custom: boolean;

@@ -241,6 +241,7 @@ function SiteFormDialog({
 }) {
   const [confirm, confirmEl] = useConfirm();
   const [name, setName] = useState("");
+  const [note, setNote] = useState("");
   const [platform, setPlatform] = useState<"newapi" | "sub2api">("newapi");
   const [baseUrl, setBaseUrl] = useState("");
   const [accessToken, setAccessToken] = useState("");
@@ -262,6 +263,7 @@ function SiteFormDialog({
     if (site) {
       const tpl = site.wallets.find((w) => w.id === site.template_wallet_id);
       setName(site.name);
+      setNote(site.note || "");
       setPlatform(site.platform);
       setBaseUrl(site.base_url);
       setAccessToken("");
@@ -282,6 +284,7 @@ function SiteFormDialog({
       setInsecure(site.insecure);
     } else {
       setName("");
+      setNote("");
       setPlatform("newapi");
       setBaseUrl("");
       setAccessToken("");
@@ -329,6 +332,7 @@ function SiteFormDialog({
         : [];
       const payload: Record<string, unknown> = {
         name: name.trim() || host,
+        note: note.trim(),
         platform,
         base_url: baseUrl.trim(),
         token_user_id: tokenUserId.trim(),
@@ -418,6 +422,15 @@ function SiteFormDialog({
             <Label>地址 *</Label>
             <Input placeholder="https://api.example.com" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
           </div>
+        </div>
+        <div className="space-y-1.5">
+          <Label>备注（可选）</Label>
+          <Input
+            maxLength={200}
+            placeholder="例如：awsb 主站 / fable 渠道 / 备用池"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
         </div>
         {platform === "newapi" ? (
           <div className="grid gap-3 sm:grid-cols-[1fr_8rem]">
@@ -648,6 +661,11 @@ function SiteCard({
                 <ExternalLink className="size-3 shrink-0" />
               </a>
             </CardDescription>
+            {site.note ? (
+              <p className="text-muted-foreground line-clamp-2 text-xs" title={site.note}>
+                {site.note}
+              </p>
+            ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
             <Button

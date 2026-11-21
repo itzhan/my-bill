@@ -758,7 +758,8 @@ function LinkProjectSupplierForm({ projectId, onDone }: { projectId: number; onD
                 <SelectContent>
                   {sites.map((s) => (
                     <SelectItem key={s.template_wallet_id} value={String(s.template_wallet_id)}>
-                      {s.name} · {s.host}（{s.platform === "sub2api" ? "sub2api" : "new-api"}）
+                      {s.name}
+                      {s.note ? `（${s.note}）` : ""} · {s.host}（{s.platform === "sub2api" ? "sub2api" : "new-api"}）
                     </SelectItem>
                   ))}
                 </SelectContent>

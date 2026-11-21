@@ -640,6 +640,8 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
   if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = 'project_id'").get()) db.exec('ALTER TABLE party_wallets ADD COLUMN project_id INTEGER REFERENCES projects(id)');
   // 远程站点 Key ID（如 newapi:312），兼容新版 new-api 脱敏 t.key 时按访问令牌直接读这把 Key 的用量
   if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = 'remote_key_id'").get()) db.exec("ALTER TABLE party_wallets ADD COLUMN remote_key_id TEXT NOT NULL DEFAULT ''");
+  // 站点备注：方便区分同一供应商名下的多个站点用途
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('party_wallets') WHERE name = 'note'").get()) db.exec("ALTER TABLE party_wallets ADD COLUMN note TEXT NOT NULL DEFAULT ''");
   db.exec(`
     CREATE TABLE IF NOT EXISTS wallet_consume_rates (
       wallet_id INTEGER NOT NULL,
@@ -732,6 +734,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
       if (!out.access_token) out.token_user_id = '';
     }
     if (!partial || 'token_user_id' in b) out.token_user_id = str(b.token_user_id, 40);
+    if (!partial || 'note' in b) out.note = str(b.note, 200);
     if (!partial || 'project_id' in b) out.project_id = Number(b.project_id) > 0 ? Number(b.project_id) : null;
     if (str(b.api_key, 500)) out.api_key = str(b.api_key, 500); // 留空 = 保持原值
     return out;
@@ -929,9 +932,9 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
       const curRates = qRatesOf.all(w.id);
       for (const s of siblings) {
         db.prepare(
-          'UPDATE party_wallets SET platform = ?, base_url = ?, custom = ?, custom_ratio = ?, consume_ratio = ?, insecure = ?, access_token = ?, token_user_id = ?, login_user = ?, login_pass = ?, updated_at = ? WHERE id = ?'
+          'UPDATE party_wallets SET platform = ?, base_url = ?, note = ?, custom = ?, custom_ratio = ?, consume_ratio = ?, insecure = ?, access_token = ?, token_user_id = ?, login_user = ?, login_pass = ?, updated_at = ? WHERE id = ?'
         ).run(
-          updated.platform, updated.base_url, updated.custom, updated.custom_ratio, updated.consume_ratio,
+          updated.platform, updated.base_url, updated.note || '', updated.custom, updated.custom_ratio, updated.consume_ratio,
           updated.insecure, updated.access_token, updated.token_user_id, updated.login_user, updated.login_pass,
           t, s.id
         );
@@ -1231,6 +1234,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
         base_url: siteUrl,
         host,
         name: tpl.name && tpl.name !== '默认' ? tpl.name : host,
+        note: tpl.note || '',
         platform: tpl.platform,
         template_wallet_id: tpl.id,
         custom: !!tpl.custom,
@@ -1258,7 +1262,7 @@ function setupPartyWallets({ app, db, auth, HttpError, onChanged, onWalletChange
 
   // 创建站点（用于添加供应商时一次添加多个站点）
   async function createSiteWallet(partyId, b) {
-    const v = input({ name: b.name || '', platform: b.platform || 'newapi', base_url: b.base_url, cost_mode: 'account', custom: !!b.custom, custom_ratio: b.custom_ratio, consume_ratio: b.consume_ratio, access_token: b.access_token || '', token_user_id: b.token_user_id || '', login_user: b.login_user || '', login_pass: b.login_pass || '', api_key: b.api_key || '', insecure: !!b.insecure, project_id: b.project_id || null }, false);
+    const v = input({ name: b.name || '', note: b.note || '', platform: b.platform || 'newapi', base_url: b.base_url, cost_mode: 'account', custom: !!b.custom, custom_ratio: b.custom_ratio, consume_ratio: b.consume_ratio, access_token: b.access_token || '', token_user_id: b.token_user_id || '', login_user: b.login_user || '', login_pass: b.login_pass || '', api_key: b.api_key || '', insecure: !!b.insecure, project_id: b.project_id || null }, false);
     if (!v.api_key && !(v.platform === 'newapi' && v.access_token) && !(v.platform === 'sub2api' && ((v.login_user && v.login_pass) || v.access_token))) {
       throw new HttpError(400, `站点 ${v.base_url} 请填写访问令牌（或账号密码）`);
     }
