@@ -2593,6 +2593,15 @@ async function syncRelayEstimate() {
 }
 setTimeout(syncRelayEstimate, 40 * 1000).unref();
 setInterval(syncRelayEstimate, 15 * 60 * 1000).unref();
+// 一次性：接入历史库后自动补齐所有中转客户 11.6 08:00 之前的分组用量与按日挂账（已执行过则跳过）
+if (relayHist.isEnabled() && getSetting('relay_hist_backfill_v1', '') === '') {
+  setTimeout(() => {
+    backfillRelayHistory().then((res) => {
+      q.putSetting.run('relay_hist_backfill_v1', now());
+      console.log(`[relay-hist] 首次历史回补完成（${res.count} 家）：`, JSON.stringify(res.results));
+    }).catch((e) => console.error('[relay-hist] 首次历史回补失败：', e.message));
+  }, 5 * 1000).unref();
+}
 async function projectRelayLive(projectId) {
   const parties = q.partiesOfProject.all(projectId).filter((p) => p.relay_id && !p.archived);
   const out = {};
