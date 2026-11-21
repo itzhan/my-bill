@@ -11,6 +11,7 @@ const ExcelJS = require('exceljs');
 const Anthropic = require('@anthropic-ai/sdk');
 const { setupPartyWallets, fetchDailyUsage, consumeRatioOn, billSinceOpening } = require('./wallets');
 const { setupKeyAccounting } = require('./keyacct');
+const relayHist = require('./relay-hist');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
@@ -1976,7 +1977,48 @@ async function relayLiveRate(userId) {
   for (const x of m5) models[x.model] = (models[x.model] || 0) + 1;
   return { rpm_now: m1.length, tpm_now: tok(m1), rpm_5m_avg: Math.round((m5.length / 5) * 10) / 10, cost_5m_usd: r2(m5.reduce((a, x) => a + (Number(x.actual_cost ?? x.total_cost) || 0), 0)), last_request_at: items[0] ? fmtTZ(items[0].created_at) : null, models_5m: models, sampled: items.length };
 }
+async function relayHistSafe(fn, fallback) {
+  try {
+    return await fn();
+  } catch (e) {
+    console.error('[relay-hist] 查询失败，已降级为仅现网数据：', e.message);
+    return fallback;
+  }
+}
+function mergeUsageStats(live, hist) {
+  if (!hist || !(hist.total_requests > 0 || hist.total_actual_cost > 0 || hist.total_cost > 0)) return live;
+  const base = live || {};
+  return {
+    ...base,
+    total_requests: Number(base.total_requests || 0) + Number(hist.total_requests || 0),
+    total_actual_cost: Number(base.total_actual_cost || 0) + Number(hist.total_actual_cost || 0),
+    total_cost: Number(base.total_cost || 0) + Number(hist.total_cost || 0),
+    total_tokens: Number(base.total_tokens || 0) + Number(hist.total_tokens || 0),
+    total_input_tokens: Number(base.total_input_tokens || 0) + Number(hist.total_input_tokens || 0),
+    total_output_tokens: Number(base.total_output_tokens || 0) + Number(hist.total_output_tokens || 0),
+    total_cache_creation_tokens: Number(base.total_cache_creation_tokens || 0) + Number(hist.total_cache_creation_tokens || 0),
+    total_cache_read_tokens: Number(base.total_cache_read_tokens || 0) + Number(hist.total_cache_read_tokens || 0),
+  };
+}
+function mergeDailyTrend(liveTrend, histDaily) {
+  if (!histDaily || !histDaily.length) return liveTrend || [];
+  const byDate = new Map();
+  const add = (date, reqs, actualCost, stdCost, tokens) => {
+    const d = String(date || '').slice(0, 10);
+    if (!RE_DATE.test(d)) return;
+    const cur = byDate.get(d) || { date: d, requests: 0, actual_cost: 0, cost: 0, total_tokens: 0 };
+    cur.requests += Number(reqs || 0);
+    cur.actual_cost += Number(actualCost || 0);
+    cur.cost += Number(stdCost || 0);
+    cur.total_tokens += Number(tokens || 0);
+    byDate.set(d, cur);
+  };
+  for (const x of histDaily) add(x.date, x.requests, x.actual_cost, x.cost, x.total_tokens);
+  for (const x of liveTrend || []) add(x.date, x.requests, x.actual_cost ?? x.cost, x.cost ?? x.actual_cost, x.total_tokens);
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
 async function runRelayTool(name, input) {
+  const useDefaultHist = relayHist.appliesTo(null, RELAY.base);
   switch (name) {
     case 'relay_overview': {
       const [s, rt] = await Promise.all([relayGet('/admin/dashboard/stats'), relayGet('/admin/dashboard/realtime').catch(() => null)]);
@@ -1991,31 +2033,77 @@ async function runRelayTool(name, input) {
     case 'relay_user_usage': {
       const u = await relayFindUser(input.user);
       const rng = relayRange(input.range, input.from, input.to);
-      const [stats, usage, live, bd] = await Promise.all([
+      const today = todayKey();
+      const [statsRaw, usage, live, bd, histRange, histAll] = await Promise.all([
         relayGet('/admin/usage/stats', { user_id: u.id, start_date: rng.start_date, end_date: rng.end_date }),
         relayPost('/admin/dashboard/users-usage', { user_ids: [u.id] }).catch(() => null),
         input.live === false ? null : relayLiveRate(u.id),
         relayGet('/admin/dashboard/user-breakdown', { user_id: u.id, start_date: rng.start_date, end_date: rng.end_date }).catch(() => null),
+        useDefaultHist ? relayHistSafe(() => relayHist.queryStats({ userId: u.id, startDate: rng.start_date, endDate: rng.end_date }), null) : null,
+        useDefaultHist ? relayHistSafe(() => relayHist.queryStats({ userId: u.id, startDate: ALL_TIME, endDate: today }), null) : null,
       ]);
+      const stats = mergeUsageStats(statsRaw, histRange);
       const uu = usage && usage.stats ? usage.stats[String(u.id)] : null;
-      const out = { user: relayUserView(u), range: rng, usage: { requests: stats.total_requests, cost_usd: r2(stats.total_actual_cost ?? stats.total_cost), billed_cost_usd: r2(stats.total_cost), tokens: stats.total_tokens, input_tokens: stats.total_input_tokens, output_tokens: stats.total_output_tokens, cache_read_tokens: stats.total_cache_read_tokens, cache_creation_tokens: stats.total_cache_creation_tokens, average_duration_ms: Math.round(stats.average_duration_ms || 0), endpoints: stats.endpoints || [] }, today_cost_usd: uu ? r2(uu.today_actual_cost) : null, all_time_cost_usd: uu ? r2(uu.total_actual_cost) : null, by_platform: uu ? uu.by_platform : null, breakdown: bd ? bd.users : null, live };
+      const allTimeCost = uu ? r2(Number(uu.total_actual_cost || 0) + Number((histAll && histAll.total_actual_cost) || 0)) : (histAll ? r2(histAll.total_actual_cost) : null);
+      const out = { user: relayUserView(u), range: rng, usage: { requests: stats.total_requests, cost_usd: r2(stats.total_actual_cost ?? stats.total_cost), billed_cost_usd: r2(stats.total_cost), tokens: stats.total_tokens, input_tokens: stats.total_input_tokens, output_tokens: stats.total_output_tokens, cache_read_tokens: stats.total_cache_read_tokens, cache_creation_tokens: stats.total_cache_creation_tokens, average_duration_ms: Math.round(stats.average_duration_ms || 0), endpoints: stats.endpoints || [] }, today_cost_usd: uu ? r2(uu.today_actual_cost) : null, all_time_cost_usd: allTimeCost, by_platform: uu ? uu.by_platform : null, breakdown: bd ? bd.users : null, live };
       return { ...out, summary: `${u.email || u.username}（id ${u.id}）${rng.label}：${stats.total_requests} 次请求，消耗 ${usd(stats.total_actual_cost ?? stats.total_cost)}，${(stats.total_tokens || 0).toLocaleString()} tokens；余额 ${usd(u.balance)}${live ? `；当前 ${live.rpm_now} RPM（近 5 分钟均 ${live.rpm_5m_avg}），${live.tpm_now.toLocaleString()} TPM，上限 ${u.rpm_limit} RPM` : ''}` };
     }
     case 'relay_ranking': {
       const rng = relayRange(input.range, input.from, input.to);
-      const d = await relayGet('/admin/dashboard/users-ranking', { start_date: rng.start_date, end_date: rng.end_date, limit: Math.min(50, Number(input.limit) || 10) });
-      const ranking = (d.ranking || []).map((x, i) => ({ rank: i + 1, user_id: x.user_id, email: x.email, username: x.username, cost_usd: r2(x.actual_cost), requests: x.requests, tokens: x.tokens }));
-      return { range: rng, total_cost_usd: r2(d.total_actual_cost), ranking, summary: `${rng.label}消耗前 ${ranking.length}：${ranking.slice(0, 5).map((x) => `${x.email || x.username} ${usd(x.cost_usd)}`).join('，')}` };
+      const lim = Math.min(50, Number(input.limit) || 10);
+      const [d, histRows] = await Promise.all([
+        relayGet('/admin/dashboard/users-ranking', { start_date: rng.start_date, end_date: rng.end_date, limit: lim }),
+        useDefaultHist ? relayHistSafe(() => relayHist.queryRanking({ startDate: rng.start_date, endDate: rng.end_date, limit: Math.max(lim, 50) }), []) : [],
+      ]);
+      const byUid = new Map();
+      for (const x of d.ranking || []) {
+        byUid.set(Number(x.user_id), { user_id: Number(x.user_id), email: x.email || '', username: x.username || '', cost_usd: Number(x.actual_cost || 0), requests: Number(x.requests || 0), tokens: Number(x.tokens || 0) });
+      }
+      for (const x of histRows || []) {
+        const cur = byUid.get(x.user_id) || { user_id: x.user_id, email: '', username: '', cost_usd: 0, requests: 0, tokens: 0 };
+        cur.cost_usd += Number(x.actual_cost || 0);
+        cur.requests += Number(x.requests || 0);
+        cur.tokens += Number(x.total_tokens || 0);
+        byUid.set(x.user_id, cur);
+      }
+      const ranking = [...byUid.values()]
+        .sort((a, b) => b.cost_usd - a.cost_usd)
+        .slice(0, lim)
+        .map((x, i) => ({ rank: i + 1, ...x, cost_usd: r2(x.cost_usd) }));
+      const totalCost = r2(Number(d.total_actual_cost || 0) + (histRows || []).reduce((a, x) => a + Number(x.actual_cost || 0), 0));
+      return { range: rng, total_cost_usd: totalCost, ranking, summary: `${rng.label}消耗前 ${ranking.length}：${ranking.slice(0, 5).map((x) => `${x.email || x.username || `#${x.user_id}`} ${usd(x.cost_usd)}`).join('，')}` };
     }
     case 'relay_models': {
       const rng = relayRange(input.range, input.from, input.to);
-      const d = await relayGet('/admin/dashboard/models', { start_date: rng.start_date, end_date: rng.end_date, user_id: input.user ? (await relayFindUser(input.user)).id : undefined });
-      const models = (d.models || []).map((m) => ({ model: m.model, requests: m.requests, cost_usd: r2(m.actual_cost ?? m.cost), tokens: m.total_tokens })).sort((a, b) => b.cost_usd - a.cost_usd);
+      const uid = input.user ? (await relayFindUser(input.user)).id : undefined;
+      const [d, histRows] = await Promise.all([
+        relayGet('/admin/dashboard/models', { start_date: rng.start_date, end_date: rng.end_date, user_id: uid }),
+        useDefaultHist ? relayHistSafe(() => relayHist.queryModels({ userId: uid || null, startDate: rng.start_date, endDate: rng.end_date }), []) : [],
+      ]);
+      const byM = new Map();
+      for (const m of d.models || []) {
+        byM.set(m.model, { model: m.model, requests: Number(m.requests || 0), cost_usd: Number(m.actual_cost ?? m.cost ?? 0), tokens: Number(m.total_tokens || 0) });
+      }
+      for (const m of histRows || []) {
+        const cur = byM.get(m.model) || { model: m.model, requests: 0, cost_usd: 0, tokens: 0 };
+        cur.requests += Number(m.requests || 0);
+        cur.cost_usd += Number(m.actual_cost || 0);
+        cur.tokens += Number(m.total_tokens || 0);
+        byM.set(m.model, cur);
+      }
+      const models = [...byM.values()].map((m) => ({ ...m, cost_usd: r2(m.cost_usd) })).sort((a, b) => b.cost_usd - a.cost_usd);
       return { range: rng, models, summary: `${rng.label}按模型：${models.slice(0, 5).map((m) => `${m.model} ${usd(m.cost_usd)}`).join('，')}` };
     }
     case 'relay_trend': {
-      const d = await relayGet('/admin/dashboard/trend', { days: Math.min(90, Number(input.days) || 7) });
-      const trend = (d.trend || []).map((x) => ({ date: x.date, requests: x.requests, cost_usd: r2(x.actual_cost ?? x.cost), tokens: x.total_tokens }));
+      const daysN = Math.min(90, Number(input.days) || 7);
+      const today = todayKey();
+      const startDate = addDays(today, 1 - daysN);
+      const [d, histRows] = await Promise.all([
+        relayGet('/admin/dashboard/trend', { days: daysN }),
+        useDefaultHist ? relayHistSafe(() => relayHist.queryDaily({ startDate, endDate: today }), []) : [],
+      ]);
+      const merged = mergeDailyTrend(d.trend || [], histRows || []);
+      const trend = merged.map((x) => ({ date: x.date, requests: x.requests, cost_usd: r2(x.actual_cost ?? x.cost), tokens: x.total_tokens }));
       return { trend, summary: `近 ${trend.length} 天：${trend.map((x) => `${x.date.slice(5)} ${usd(x.cost_usd)}`).join('，')}` };
     }
     case 'relay_user_keys': {
@@ -2081,31 +2169,41 @@ const daySeries = (trend) => (trend || []).map((x) => ({ date: String(x.date).sl
 function relayCustomerLive(userId, ref, track = null, station = null) {
   const keyId = track && track.key_id ? Number(track.key_id) : 0;
   const stKey = station ? `s${station.id}` : 'env';
+  const useHist = relayHist.appliesTo(station, RELAY.base);
   return relayCached(`cust:${stKey}:${userId}:${keyId ? `k${keyId}` : 'u'}`, 20000, async () => {
     const today = todayKey();
+    const recentStart = addDays(today, -2);
     if (keyId) {
       const filt = { api_key_id: keyId };
-      const [allTime, todayStats, trend, live, days] = await Promise.all([
+      const [allTimeRaw, todayStats, trend, live, days, histAll, histDays] = await Promise.all([
         relayGet('/admin/usage/stats', { ...filt, start_date: ALL_TIME, end_date: today }, station),
         relayGet('/admin/usage/stats', { ...filt, start_date: today, end_date: today }, station),
         relayGet('/admin/dashboard/trend', { granularity: 'hour', days: 1, ...filt }, station).catch(() => ({ trend: [] })),
         relayLiveRateBy(filt, station).catch(() => null),
         relayGet('/admin/dashboard/trend', { granularity: 'day', days: 3, ...filt }, station).catch(() => ({ trend: [] })),
+        useHist ? relayHistSafe(() => relayHist.queryStats({ userId, apiKeyId: keyId, startDate: ALL_TIME, endDate: today }), null) : null,
+        useHist ? relayHistSafe(() => relayHist.queryDaily({ userId, apiKeyId: keyId, startDate: recentStart, endDate: today }), []) : [],
       ]);
+      const allTime = mergeUsageStats(allTimeRaw, histAll);
       const h = hourlySeries(trend.trend);
-      return { kind: 'customer', fetched_at: now(), key_track: { key_id: keyId, key_name: (track && track.key_name) || '' }, user: { id: userId, email: ref || (track && track.key_name) }, total: { requests: allTime.total_requests, cost_usd: r2(allTime.total_actual_cost), tokens: allTime.total_tokens }, today: { requests: todayStats.total_requests, cost_usd: r2(todayStats.total_actual_cost), tokens: todayStats.total_tokens, input_tokens: todayStats.total_input_tokens, output_tokens: todayStats.total_output_tokens }, this_hour: h.this_hour, hourly: h.hourly, daily: daySeries(days.trend).slice(-3), live };
+      const mergedDays = mergeDailyTrend(days.trend, histDays);
+      return { kind: 'customer', fetched_at: now(), key_track: { key_id: keyId, key_name: (track && track.key_name) || '' }, user: { id: userId, email: ref || (track && track.key_name) }, total: { requests: allTime.total_requests, cost_usd: r2(allTime.total_actual_cost), tokens: allTime.total_tokens }, today: { requests: todayStats.total_requests, cost_usd: r2(todayStats.total_actual_cost), tokens: todayStats.total_tokens, input_tokens: todayStats.total_input_tokens, output_tokens: todayStats.total_output_tokens }, this_hour: h.this_hour, hourly: h.hourly, daily: daySeries(mergedDays).slice(-3), live };
     }
-    const [users, allTime, todayStats, trend, live, days] = await Promise.all([
+    const [users, allTimeRaw, todayStats, trend, live, days, histAll, histDays] = await Promise.all([
       relayGet('/admin/users', { page: 1, page_size: 20, search: ref || String(userId) }, station).catch(() => ({ items: [] })),
       relayGet('/admin/usage/stats', { user_id: userId, start_date: ALL_TIME, end_date: today }, station),
       relayGet('/admin/usage/stats', { user_id: userId, start_date: today, end_date: today }, station),
       relayGet('/admin/dashboard/trend', { granularity: 'hour', days: 1, user_id: userId }, station).catch(() => ({ trend: [] })),
       relayLiveRateBy({ user_id: userId }, station).catch(() => null),
       relayGet('/admin/dashboard/trend', { granularity: 'day', days: 3, user_id: userId }, station).catch(() => ({ trend: [] })),
+      useHist ? relayHistSafe(() => relayHist.queryStats({ userId, startDate: ALL_TIME, endDate: today }), null) : null,
+      useHist ? relayHistSafe(() => relayHist.queryDaily({ userId, startDate: recentStart, endDate: today }), []) : [],
     ]);
+    const allTime = mergeUsageStats(allTimeRaw, histAll);
     const u = (users.items || []).find((x) => x.id === Number(userId)) || null;
     const h = hourlySeries(trend.trend);
-    return { kind: 'customer', fetched_at: now(), user: u ? relayUserView(u) : { id: userId, email: ref }, total: { requests: allTime.total_requests, cost_usd: r2(allTime.total_actual_cost), tokens: allTime.total_tokens }, today: { requests: todayStats.total_requests, cost_usd: r2(todayStats.total_actual_cost), tokens: todayStats.total_tokens, input_tokens: todayStats.total_input_tokens, output_tokens: todayStats.total_output_tokens }, this_hour: h.this_hour, hourly: h.hourly, daily: daySeries(days.trend).slice(-3), live };
+    const mergedDays = mergeDailyTrend(days.trend, histDays);
+    return { kind: 'customer', fetched_at: now(), user: u ? relayUserView(u) : { id: userId, email: ref }, total: { requests: allTime.total_requests, cost_usd: r2(allTime.total_actual_cost), tokens: allTime.total_tokens }, today: { requests: todayStats.total_requests, cost_usd: r2(todayStats.total_actual_cost), tokens: todayStats.total_tokens, input_tokens: todayStats.total_input_tokens, output_tokens: todayStats.total_output_tokens }, this_hour: h.this_hour, hourly: h.hourly, daily: daySeries(mergedDays).slice(-3), live };
   });
 }
 // 供应商：上游账号状态、累计 / 今日 / 本小时消耗（标准价）、近 3 天每日消耗
@@ -2289,6 +2387,10 @@ setTimeout(relayAccrualSweep, 20 * 1000).unref();
 setInterval(relayAccrualSweep, 5 * 60 * 1000).unref();
 
 // 中转制预估利润的同步：客户按分组的消耗 + 上游每个 key 的消耗
+// 支持历史库（sub2api-hist-postgres）与现网库无缝合并：
+// - dateMode === 'hist'（如 <= 2026-11-05）：直接从历史库按天×分组一次性查出
+// - dateMode === 'split'（如 2026-11-06）：历史库(00:00~08:00) + 现网 API(08:00~24:00) 叠加
+// - dateMode === 'live'（如 >= 2026-11-07）或非主站：沿用现网 API
 async function syncRelayGroupUsage(partyId = null, opts = {}) {
   const today = todayKey();
   const groups = db.prepare("SELECT g.party_id, g.group_name, g.station_id, pa.relay_id, pa.start_date FROM relay_customer_groups g JOIN parties pa ON pa.id = g.party_id WHERE pa.relay_id IS NOT NULL" + (partyId ? ' AND g.party_id = ?' : '')).all(...(partyId ? [partyId] : []));
@@ -2299,13 +2401,15 @@ async function syncRelayGroupUsage(partyId = null, opts = {}) {
     byUser.get(k).push(g);
   }
   const putUsage = db.prepare('INSERT INTO relay_group_usage (party_id, group_name, date, usd) VALUES (?, ?, ?, ?) ON CONFLICT (party_id, group_name, date) DO UPDATE SET usd = excluded.usd');
+  const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
   for (const [, rows] of byUser) {
     const station = db.prepare('SELECT * FROM stations WHERE id = ?').get(rows[0].station_id);
     if (!station) continue;
     const want = new Set(rows.map((r) => r.group_name));
     const first = db.prepare('SELECT MIN(date) AS d FROM relay_group_usage WHERE party_id = ?').get(rows[0].party_id);
     const windows = [];
-    if (opts.days) windows.push([addDays(today, 1 - opts.days), today]);
+    if (RE_DATE.test(opts.from || '') && RE_DATE.test(opts.to || '')) windows.push([opts.from, opts.to]);
+    else if (opts.days) windows.push([addDays(today, 1 - opts.days), today]);
     else if (partyId) windows.push([RE_DATE.test(rows[0].start_date) ? rows[0].start_date : '2024-01-01', today]);
     else {
       windows.push([addDays(today, -6), today]);
@@ -2313,33 +2417,160 @@ async function syncRelayGroupUsage(partyId = null, opts = {}) {
       else if (first.d > '2024-01-01') windows.push([addDays(first.d, -30), addDays(first.d, -1)]);
     }
     const dates = [];
+    const seenDates = new Set();
     for (const [from0, to0] of windows) {
       let from = from0 > today ? today : from0, to = to0 > today ? today : to0;
       if (from > to) continue;
-      for (let date = from; date <= to; date = addDays(date, 1)) dates.push(date);
+      for (let date = from; date <= to; date = addDays(date, 1)) {
+        if (!seenDates.has(date)) { seenDates.add(date); dates.push(date); }
+      }
     }
-    const queue = [...dates];
-    await Promise.all(Array.from({ length: Math.min(6, queue.length) }, async () => {
-      while (queue.length) {
-        const date = queue.shift();
+    if (!dates.length) continue;
+
+    // 命中主聚合站且区间涉及历史库边界时，1 条 SQL 一次性拉完历史库按日×分组用量
+    const useHist = relayHist.appliesTo(station, RELAY.base);
+    const histDates = useHist ? dates.filter((d) => relayHist.dateMode(d) !== 'live') : [];
+    const histByDate = new Map(); // date -> Map(group_name -> usd)
+    if (histDates.length) {
+      histDates.sort();
+      const [allGroups, histRows] = await Promise.all([
+        relayAllGroups(station).catch(() => []),
+        relayHistSafe(() => relayHist.queryGroupsByDay({ userId: rows[0].relay_id, startDate: histDates[0], endDate: histDates[histDates.length - 1] }), []),
+      ]);
+      const idToName = new Map(allGroups.map((g) => [Number(g.id), g.name]));
+      for (const hr of histRows || []) {
+        const gname = idToName.get(Number(hr.group_id));
+        if (!gname || !want.has(gname)) continue;
+        if (!histByDate.has(hr.date)) histByDate.set(hr.date, new Map());
+        const dm = histByDate.get(hr.date);
+        // 站点可能存在同名不同 ID 的分组（如 vertex gemini / aws-18专用），按名称累加
+        dm.set(gname, (dm.get(gname) || 0) + (Number(hr.actual_cost) || 0));
+      }
+    }
+
+    // 1. 纯历史日（<= 2026-11-05）：直接落库，不打现网 HTTP
+    const liveQueue = [];
+    for (const date of dates) {
+      const mode = useHist ? relayHist.dateMode(date) : 'live';
+      if (mode === 'hist') {
+        const dm = histByDate.get(date);
+        if (!dm || !dm.size) continue;
+        let hasPositive = false;
+        for (const v of dm.values()) if (v > 0) { hasPositive = true; break; }
+        if (!hasPositive) continue;
+        for (const name of want) putUsage.run(rows[0].party_id, name, date, round4(dm.get(name) || 0));
+      } else {
+        liveQueue.push({ date, split: mode === 'split' });
+      }
+    }
+
+    // 2. 边界日（split，如 2026-11-06 需叠加历史 00:00~08:00 + 现网 08:00~24:00）与纯现网日
+    await Promise.all(Array.from({ length: Math.min(6, liveQueue.length) }, async () => {
+      while (liveQueue.length) {
+        const { date, split } = liveQueue.shift();
         try {
           const d = await relayGet('/admin/dashboard/groups', { user_id: rows[0].relay_id, start_date: date, end_date: date }, station);
-          const groups = (d && d.groups) || [];
-          // 中转站对较老的日期经常返回空列表，不能据此把已有用量改成 0
-          if (!groups.length) continue;
-          const seen = new Set();
-          for (const g of groups) {
+          const gs = (d && d.groups) || [];
+          const merged = new Map();
+          if (split && histByDate.has(date)) {
+            for (const [name, usd] of histByDate.get(date)) merged.set(name, (merged.get(name) || 0) + usd);
+          }
+          for (const g of gs) {
             const name = g.group_name || g.name;
             if (!want.has(name)) continue;
-            seen.add(name);
-            putUsage.run(rows[0].party_id, name, date, Number(g.actual_cost ?? g.cost) || 0);
+            merged.set(name, (merged.get(name) || 0) + (Number(g.actual_cost ?? g.cost) || 0));
           }
-          if (!seen.size) continue;
-          for (const name of want) if (!seen.has(name)) putUsage.run(rows[0].party_id, name, date, 0);
+          // 中转站对较老的日期经常返回空列表，不能据此把已有用量改成 0
+          if (!merged.size) continue;
+          for (const name of want) putUsage.run(rows[0].party_id, name, date, round4(merged.get(name) || 0));
         } catch (e) { console.error(`[relay] 分组用量 ${rows[0].relay_id} ${date} 失败：${e.message}`); }
       }
     }));
   }
+}
+
+// 非分组收费客户（含按管理员 Key 追踪，如 vt中转→闪马）：按日合并历史库 + 现网趋势写入每日挂账，消除 11.6 前漏算与期初堆积
+async function syncRelayNonGroupDaily(pa) {
+  if (!pa || !pa.relay_id || pa.archived || pa.kind !== 'customer') return null;
+  if (pa.relay_track_mode !== 'key' && customerGroupPrices(pa.id).length) return null;
+  const station = stationOfParty(pa);
+  const track = relayTrackOf(pa);
+  const keyId = track && track.key_id ? Number(track.key_id) : 0;
+  const useHist = relayHist.appliesTo(station, RELAY.base);
+  const today = todayKey();
+  const filt = keyId ? { api_key_id: keyId } : { user_id: pa.relay_id };
+  const [liveTrend, histDaily, liveAllRaw, histAll] = await Promise.all([
+    relayGet('/admin/dashboard/trend', { granularity: 'day', days: 90, ...filt }, station).catch(() => ({ trend: [] })),
+    useHist ? relayHistSafe(() => relayHist.queryDaily({ userId: pa.relay_id, apiKeyId: keyId || null, startDate: ALL_TIME, endDate: today }), []) : [],
+    relayGet('/admin/usage/stats', { ...filt, start_date: ALL_TIME, end_date: today }, station),
+    useHist ? relayHistSafe(() => relayHist.queryStats({ userId: pa.relay_id, apiKeyId: keyId || null, startDate: ALL_TIME, endDate: today }), null) : null,
+  ]);
+  const merged = mergeDailyTrend(liveTrend.trend || [], histDaily || []);
+  const allTime = mergeUsageStats(liveAllRaw, histAll);
+  const totalUsd = r2(Number(allTime.total_actual_cost || 0));
+  const ratio = Number(pa.ratio) > 0 ? Number(pa.ratio) : 1;
+  const cur = pa.currency || 'CNY';
+  const rates = getRates();
+  const rate = cur === 'CNY' ? 1 : rates[cur];
+  const upsert = (ref, date, amount, usdVal, note) => {
+    amount = r2(amount);
+    const ex = q.recordByRef.get(ref);
+    if (amount <= 0) { if (ex) q.deleteRecord.run(ex.id); return; }
+    if (ex) {
+      if (Math.abs(ex.amount - amount) >= 0.01 || ex.currency !== cur || ex.note !== note) qRelayRec.upd.run(amount, cur, rate, note, ex.id);
+      return;
+    }
+    q.insertRecord.run(pa.id, 'due', amount, cur, rate, date, note, 'relay', ref, null, null, now(), pa.project_id);
+  };
+
+  let dailySumUsd = 0;
+  let earliest = null;
+  for (const x of merged) {
+    const u = r2(Number(x.actual_cost ?? x.cost) || 0);
+    if (u <= 0) continue;
+    dailySumUsd += u;
+    if (!earliest || x.date < earliest) earliest = x.date;
+    upsert(`relay:${pa.id}:${x.date}`, x.date, usdToCur(u * ratio, cur, rates), u, `中转站消耗 $${u.toFixed(2)} × 折扣 ${ratio}`);
+  }
+  const openingRef = `relay:${pa.id}:opening`;
+  const remainder = r2(totalUsd - dailySumUsd);
+  const exOpen = q.recordByRef.get(openingRef);
+  if (remainder > 0.05) {
+    const openDate = earliest ? addDays(earliest, -1) : today;
+    upsert(openingRef, openDate, usdToCur(remainder * ratio, cur, rates), remainder, `期初（${openDate} 及以前）累计消耗 $${remainder.toFixed(2)} × 折扣 ${ratio}`);
+  } else if (exOpen) {
+    q.deleteRecord.run(exOpen.id);
+  }
+  q.putSetting.run(`relay_opening:${pa.id}`, '1');
+  return { party_id: pa.id, name: pa.name, days: merged.filter((x) => Number(x.actual_cost ?? x.cost) > 0).length, total_usd: totalUsd, daily_usd: r2(dailySumUsd), opening_usd: remainder > 0.05 ? remainder : 0 };
+}
+
+// 统一回补中转客户的历史用量（分组客户回补 relay_group_usage + 自动挂账；非分组/按 Key 客户按日补齐挂账）
+async function backfillRelayHistory(partyId = null) {
+  relayCache.clear();
+  relayHist.clearCache();
+  const histBoundary = dayKey(relayHist.untilDate().toISOString());
+  const results = [];
+  const targets = partyId
+    ? [q.party.get(Number(partyId))].filter((p) => p && p.kind === 'customer' && p.relay_id && !p.archived)
+    : db.prepare("SELECT pa.*, p.name AS project_name FROM parties pa LEFT JOIN projects p ON p.id = pa.project_id WHERE pa.kind = 'customer' AND pa.relay_id IS NOT NULL AND pa.archived = 0 ORDER BY pa.id").all();
+  for (const pa of targets) {
+    const hasGroups = pa.relay_track_mode !== 'key' && customerGroupPrices(pa.id).length > 0;
+    if (hasGroups) {
+      await syncRelayGroupUsage(pa.id, { from: '2026-08-01', to: histBoundary });
+      const live = await partyLive(pa);
+      results.push({ party_id: pa.id, name: pa.name, mode: 'group', total_usd: live?.total?.cost_usd ?? null, due: live?.settlement?.due ?? null, currency: pa.currency });
+    } else {
+      const r = await syncRelayNonGroupDaily(pa);
+      const live = await partyLive(pa);
+      results.push({ party_id: pa.id, name: pa.name, mode: pa.relay_track_mode === 'key' ? 'key' : 'user', ...r, due: live?.settlement?.due ?? null, currency: pa.currency });
+    }
+  }
+  profitCache = null;
+  await refreshRelayForecasts();
+  dataVersion += 1;
+  broadcast('changed', { version: dataVersion, byId: 0, by: '历史回补', text: '', at: now() });
+  return { count: results.length, results };
 }
 async function syncRelayEstimate() {
   await syncRelayGroupUsage();
@@ -2412,7 +2643,11 @@ async function linkPartyRelay(user, partyId, ref, opts = {}) {
     dataChanged(user, `把供应商「${pa.name}」绑定到中转站账号「${a.name}」（id ${a.id}）· ${pa.project_name}`);
   }
   resetRelayAccrual(pa.id);
-  return partyLive(q.party.get(pa.id));
+  const updated = q.party.get(pa.id);
+  if (updated && updated.kind === 'customer' && (updated.relay_track_mode === 'key' || !customerGroupPrices(updated.id).length)) {
+    try { await syncRelayNonGroupDaily(updated); } catch (e) { console.error('[relay] 绑定后历史按日回补失败：', e.message); }
+  }
+  return partyLive(updated);
 }
 
 const RELAY_TOOLS = [
@@ -3496,6 +3731,14 @@ async function partyAllowedGroupNames(station, relayId) {
       if (name) names.add(name);
     }
   } catch { /* 用量接口没有就只靠用户详情 */ }
+  if (relayHist.appliesTo(station, RELAY.base)) {
+    const histGids = await relayHistSafe(() => relayHist.queryUserGroupIds(relayId), []);
+    const idToName = new Map(all.map((g) => [Number(g.id), g.name]));
+    for (const gid of histGids || []) {
+      const name = idToName.get(Number(gid));
+      if (name) names.add(name);
+    }
+  }
   return [...names];
 }
 // 中转制客户的分组收费：body.groups = [{ group_name, price, mode }]，mode = discount（折扣）或 cny（元/刀）
@@ -3682,6 +3925,14 @@ app.get('/api/relay/search', auth, async (req, res, next) => {
     if (req.query.kind === 'supplier') { const d = await relayGet('/admin/accounts', { page: 1, page_size: 50, search: qs }); return res.json({ items: (d.items || []).map(relayAccountView) }); }
     const d = await relayGet('/admin/users', { page: 1, page_size: 20, search: qs });
     res.json({ items: (d.items || []).map(relayUserView) });
+  } catch (e) { next(e); }
+});
+app.post('/api/relay/backfill-history', auth, async (req, res, next) => {
+  try {
+    if (!relayHist.isEnabled()) return fail(res, 400, '未配置历史用量库（PG_HIST_*）');
+    const partyId = req.body && req.body.party_id ? Number(req.body.party_id) : null;
+    const out = await backfillRelayHistory(partyId);
+    res.json(out);
   } catch (e) { next(e); }
 });
 app.delete('/api/parties/:id', auth, (req, res) => { ops.deleteParty(req.user, req.params.id); res.json({ ok: true }); });
